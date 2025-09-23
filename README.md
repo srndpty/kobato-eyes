@@ -18,3 +18,17 @@ kobato-eyes is a Windows-first desktop application for indexing local images wit
 ## Testing
 
 - Run unit tests: `pytest`
+
+## Packaging
+
+1. Ensure dependencies are installed: `pip install -e .[dev]`
+2. Generate a Windows binary: `pyinstaller tools/kobato-eyes.spec`
+3. Bundled artifacts are written to `dist/kobato-eyes/`.
+4. The application stores user settings in `%APPDATA%\\kobato-eyes\\config.yaml`.
+
+## Known Limitations
+
+- The packaged ONNX Runtime defaults to CUDA; ship a CPU build if target systems lack NVIDIA GPUs.
+- Place ONNX model weights alongside the executable before launching the tagging pipeline.
+- Headless execution is not yet supported; the duplicate pipeline relies on the PyQt6 GUI event loop.
+

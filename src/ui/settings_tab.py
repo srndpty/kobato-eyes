@@ -18,7 +18,8 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from core.pipeline import PipelineSettings
+from core.config import load_settings, save_settings
+from core.settings import PipelineSettings
 
 
 class SettingsTab(QWidget):
@@ -48,13 +49,7 @@ class SettingsTab(QWidget):
         self._ssim_spin.setValue(0.9)
 
         self._model_combo = QComboBox(self)
-        self._model_combo.addItems(
-            [
-                "clip-vit",
-                "ViT-H-14",
-                "RN50",
-            ]
-        )
+        self._model_combo.addItems(["clip-vit", "ViT-H-14", "RN50"])
 
         apply_button = QPushButton("Apply", self)
         apply_button.clicked.connect(self._emit_settings)
@@ -71,6 +66,8 @@ class SettingsTab(QWidget):
         layout.addLayout(form)
         layout.addStretch()
         layout.addWidget(apply_button)
+
+        self._load_initial_settings()
 
     def load_settings(self, settings: PipelineSettings) -> None:
         self._roots_edit.setPlainText("\n".join(str(path) for path in settings.roots))
@@ -91,7 +88,12 @@ class SettingsTab(QWidget):
             ssim_threshold=self._ssim_spin.value(),
             model_name=self._model_combo.currentText(),
         )
+        save_settings(settings)
         self.settings_applied.emit(settings)
+
+    def _load_initial_settings(self) -> None:
+        settings = load_settings()
+        self.load_settings(settings)
 
     @staticmethod
     def _lines(edit: QPlainTextEdit) -> Iterable[str]:

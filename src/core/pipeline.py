@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
 from pathlib import Path
 from queue import Queue
 from typing import Iterable, Optional, Set
@@ -12,6 +11,7 @@ from PyQt6.QtCore import QObject, QTimer
 
 from core.jobs import BatchJob, JobManager
 from core.scanner import DEFAULT_EXTENSIONS
+from core.settings import PipelineSettings
 from core.tag_job import TagJobConfig, run_tag_job
 from core.watcher import DirectoryWatcher, FileEvent
 from db.connection import get_conn
@@ -20,16 +20,6 @@ from index.hnsw import HNSWIndex
 from tagger.base import ITagger
 
 logger = logging.getLogger(__name__)
-
-
-@dataclass
-class PipelineSettings:
-    roots: list[Path] = field(default_factory=list)
-    excluded: list[Path] = field(default_factory=list)
-    hamming_threshold: int = 8
-    cosine_threshold: float = 0.2
-    ssim_threshold: float = 0.9
-    model_name: str = "clip-vit"
 
 
 class _FileProcessJob(BatchJob):
