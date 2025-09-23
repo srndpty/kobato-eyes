@@ -13,6 +13,7 @@ from PyQt6.QtGui import QPixmap, QStandardItem, QStandardItemModel
 from PyQt6.QtWidgets import (
     QAbstractItemView,
     QButtonGroup,
+    QGroupBox,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -72,6 +73,16 @@ class TagsTab(QWidget):
         self._load_more_button.setEnabled(False)
         self._status_label = QLabel(self)
         self._status_label.setWordWrap(True)
+
+        self._debug_group = QGroupBox("Debug SQL", self)
+        self._debug_group.setCheckable(True)
+        self._debug_group.setChecked(False)
+        self._debug_group.setVisible(False)
+        debug_layout = QVBoxLayout(self._debug_group)
+        self._debug_where = QLabel("WHERE: 1=1", self._debug_group)
+        self._debug_params = QLabel("Params: []", self._debug_group)
+        debug_layout.addWidget(self._debug_where)
+        debug_layout.addWidget(self._debug_params)
 
         self._placeholder = QWidget(self)
         placeholder_layout = QVBoxLayout(self._placeholder)
@@ -148,6 +159,7 @@ class TagsTab(QWidget):
         layout.addWidget(self._status_label)
         layout.addWidget(self._stack)
         layout.addWidget(self._load_more_button)
+        layout.addWidget(self._debug_group)
 
         self._search_button.clicked.connect(self._on_search_clicked)
         self._load_more_button.clicked.connect(self._on_load_more_clicked)
@@ -211,6 +223,10 @@ class TagsTab(QWidget):
             self._status_label.setText(str(exc))
             self._set_busy(False)
             return
+
+        self._debug_where.setText(f"WHERE: {fragment.where}")
+        self._debug_params.setText(f"Params: {fragment.params}")
+        self._debug_group.setVisible(bool(fragment.where.strip() and fragment.where.strip() != "1=1"))
 
         self._current_query = query
         self._current_where = fragment.where
