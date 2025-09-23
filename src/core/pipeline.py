@@ -241,7 +241,16 @@ def run_index_once(
     tagger_override: ITagger | None = None,
     embedder_override: EmbedderProtocol | None = None,
 ) -> dict[str, object]:
-    """Perform a full indexing pass across all configured roots."""
+    """Perform a full indexing pass across all configured roots.
+
+    Returns:
+        dict[str, object]: Summary statistics about the run. The dictionary
+            always includes at least the following keys used by the UI layer:
+            ``scanned`` (int, total files visited), ``tagged`` (int, files
+            tagged during the run), ``embedded`` (int, files embedded), and
+            ``elapsed_sec`` (float, total elapsed seconds). Additional keys may
+            be provided for more granular diagnostics.
+    """
     start_time = time.perf_counter()
     settings = settings or load_settings()
     ensure_dirs()

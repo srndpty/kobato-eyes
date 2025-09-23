@@ -2,13 +2,23 @@
 
 from __future__ import annotations
 
+import logging
 import subprocess
 import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Iterable, List, Optional
 
-from PyQt6.QtCore import QModelIndex, QObject, QRunnable, QSize, Qt, QThreadPool, pyqtSignal
+from PyQt6.QtCore import (
+    QModelIndex,
+    QObject,
+    QRunnable,
+    QSize,
+    Qt,
+    QThreadPool,
+    QTimer,
+    pyqtSignal,
+)
 from PyQt6.QtGui import QPixmap, QStandardItem, QStandardItemModel
 from PyQt6.QtWidgets import (
     QAbstractItemView,
@@ -32,6 +42,8 @@ from db.connection import get_conn
 from db.repository import search_files
 from utils.image_io import get_thumbnail
 from utils.paths import ensure_dirs, get_db_path
+
+logger = logging.getLogger(__name__)
 
 
 class _ThumbnailSignal(QObject):
@@ -57,6 +69,29 @@ class _ThumbnailTask(QRunnable):
     def run(self) -> None:  # noqa: D401
         pixmap = get_thumbnail(self._path, self._width, self._height)
         self._signal.finished.emit(self._row, pixmap)
+
+
+class _IndexSignals(QObject):
+    started = pyqtSignal()
+    finished = pyqtSignal(dict)
+    failed = pyqtSignal(str)
+
+
+class _IndexTask(QRunnable):
+    def __init__(self, db_path: Path) -> None:
+        super().__init__()
+        self._db_path = db_path
+        self.signals = _IndexSignals()
+
+    def run(self) -> None:  # noqa: D401
+        self.signals.started.emit()
+        try:
+            stats = run_index_once(self._db_path)
+        except Exception as exc:  # pragma: no cover - defensive logging
+            logger.exception("Indexing failed")
+            self.signals.failed.emit(str(exc))
+        else:
+            self.signals.finished.emit(stats)
 
 
 class TagsTab(QWidget):
@@ -185,21 +220,50 @@ class TagsTab(QWidget):
         self._thumb_signal.finished.connect(self._apply_thumbnail)
         self._pending_thumbs: set[int] = set()
 
+        self._index_pool = QThreadPool(self)
+        self._index_pool.setMaxThreadCount(1)
+        self._search_busy = False
+        self._indexing_active = False
+        self._can_load_more = False
+
+        self._toast_label = QLabel("", self)
+        self._toast_label.setObjectName("toastLabel")
+        self._toast_label.setStyleSheet(
+            "#toastLabel {"
+            "color: white;"
+            "background-color: rgba(0, 0, 0, 180);"
+            "border-radius: 6px;"
+            "padding: 8px 12px;"
+            "}"
+        )
+        self._toast_label.setVisible(False)
+        self._toast_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._toast_timer = QTimer(self)
+        self._toast_timer.setSingleShot(True)
+        self._toast_timer.timeout.connect(lambda: self._toast_label.setVisible(False))
+
         self._show_placeholder(True)
+        self._update_control_states()
 
     def _show_placeholder(self, show: bool) -> None:
         if show:
             self._stack.setCurrentWidget(self._placeholder)
-            self._load_more_button.setEnabled(False)
+            self._can_load_more = False
         else:
             target = self._table_view if self._table_button.isChecked() else self._grid_view
             self._stack.setCurrentWidget(target)
+        self._update_control_states()
 
     def _on_index_now(self) -> None:
+        if self._indexing_active:
+            return
         db_row = self._conn.execute("PRAGMA database_list").fetchone()
         db_file = Path(db_row[2]) if db_row and db_row[2] else get_db_path()
-        run_index_once(db_file)
-        self._status_label.setText("Indexing requested.")
+        task = _IndexTask(db_file)
+        task.signals.started.connect(self._handle_index_started)
+        task.signals.finished.connect(self._handle_index_finished)
+        task.signals.failed.connect(self._handle_index_failed)
+        self._index_pool.start(task)
 
     def _on_table_toggled(self, checked: bool) -> None:
         if checked:
@@ -212,9 +276,10 @@ class TagsTab(QWidget):
             self._table_button.setChecked(False)
 
     def _set_busy(self, busy: bool) -> None:
-        self._search_button.setEnabled(not busy)
+        self._search_busy = busy
         if busy:
-            self._load_more_button.setEnabled(False)
+            self._can_load_more = False
+        self._update_control_states()
 
     def _on_search_clicked(self) -> None:
         query = self._query_input.text().strip()
@@ -274,8 +339,9 @@ class TagsTab(QWidget):
             self._show_placeholder(False)
         self._append_rows(rows)
         self._offset += len(rows)
-        self._load_more_button.setEnabled(len(rows) == self._PAGE_SIZE)
+        self._can_load_more = len(rows) == self._PAGE_SIZE
         self._set_busy(False)
+        self._update_control_states()
 
     def _append_rows(self, rows: Iterable[dict[str, object]]) -> None:
         for record in rows:
@@ -418,5 +484,54 @@ class TagsTab(QWidget):
             grid_item.setEditable(False)
             self._grid_model.appendRow(grid_item)
 
+
+    def _update_control_states(self) -> None:
+        search_enabled = not self._search_busy and not self._indexing_active
+        input_enabled = not self._indexing_active and not self._search_busy
+        self._search_button.setEnabled(search_enabled)
+        self._query_input.setEnabled(input_enabled)
+        self._load_more_button.setEnabled(
+            self._can_load_more and not self._indexing_active and not self._search_busy
+        )
+        self._placeholder_button.setEnabled(not self._indexing_active)
+        self._table_button.setEnabled(not self._indexing_active)
+        self._grid_button.setEnabled(not self._indexing_active)
+
+    def _handle_index_started(self) -> None:
+        self._indexing_active = True
+        self._status_label.setText("Indexing…")
+        self._update_control_states()
+
+    def _handle_index_finished(self, stats: dict[str, object]) -> None:
+        self._indexing_active = False
+        elapsed = float(stats.get("elapsed_sec", 0.0) or 0.0)
+        self._status_label.setText(f"Indexing complete in {elapsed:.2f}s.")
+        self._show_toast(
+            f"Indexed: {int(stats.get('scanned', 0))} files / "
+            f"Tagged: {int(stats.get('tagged', 0))} / "
+            f"Embedded: {int(stats.get('embedded', 0))}"
+        )
+        self._update_control_states()
+        QTimer.singleShot(0, self._on_search_clicked)
+
+    def _handle_index_failed(self, message: str) -> None:
+        self._indexing_active = False
+        self._status_label.setText(f"Indexing failed: {message}")
+        self._show_toast(f"Indexing failed: {message}")
+        self._update_control_states()
+
+    def _show_toast(self, message: str, *, timeout_ms: int = 4000) -> None:
+        self._toast_timer.stop()
+        self._toast_label.setText(message)
+        self._toast_label.adjustSize()
+        width = self.width()
+        height = self.height()
+        label_width = self._toast_label.width()
+        label_height = self._toast_label.height()
+        x = max(0, (width - label_width) // 2)
+        y = max(0, height - label_height - 16)
+        self._toast_label.move(x, y)
+        self._toast_label.setVisible(True)
+        self._toast_timer.start(timeout_ms)
 
 __all__ = ["TagsTab"]
