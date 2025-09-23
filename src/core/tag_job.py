@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-import hashlib
 import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
 
 from db.repository import replace_file_tags, update_fts, upsert_file, upsert_tags
 from tagger.base import ITagger, MaxTagsMap, TagResult, ThresholdMap
+from utils.hash import compute_sha256
 from utils.image_io import safe_load_image
 
 
@@ -26,16 +26,6 @@ class TagJobOutput:
 
     file_id: int
     tag_result: TagResult
-
-
-def _compute_sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            if not chunk:
-                break
-            digest.update(chunk)
-    return digest.hexdigest()
 
 
 def run_tag_job(
@@ -65,7 +55,7 @@ def run_tag_job(
     tag_result = results[0]
 
     stat = source.stat()
-    sha256_hex = _compute_sha256(source)
+    sha256_hex = compute_sha256(source)
     file_id = upsert_file(
         conn,
         path=str(source),
