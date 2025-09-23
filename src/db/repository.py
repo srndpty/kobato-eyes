@@ -109,6 +109,65 @@ def upsert_embedding(
         conn.execute(query, (file_id, model, int(dim), payload))
 
 
+def search_files(
+    conn: sqlite3.Connection,
+    where_sql: str,
+    params: list[object] | tuple[object, ...],
+    *,
+    order_by: str = "f.mtime DESC",
+    limit: int = 200,
+    offset: int = 0,
+) -> list[dict[str, object]]:
+    """Search files using a prebuilt WHERE clause and return enriched rows."""
+
+    def _has_column(name: str) -> bool:
+        cursor = conn.execute("PRAGMA table_info(files)")
+        return any(row[1] == name for row in cursor.fetchall())
+
+    has_width = _has_column("width")
+    has_height = _has_column("height")
+
+    select_parts = [
+        "f.id",
+        "f.path",
+        "f.size",
+        "f.mtime",
+    ]
+    select_parts.append("f.width AS width" if has_width else "NULL AS width")
+    select_parts.append("f.height AS height" if has_height else "NULL AS height")
+    select_clause = ", ".join(select_parts)
+
+    limit = max(0, int(limit))
+    offset = max(0, int(offset))
+
+    query = f"SELECT {select_clause} FROM files f WHERE {where_sql} ORDER BY {order_by} LIMIT ? OFFSET ?"
+
+    cursor = conn.execute(query, (*params, limit, offset))
+    rows = cursor.fetchall()
+
+    results: list[dict[str, object]] = []
+    for row in rows:
+        file_id = row["id"]
+        tag_rows = conn.execute(
+            "SELECT t.name, ft.score FROM file_tags ft JOIN tags t ON t.id = ft.tag_id "
+            "WHERE ft.file_id = ? ORDER BY ft.score DESC LIMIT 5",
+            (file_id,),
+        ).fetchall()
+        top_tags = [(tag_row["name"], float(tag_row["score"])) for tag_row in tag_rows]
+        results.append(
+            {
+                "id": file_id,
+                "path": row["path"],
+                "width": row["width"] if has_width else None,
+                "height": row["height"] if has_height else None,
+                "size": row["size"],
+                "mtime": row["mtime"],
+                "top_tags": top_tags,
+            }
+        )
+    return results
+
+
 __all__ = [
     "upsert_file",
     "upsert_tags",
@@ -116,4 +175,5 @@ __all__ = [
     "update_fts",
     "upsert_signatures",
     "upsert_embedding",
+    "search_files",
 ]
