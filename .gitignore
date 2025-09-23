@@ -206,3 +206,26 @@ marimo/_static/
 marimo/_lsp/
 __marimo__/
 !tools/*.spec
+
+# SQLite (runtime)
+*.db-wal
+*.db-shm
+*.sqlite-wal
+*.sqlite-shm
+
+# If you don't want to version the working DB itself:
+kobato-eyes.db
+*.sqlite
+*.sqlite3
+
+# runtime data
+/dev-data/
+/dev-data/db/
+/dev-data/index/
+/dev-data/cache/
+
+# keep the folders
+!dev-data/.gitkeep
+!dev-data/db/.gitkeep
+!dev-data/index/.gitkeep
+!dev-data/cache/.gitkeep
