@@ -2,9 +2,18 @@
 
 from __future__ import annotations
 
+import os
 import sys
 
+from PyQt6.QtCore import Qt
+from PyQt6.QtGui import QGuiApplication
 from PyQt6.QtWidgets import QApplication, QMainWindow, QTabWidget
+
+if os.environ.get("KOE_HEADLESS", "0") == "1":
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    os.environ.setdefault("QT_OPENGL", "software")
+
+QGuiApplication.setAttribute(Qt.ApplicationAttribute.AA_UseSoftwareOpenGL)
 
 from ui.dup_tab import DupTab
 from ui.settings_tab import SettingsTab

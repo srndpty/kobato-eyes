@@ -11,7 +11,7 @@ import pytest
 from PIL import Image
 
 from core.pipeline import run_index_once
-from core.settings import EmbedModelSettings, PipelineSettings, TaggerSettings
+from core.settings import EmbedModel, PipelineSettings, TaggerSettings
 from db.connection import get_conn
 from db.schema import apply_schema
 from tagger.dummy import DummyTagger
@@ -66,7 +66,7 @@ def test_run_index_once_processes_images(tmp_path: Path, temp_db: Path) -> None:
         allow_exts=[".png"],
         batch_size=2,
         tagger=TaggerSettings(name="dummy"),
-        embed_model=EmbedModelSettings(name="dummy", pretrained="dummy", device="cpu", dims=4),
+        embed_model=EmbedModel(name="dummy", device="cpu", dim=4),
         index_dir=str(tmp_path / "index"),
     )
 

@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass, field
+from dataclasses import InitVar, dataclass, field
 from pathlib import Path
-from typing import Sequence
+from typing import Any, Mapping, Sequence
+
+import yaml
 
 DEFAULT_EXCLUDED = [
     str(Path.home() / "AppData"),
@@ -74,6 +76,7 @@ class PipelineSettings:
     excluded: list[str] = field(default_factory=_default_excluded)
     allow_exts: set[str] = field(default_factory=_default_allow_exts)
     batch_size: int = 8
+    model_name_init: InitVar[str | None] = None
     hamming_threshold: int = 10
     cosine_threshold: float = 0.90
     ssim_threshold: float = 0.92
@@ -81,7 +84,7 @@ class PipelineSettings:
     embed_model: EmbedModel = field(default_factory=EmbedModel)
     index_dir: str | None = None
 
-    def __post_init__(self) -> None:
+    def __post_init__(self, model_name_init: str | None = None) -> None:
         self.roots = [self._normalise_path(path) for path in self.roots if path]
         self.excluded = [self._normalise_path(path) for path in (self.excluded or [])]
         if not self.excluded:
@@ -89,6 +92,8 @@ class PipelineSettings:
         self.allow_exts = {self._normalise_ext(ext) for ext in (self.allow_exts or _default_allow_exts()) if ext}
         if self.batch_size <= 0:
             self.batch_size = 1
+        if model_name_init:
+            self.embed_model.name = str(model_name_init)
         if self.index_dir is not None and self.index_dir != "":
             self.index_dir = self._normalise_path(self.index_dir)
         else:
@@ -114,6 +119,104 @@ class PipelineSettings:
     def resolved_index_dir(self) -> str:
         return self.index_dir or default_index_dir()
 
+    @classmethod
+    def from_mapping(cls, data: Mapping[str, Any]) -> PipelineSettings:
+        defaults = cls()
+
+        raw_roots = data.get("roots")
+        roots = normalise_roots(raw_roots or defaults.roots)
+
+        excluded_source = data.get("excluded")
+        if excluded_source is None and "excludes" in data:
+            excluded_source = data["excludes"]
+        excluded = normalise_excluded(excluded_source or defaults.excluded)
+
+        allow_exts = _normalise_exts(data.get("allow_exts"), defaults.allow_exts)
+
+        batch_size = _coerce_int(data.get("batch_size"), defaults.batch_size)
+        hamming_threshold = _coerce_int(data.get("hamming_threshold"), defaults.hamming_threshold)
+        cosine_threshold = _coerce_float(data.get("cosine_threshold"), defaults.cosine_threshold)
+        ssim_threshold = _coerce_float(data.get("ssim_threshold"), defaults.ssim_threshold)
+
+        tagger_conf = data.get("tagger", {}) or {}
+        tagger_thresholds = defaults.tagger.thresholds.copy()
+        for key, value in (tagger_conf.get("thresholds") or {}).items():
+            try:
+                tagger_thresholds[str(key)] = float(value)
+            except (TypeError, ValueError):
+                continue
+        tagger = TaggerSettings(
+            name=str(tagger_conf.get("name", defaults.tagger.name)),
+            model_path=tagger_conf.get("model_path", defaults.tagger.model_path),
+            thresholds=tagger_thresholds,
+        )
+
+        embed_conf = data.get("embed_model", {}) or {}
+        embed_name = embed_conf.get("name")
+        if embed_name is None and "model_name" in data:
+            embed_name = data["model_name"]
+        embed_model = EmbedModel(
+            name=str(embed_name or defaults.embed_model.name),
+            device=str(embed_conf.get("device", defaults.embed_model.device)),
+            dim=_coerce_int(embed_conf.get("dim", embed_conf.get("dims")), defaults.embed_model.dim),
+        )
+
+        index_dir_value = data.get("index_dir")
+        if index_dir_value in (None, ""):
+            index_dir = None
+        else:
+            index_dir = cls._normalise_path(index_dir_value)
+
+        return cls(
+            roots=roots,
+            excluded=excluded,
+            allow_exts=allow_exts,
+            batch_size=batch_size,
+            hamming_threshold=hamming_threshold,
+            cosine_threshold=cosine_threshold,
+            ssim_threshold=ssim_threshold,
+            tagger=tagger,
+            embed_model=embed_model,
+            index_dir=index_dir,
+        )
+
+    @classmethod
+    def load(cls, path: str | os.PathLike[str]) -> PipelineSettings:
+        file_path = Path(path)
+        if not file_path.exists():
+            return cls()
+        raw = yaml.safe_load(file_path.read_text(encoding="utf-8"))
+        if not isinstance(raw, Mapping):
+            raw = {}
+        return cls.from_mapping(raw)
+
+    def to_mapping(self) -> dict[str, Any]:
+        return {
+            "roots": [str(path) for path in self.roots],
+            "excluded": [str(path) for path in self.excluded],
+            "allow_exts": sorted(self.allow_exts),
+            "batch_size": self.batch_size,
+            "hamming_threshold": self.hamming_threshold,
+            "cosine_threshold": self.cosine_threshold,
+            "ssim_threshold": self.ssim_threshold,
+            "tagger": {
+                "name": self.tagger.name,
+                "model_path": self.tagger.model_path,
+                "thresholds": self.tagger.thresholds,
+            },
+            "embed_model": {
+                "name": self.embed_model.name,
+                "device": self.embed_model.device,
+                "dim": self.embed_model.dim,
+            },
+            "index_dir": self.index_dir or default_index_dir(),
+        }
+
+    def save(self, path: str | os.PathLike[str]) -> None:
+        file_path = Path(path)
+        payload = self.to_mapping()
+        file_path.write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8")
+
 
 def normalise_roots(values: Sequence[str | os.PathLike[str]]) -> list[str]:
     return [str(Path(value).expanduser()) for value in values]
@@ -123,6 +226,31 @@ def normalise_excluded(values: Sequence[str | os.PathLike[str]]) -> list[str]:
     if not values:
         return _default_excluded()
     return [str(Path(value).expanduser()) for value in values]
+
+
+def _normalise_exts(values: Any, fallback: set[str]) -> set[str]:
+    if not values:
+        return set(fallback)
+    normalised: set[str] = set()
+    for value in values:
+        ext = PipelineSettings._normalise_ext(str(value))
+        if ext:
+            normalised.add(ext)
+    return normalised or set(fallback)
+
+
+def _coerce_int(value: Any, default: int) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _coerce_float(value: Any, default: float) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
 
 
 __all__ = [

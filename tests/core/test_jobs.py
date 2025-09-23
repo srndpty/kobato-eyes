@@ -6,9 +6,13 @@ import time
 from typing import Iterable
 
 import pytest
+
+pytest.importorskip("PyQt6.QtCore", reason="PyQt6 core required", exc_type=ImportError)
 from PyQt6.QtCore import QCoreApplication
 
 from core.jobs import BatchJob, JobManager, JobPriority
+
+pytestmark = pytest.mark.gui
 
 
 @pytest.fixture(scope="module")
