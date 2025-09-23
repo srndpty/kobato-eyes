@@ -8,8 +8,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Iterable, List, Optional
 
-from PyQt6.QtCore import QModelIndex
-from PyQt6.QtGui import QStandardItem, QStandardItemModel
+from PyQt6.QtCore import QModelIndex, QObject, QRunnable, QSize, Qt, QThreadPool, pyqtSignal
+from PyQt6.QtGui import QPixmap, QStandardItem, QStandardItemModel
 from PyQt6.QtWidgets import (
     QAbstractItemView,
     QHBoxLayout,
@@ -24,12 +24,39 @@ from PyQt6.QtWidgets import (
 from core.query import translate_query
 from db.connection import get_conn
 from db.repository import search_files
+from utils.image_io import get_thumbnail
+
+
+class _ThumbnailSignal(QObject):
+    finished = pyqtSignal(int, QPixmap)
+
+
+class _ThumbnailTask(QRunnable):
+    def __init__(
+        self,
+        row: int,
+        path: Path,
+        width: int,
+        height: int,
+        signal: _ThumbnailSignal,
+    ) -> None:
+        super().__init__()
+        self._row = row
+        self._path = path
+        self._width = width
+        self._height = height
+        self._signal = signal
+
+    def run(self) -> None:  # noqa: D401 - QRunnable contract
+        pixmap = get_thumbnail(self._path, self._width, self._height)
+        self._signal.finished.emit(self._row, pixmap)
 
 
 class TagsTab(QWidget):
     """Provide a search bar and tabular results for tag queries."""
 
     _PAGE_SIZE = 200
+    _THUMB_SIZE = 128
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -45,6 +72,7 @@ class TagsTab(QWidget):
         self._results_view.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self._results_view.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self._results_view.doubleClicked.connect(self._on_row_double_clicked)
+        self._results_view.setIconSize(QSize(self._THUMB_SIZE, self._THUMB_SIZE))
 
         headers = [
             "Thumb",
@@ -83,6 +111,12 @@ class TagsTab(QWidget):
         self._offset = 0
         self._results_cache: list[dict[str, object]] = []
 
+        self._thumb_pool = QThreadPool(self)
+        self._thumb_pool.setMaxThreadCount(min(4, self._thumb_pool.maxThreadCount()))
+        self._thumb_signal = _ThumbnailSignal()
+        self._thumb_signal.finished.connect(self._apply_thumbnail)
+        self._pending_thumbs: set[int] = set()
+
     def _set_busy(self, busy: bool) -> None:
         self._search_button.setEnabled(not busy)
         if busy:
@@ -103,6 +137,7 @@ class TagsTab(QWidget):
         self._current_params = list(fragment.params)
         self._offset = 0
         self._results_cache.clear()
+        self._pending_thumbs.clear()
         self._model.removeRows(0, self._model.rowCount())
         self._fetch_results(reset=True)
 
@@ -146,7 +181,7 @@ class TagsTab(QWidget):
             path_obj = Path(str(record.get("path", "")))
             self._results_cache.append(record)
             items = [
-                QStandardItem("—"),
+                QStandardItem(""),
                 QStandardItem(path_obj.name),
                 QStandardItem(str(path_obj.parent)),
                 QStandardItem(self._format_size(record.get("size"))),
@@ -154,9 +189,32 @@ class TagsTab(QWidget):
                 QStandardItem(self._format_mtime(record.get("mtime"))),
                 QStandardItem(self._format_tags(record.get("top_tags", []))),
             ]
+            items[0].setData(Qt.AlignCenter, Qt.TextAlignmentRole)
             for item in items:
                 item.setEditable(False)
             self._model.appendRow(items)
+            row_index = self._model.rowCount() - 1
+            self._queue_thumbnail(row_index, path_obj)
+
+    def _queue_thumbnail(self, row: int, path: Path) -> None:
+        if not path.exists():
+            return
+        if row in self._pending_thumbs:
+            return
+        self._pending_thumbs.add(row)
+        task = _ThumbnailTask(row, path, self._THUMB_SIZE, self._THUMB_SIZE, self._thumb_signal)
+        self._thumb_pool.start(task)
+
+    def _apply_thumbnail(self, row: int, pixmap: QPixmap) -> None:
+        self._pending_thumbs.discard(row)
+        if row >= self._model.rowCount():
+            return
+        item = self._model.item(row, 0)
+        if item is None or pixmap.isNull():
+            return
+        item.setData(pixmap, Qt.DecorationRole)
+        item.setData(Qt.AlignCenter, Qt.TextAlignmentRole)
+        self._results_view.setRowHeight(row, max(self._THUMB_SIZE + 16, pixmap.height() + 16))
 
     @staticmethod
     def _format_size(value: object) -> str:
@@ -216,10 +274,13 @@ class TagsTab(QWidget):
         """Legacy hook retained for compatibility with earlier UI code."""
         self._model.removeRows(0, self._model.rowCount())
         self._results_cache.clear()
+        self._pending_thumbs.clear()
         for where_stmt, params in rows:
-            stub = [QStandardItem("—")] + [QStandardItem("") for _ in range(self._model.columnCount() - 1)]
-            stub[1].setText(where_stmt)
-            stub[2].setText(str(params))
+            stub = [QStandardItem("") for _ in range(self._model.columnCount())]
+            if stub:
+                stub[1].setText(where_stmt)
+            if len(stub) > 2:
+                stub[2].setText(str(params))
             for item in stub:
                 item.setEditable(False)
             self._model.appendRow(stub)

@@ -4,13 +4,30 @@ from __future__ import annotations
 
 import hashlib
 import os
+from collections import OrderedDict
 from pathlib import Path
+from threading import Lock
 
 from PIL import Image, UnidentifiedImageError
+from PyQt6.QtCore import Qt
+from PyQt6.QtGui import QPixmap
 
 from utils.fs import to_system_path
 
 DEFAULT_THUMBNAIL_SIZE = (320, 320)
+_THUMB_CACHE_LIMIT = 256
+_THUMB_CACHE: "OrderedDict[str, QPixmap]" = OrderedDict()
+_THUMB_CACHE_LOCK = Lock()
+
+
+def _thumb_cache_dir() -> Path:
+    if os.name == "nt":
+        base = Path(os.environ.get("APPDATA", Path.home()))
+    else:
+        base = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache"))
+    cache_dir = base / "KobatoEyes" / "cache" / "thumbs"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    return cache_dir
 
 
 def safe_load_image(path: str | Path, mode: str | None = "RGB") -> Image.Image | None:
@@ -83,9 +100,57 @@ def generate_thumbnail(
     return thumb_path
 
 
+def get_thumbnail(
+    source_path: str | Path,
+    width: int = 128,
+    height: int = 128,
+) -> QPixmap:
+    """Return a cached QPixmap thumbnail for ``source_path`` resized to fit within ``width``×``height``."""
+    source = Path(source_path)
+    key = f"{source.resolve()}::{width}x{height}"
+
+    with _THUMB_CACHE_LOCK:
+        cached = _THUMB_CACHE.get(key)
+        if cached is not None:
+            _THUMB_CACHE.move_to_end(key)
+            return QPixmap(cached)
+
+    cache_dir = _thumb_cache_dir()
+    thumb_path = generate_thumbnail(
+        source,
+        cache_dir,
+        size=(max(width, 1), max(height, 1)),
+        format="WEBP",
+    )
+
+    if thumb_path is None or not thumb_path.exists():
+        pixmap = QPixmap(width, height)
+        pixmap.fill(Qt.GlobalColor.transparent)
+    else:
+        pixmap = QPixmap(str(thumb_path))
+        if pixmap.isNull():
+            pixmap = QPixmap(width, height)
+            pixmap.fill(Qt.GlobalColor.transparent)
+        else:
+            pixmap = pixmap.scaled(
+                width,
+                height,
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+
+    with _THUMB_CACHE_LOCK:
+        _THUMB_CACHE[key] = pixmap
+        if len(_THUMB_CACHE) > _THUMB_CACHE_LIMIT:
+            _THUMB_CACHE.popitem(last=False)
+
+    return QPixmap(pixmap)
+
+
 __all__ = [
     "safe_load_image",
     "resize_image",
     "generate_thumbnail",
+    "get_thumbnail",
     "DEFAULT_THUMBNAIL_SIZE",
 ]
