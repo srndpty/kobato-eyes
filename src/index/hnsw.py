@@ -50,9 +50,7 @@ class HNSWIndex:
         self._dim = int(dim)
         self._max_elements = int(max_elements)
         self._index = hnswlib.Index(space=self._space, dim=self._dim)
-        self._index.init_index(
-            max_elements=self._max_elements, ef_construction=ef_construction, M=m
-        )
+        self._index.init_index(max_elements=self._max_elements, ef_construction=ef_construction, M=m)
 
     def ensure_capacity(self, total_capacity: int) -> None:
         """Grow the index if more slots are required."""
@@ -63,16 +61,14 @@ class HNSWIndex:
         self._index.resize_index(total_capacity)
         self._max_elements = total_capacity
 
-    def add(
-        self, vectors: np.ndarray, ids: Sequence[int], *, num_threads: int = 1
-    ) -> None:
+    def add(self, vectors: np.ndarray, ids: Sequence[int], *, num_threads: int = 1) -> None:
         """Add vectors with the given integer identifiers."""
         if self._index is None or self._dim is None:
             raise RuntimeError("Index is not initialised")
-        data = np.asarray(vectors, dtype=np.float32)
+        data = np.ascontiguousarray(vectors, dtype=np.float32)
         if data.ndim != 2 or data.shape[1] != self._dim:
             raise ValueError("Vector dimensionality mismatch")
-        labels = np.asarray(list(ids), dtype=np.int64)
+        labels = np.ascontiguousarray(list(ids), dtype=np.int64)
         if labels.ndim != 1 or labels.shape[0] != data.shape[0]:
             raise ValueError("Each vector must have a matching identifier")
         self._index.add_items(data, labels, num_threads=num_threads)
@@ -89,7 +85,7 @@ class HNSWIndex:
             raise RuntimeError("Index is not initialised")
         if ef is not None:
             self.set_ef(ef)
-        data = np.asarray(vectors, dtype=np.float32)
+        data = np.ascontiguousarray(vectors, dtype=np.float32)
         return self._index.knn_query(data, k=k)
 
     def set_ef(self, ef: int) -> None:
