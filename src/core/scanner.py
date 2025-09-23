@@ -67,18 +67,14 @@ def iter_images(
             dirnames[:] = [
                 name
                 for name in dirnames
-                if not is_hidden(current_dir / name)
-                and not _is_excluded(current_dir / name, excluded_paths)
+                if not is_hidden(current_dir / name) and not _is_excluded(current_dir / name, excluded_paths)
             ]
 
             for filename in filenames:
                 file_path = current_dir / filename
                 if is_hidden(file_path) or _is_excluded(file_path, excluded_paths):
                     continue
-                if (
-                    allowed_extensions
-                    and file_path.suffix.lower() not in allowed_extensions
-                ):
+                if allowed_extensions and file_path.suffix.lower() not in allowed_extensions:
                     continue
                 yield file_path
 

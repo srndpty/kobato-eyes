@@ -51,9 +51,7 @@ def memory_conn() -> Iterable[sqlite3.Connection]:
         conn.close()
 
 
-def test_duplicate_indexer_stores_embeddings(
-    memory_conn: sqlite3.Connection, tmp_path: Path
-) -> None:
+def test_duplicate_indexer_stores_embeddings(memory_conn: sqlite3.Connection, tmp_path: Path) -> None:
     paths = []
     colours = [(255, 0, 0), (0, 255, 0), (0, 0, 255)]
     for index, colour in enumerate(colours):
@@ -63,21 +61,15 @@ def test_duplicate_indexer_stores_embeddings(
 
     embedder = DummyEmbedder(dim=32)
     hnsw = HNSWIndex(space="cosine")
-    indexer = DuplicateIndexer(
-        memory_conn, embedder, hnsw, model_name="dummy", initial_capacity=4
-    )
+    indexer = DuplicateIndexer(memory_conn, embedder, hnsw, model_name="dummy", initial_capacity=4)
 
     file_ids = indexer.index_paths(paths)
     assert len(file_ids) == len(paths)
 
-    embeddings_count = memory_conn.execute(
-        "SELECT COUNT(*) FROM embeddings"
-    ).fetchone()[0]
+    embeddings_count = memory_conn.execute("SELECT COUNT(*) FROM embeddings").fetchone()[0]
     assert embeddings_count == len(paths)
 
-    signatures_count = memory_conn.execute(
-        "SELECT COUNT(*) FROM signatures"
-    ).fetchone()[0]
+    signatures_count = memory_conn.execute("SELECT COUNT(*) FROM signatures").fetchone()[0]
     assert signatures_count == len(paths)
 
     hnsw.set_ef(32)

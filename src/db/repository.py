@@ -32,9 +32,7 @@ def upsert_file(
     return int(file_id)
 
 
-def upsert_tags(
-    conn: sqlite3.Connection, tags: Sequence[Mapping[str, Any]]
-) -> dict[str, int]:
+def upsert_tags(conn: sqlite3.Connection, tags: Sequence[Mapping[str, Any]]) -> dict[str, int]:
     """Ensure tags exist and return a mapping from tag name to identifier."""
     results: dict[str, int] = {}
     query = """
@@ -54,9 +52,7 @@ def upsert_tags(
     return results
 
 
-def replace_file_tags(
-    conn: sqlite3.Connection, file_id: int, tag_scores: Iterable[tuple[int, float]]
-) -> None:
+def replace_file_tags(conn: sqlite3.Connection, file_id: int, tag_scores: Iterable[tuple[int, float]]) -> None:
     """Replace tag assignments for a file with the provided tag/score pairs."""
     pairs = list(tag_scores)
     with conn:
@@ -79,9 +75,7 @@ def update_fts(conn: sqlite3.Connection, file_id: int, text: str | None) -> None
             )
 
 
-def upsert_signatures(
-    conn: sqlite3.Connection, *, file_id: int, phash_u64: int, dhash_u64: int
-) -> None:
+def upsert_signatures(conn: sqlite3.Connection, *, file_id: int, phash_u64: int, dhash_u64: int) -> None:
     """Store perceptual hash signatures for a file."""
     query = """
         INSERT INTO signatures (file_id, phash_u64, dhash_u64)

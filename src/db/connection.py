@@ -13,9 +13,7 @@ def get_conn(db_path: str | Path, *, timeout: float = 30.0) -> sqlite3.Connectio
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON;")
 
-    is_memory_db = path == ":memory:" or (
-        path.startswith("file:") and "mode=memory" in path
-    )
+    is_memory_db = path == ":memory:" or (path.startswith("file:") and "mode=memory" in path)
     if not is_memory_db:
         conn.execute("PRAGMA journal_mode = WAL;")
 

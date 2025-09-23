@@ -114,9 +114,7 @@ class DirectoryWatcher:
             for root in self._roots:
                 if not root.exists() or not root.is_dir():
                     continue
-                observer.schedule(
-                    handler, to_system_path(root), recursive=self._recursive
-                )
+                observer.schedule(handler, to_system_path(root), recursive=self._recursive)
             observer.start()
             self._observer = observer
 

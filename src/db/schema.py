@@ -70,9 +70,7 @@ SCHEMA_STATEMENTS: tuple[str, ...] = (
 )
 
 
-def apply_schema(
-    conn: sqlite3.Connection, statements: Iterable[str] | None = None
-) -> None:
+def apply_schema(conn: sqlite3.Connection, statements: Iterable[str] | None = None) -> None:
     """Create database objects required by the application."""
     cursor = conn.cursor()
     try:

@@ -10,14 +10,7 @@ from typing import Iterable
 import numpy as np
 from PIL import Image
 
-from tagger.base import (
-    ITagger,
-    MaxTagsMap,
-    TagCategory,
-    TagPrediction,
-    TagResult,
-    ThresholdMap,
-)
+from tagger.base import ITagger, MaxTagsMap, TagCategory, TagPrediction, TagResult, ThresholdMap
 
 try:  # pragma: no cover - import is environment dependent
     import onnxruntime as ort
@@ -68,9 +61,7 @@ class WD14Tagger(ITagger):
         default_max_tags: MaxTagsMap | None = None,
     ) -> None:
         if ort is None:  # pragma: no cover - runtime guard
-            raise RuntimeError(
-                "onnxruntime is required to use WD14Tagger"
-            ) from _IMPORT_ERROR
+            raise RuntimeError("onnxruntime is required to use WD14Tagger") from _IMPORT_ERROR
 
         self._model_path = Path(model_path)
         self._labels = self._load_labels(labels_csv)
@@ -99,10 +90,7 @@ class WD14Tagger(ITagger):
         self._output_names = [output.name for output in self._session.get_outputs()]
 
         if len(self._output_names) != 1:
-            raise RuntimeError(
-                "Expected a single output tensor from WD14 ONNX model, got "
-                f"{self._output_names}"
-            )
+            raise RuntimeError("Expected a single output tensor from WD14 ONNX model, got " f"{self._output_names}")
 
     @staticmethod
     def _load_labels(labels_csv: str | Path) -> list[_Label]:
@@ -144,9 +132,7 @@ class WD14Tagger(ITagger):
         return merged
 
     @staticmethod
-    def _resolve_max_tags(
-        defaults: dict[TagCategory, int], overrides: MaxTagsMap | None
-    ) -> dict[TagCategory, int]:
+    def _resolve_max_tags(defaults: dict[TagCategory, int], overrides: MaxTagsMap | None) -> dict[TagCategory, int]:
         merged = dict(defaults)
         if overrides:
             merged.update(overrides)
@@ -173,9 +159,7 @@ class WD14Tagger(ITagger):
             )
 
         probabilities = _sigmoid(logits)
-        resolved_thresholds = self._resolve_thresholds(
-            self._default_thresholds, thresholds
-        )
+        resolved_thresholds = self._resolve_thresholds(self._default_thresholds, thresholds)
         resolved_limits = self._resolve_max_tags(self._default_max_tags, max_tags)
 
         results: list[TagResult] = []
@@ -187,9 +171,7 @@ class WD14Tagger(ITagger):
                 threshold = resolved_thresholds.get(label.category, 0.0)
                 if probability < threshold:
                     continue
-                prediction = TagPrediction(
-                    name=label.name, score=probability, category=label.category
-                )
+                prediction = TagPrediction(name=label.name, score=probability, category=label.category)
                 by_category.setdefault(label.category, []).append(prediction)
 
             for category, preds in by_category.items():

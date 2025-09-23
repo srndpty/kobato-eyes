@@ -25,14 +25,10 @@ class OpenClipEmbedder:
         batch_size: int = 8,
         use_fp16: bool = True,
     ) -> None:
-        self._device = torch.device(
-            device or ("cuda" if torch.cuda.is_available() else "cpu")
-        )
+        self._device = torch.device(device or ("cuda" if torch.cuda.is_available() else "cpu"))
         self._batch_size = max(1, batch_size)
 
-        model, preprocess = open_clip.create_model_and_transforms(
-            model_name, pretrained=pretrained
-        )
+        model, preprocess = open_clip.create_model_and_transforms(model_name, pretrained=pretrained)
         model.to(self._device)
         model.eval()
 

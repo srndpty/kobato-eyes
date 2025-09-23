@@ -28,9 +28,7 @@ class DummyTagger(ITagger):
     ) -> list[TagResult]:
         self.calls.append((len(images), dict(thresholds or {}), dict(max_tags or {})))
         predictions = [
-            TagPrediction(
-                name="character:kobato", score=0.9, category=TagCategory.CHARACTER
-            ),
+            TagPrediction(name="character:kobato", score=0.9, category=TagCategory.CHARACTER),
             TagPrediction(name="rating:safe", score=0.95, category=TagCategory.GENERAL),
         ]
         return [TagResult(tags=predictions)]
@@ -51,9 +49,7 @@ def memory_conn(tmp_path: Path) -> Iterable[sqlite3.Connection]:
         conn.close()
 
 
-def test_run_tag_job_persists_predictions(
-    memory_conn: sqlite3.Connection, tmp_path: Path
-) -> None:
+def test_run_tag_job_persists_predictions(memory_conn: sqlite3.Connection, tmp_path: Path) -> None:
     source = tmp_path / "image.png"
     _make_image(source)
 

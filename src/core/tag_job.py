@@ -64,10 +64,7 @@ def run_tag_job(
         sha256=sha256_hex,
     )
 
-    tag_defs = [
-        {"name": prediction.name, "category": int(prediction.category)}
-        for prediction in tag_result.tags
-    ]
+    tag_defs = [{"name": prediction.name, "category": int(prediction.category)} for prediction in tag_result.tags]
     tag_id_map = upsert_tags(conn, tag_defs)
 
     tag_scores = [
@@ -77,11 +74,7 @@ def run_tag_job(
     ]
     replace_file_tags(conn, file_id, tag_scores)
 
-    fts_text = (
-        " ".join(prediction.name for prediction in tag_result.tags)
-        if tag_scores
-        else None
-    )
+    fts_text = " ".join(prediction.name for prediction in tag_result.tags) if tag_scores else None
     update_fts(conn, file_id, fts_text)
 
     return TagJobOutput(file_id=file_id, tag_result=tag_result)

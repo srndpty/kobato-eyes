@@ -24,9 +24,7 @@ class EmbedderProtocol(Protocol):
     def embedding_dim(self) -> int:  # pragma: no cover - protocol declaration
         ...
 
-    def embed_images(
-        self, images: Sequence[Image.Image]
-    ) -> np.ndarray:  # pragma: no cover - protocol
+    def embed_images(self, images: Sequence[Image.Image]) -> np.ndarray:  # pragma: no cover - protocol
         ...
 
 

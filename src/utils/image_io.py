@@ -44,9 +44,7 @@ def resize_image(
     return copy
 
 
-def _thumbnail_cache_key(
-    path: Path, size: tuple[int, int], mode: str | None, fmt: str
-) -> str:
+def _thumbnail_cache_key(path: Path, size: tuple[int, int], mode: str | None, fmt: str) -> str:
     stat_result = path.stat()
     payload = f"{path.resolve()}|{stat_result.st_size}|{stat_result.st_mtime_ns}|{size}|{mode}|{fmt.lower()}"
     return hashlib.sha1(payload.encode("utf-8")).hexdigest()

@@ -8,14 +8,7 @@ from typing import Iterator
 import pytest
 
 from db.connection import get_conn
-from db.repository import (
-    replace_file_tags,
-    update_fts,
-    upsert_embedding,
-    upsert_file,
-    upsert_signatures,
-    upsert_tags,
-)
+from db.repository import replace_file_tags, update_fts, upsert_embedding, upsert_file, upsert_signatures, upsert_tags
 from db.schema import apply_schema
 
 
@@ -48,9 +41,7 @@ def test_repository_roundtrip(memory_conn: sqlite3.Connection) -> None:
     )
     assert updated_id == file_id
 
-    row = memory_conn.execute(
-        "SELECT size, sha256 FROM files WHERE id = ?", (file_id,)
-    ).fetchone()
+    row = memory_conn.execute("SELECT size, sha256 FROM files WHERE id = ?", (file_id,)).fetchone()
     assert row is not None
     assert row["size"] == 2_048
     assert row["sha256"] == "def456"
@@ -81,9 +72,7 @@ def test_repository_roundtrip(memory_conn: sqlite3.Connection) -> None:
             (tags["rating:safe"], 1.0),
         ],
     )
-    count_row = memory_conn.execute(
-        "SELECT COUNT(*) AS cnt FROM file_tags WHERE file_id = ?", (file_id,)
-    ).fetchone()
+    count_row = memory_conn.execute("SELECT COUNT(*) AS cnt FROM file_tags WHERE file_id = ?", (file_id,)).fetchone()
     assert count_row is not None and count_row["cnt"] == 2
 
     replace_file_tags(memory_conn, file_id, [(tags["rating:safe"], 0.5)])
