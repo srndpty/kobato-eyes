@@ -1,0 +1,58 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "kobato-eyes"
+version = "0.0.1"
+description = "Desktop application for tagging images with Danbooru metadata and duplicate detection."
+readme = "README.md"
+authors = [
+    { name = "kobato-eyes developers" }
+]
+license = { file = "LICENSE" }
+requires-python = ">=3.10"
+dependencies = [
+    "PyQt6>=6.7.0",
+    "watchdog>=3.0.0",
+    "pillow>=10.4.0",
+    "onnxruntime-gpu>=1.18.0",
+    "open-clip-torch>=2.24.0",
+    "hnswlib>=0.8.0",
+    "opencv-python-headless>=4.10.0.84",
+    "scikit-image>=0.24.0",
+    "SQLAlchemy>=2.0.0"
+]
+
+[project.optional-dependencies]
+dev = [
+    "black>=24.8.0",
+    "isort>=5.13.2",
+    "ruff>=0.5.6",
+    "pytest>=8.3.0"
+]
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.black]
+line-length = 88
+skip-string-normalization = true
+target-version = ["py311"]
+
+[tool.isort]
+profile = "black"
+line_length = 88
+known_first_party = ["ui", "core", "db", "tagger", "dup", "sig", "index", "utils"]
+
+[tool.ruff]
+line-length = 88
+target-version = "py311"
+src = ["src"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W"]
+
