@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sqlite3
 from typing import Iterable
+from unittest import mock
 from unittest.mock import patch
 
 import pytest
@@ -48,6 +49,21 @@ def test_toggle_views(tags_tab: TagsTab) -> None:
 
 
 def test_index_now_triggers_pipeline(tags_tab: TagsTab) -> None:
-    with patch("ui.tags_tab.run_index_once") as mocked:
+    done = mock.Event()
+
+    def _fake_run_index_once(*args, **kwargs):
+        done.set()
+        return {
+            "scanned": 1,
+            "tagged": 1,
+            "embedded": 1,
+            "elapsed_sec": 0.1,
+            "new_or_changed": 1,
+            "signatures": 1,
+            "hnsw_added": 1,
+        }
+
+    with patch("ui.tags_tab.run_index_once", side_effect=_fake_run_index_once) as mocked:
         tags_tab._placeholder_button.click()  # type: ignore[attr-defined]
+        assert done.wait(2)
         mocked.assert_called_once()
