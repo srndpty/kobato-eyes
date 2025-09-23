@@ -9,6 +9,8 @@ from typing import Any, Mapping, Sequence
 
 import yaml
 
+from utils.paths import ensure_dirs, get_index_dir
+
 DEFAULT_EXCLUDED = [
     str(Path.home() / "AppData"),
     "C:/Windows",
@@ -40,11 +42,8 @@ def _default_allow_exts() -> set[str]:
 
 
 def default_index_dir() -> str:
-    if os.name == "nt":
-        base = Path(os.environ.get("APPDATA", Path.home()))
-    else:
-        base = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local" / "share"))
-    return str((base / "KobatoEyes" / "index").resolve())
+    ensure_dirs()
+    return str(get_index_dir())
 
 
 @dataclass

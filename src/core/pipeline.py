@@ -36,6 +36,7 @@ from sig.phash import dhash, phash
 from tagger.base import ITagger, TagCategory
 from utils.hash import compute_sha256
 from utils.image_io import safe_load_image
+from utils.paths import ensure_dirs, get_index_dir
 
 logger = logging.getLogger(__name__)
 
@@ -126,7 +127,12 @@ class ProcessingPipeline(QObject):
         settings: PipelineSettings | None = None,
     ) -> None:
         super().__init__()
-        self._db_path = Path(db_path)
+        resolved_db = Path(db_path).expanduser()
+        db_literal = str(resolved_db)
+        if not db_literal.startswith("file:") and db_literal != ":memory:":
+            ensure_dirs()
+            resolved_db.parent.mkdir(parents=True, exist_ok=True)
+        self._db_path = resolved_db
         self._tagger = tagger
         self._embedder = embedder
         self._index = hnsw_index
@@ -238,6 +244,7 @@ def run_index_once(
     """Perform a full indexing pass across all configured roots."""
     start_time = time.perf_counter()
     settings = settings or load_settings()
+    ensure_dirs()
     stats: dict[str, object] = {
         "scanned": 0,
         "new_or_changed": 0,
@@ -262,7 +269,13 @@ def run_index_once(
     records: list[_FileRecord] = []
     hnsw_additions: list[tuple[int, np.ndarray]] = []
 
-    conn = get_conn(db_path)
+    db_literal = str(db_path)
+    if db_literal.startswith("file:") or db_literal == ":memory:":
+        conn = get_conn(db_literal)
+    else:
+        resolved_db = Path(db_path).expanduser()
+        resolved_db.parent.mkdir(parents=True, exist_ok=True)
+        conn = get_conn(resolved_db)
     try:
         logger.info("Scanning %d root(s) for eligible images", len(roots))
         for image_path in iter_images(roots, excluded=excluded_paths, extensions=allow_exts):
@@ -551,7 +564,11 @@ def run_index_once(
 
     if hnsw_additions:
         dim = hnsw_additions[0][1].shape[0]
-        index_dir = Path(settings.index_dir).expanduser()
+        ensure_dirs()
+        if settings.index_dir:
+            index_dir = Path(settings.index_dir).expanduser()
+        else:
+            index_dir = get_index_dir()
         index_dir.mkdir(parents=True, exist_ok=True)
         index_path = index_dir / "hnsw_cosine.bin"
         try:

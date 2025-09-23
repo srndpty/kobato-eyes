@@ -31,6 +31,7 @@ from core.query import translate_query
 from db.connection import get_conn
 from db.repository import search_files
 from utils.image_io import get_thumbnail
+from utils.paths import ensure_dirs, get_db_path
 
 
 class _ThumbnailSignal(QObject):
@@ -168,7 +169,8 @@ class TagsTab(QWidget):
         self._grid_button.toggled.connect(self._on_grid_toggled)
         self._placeholder_button.clicked.connect(self._on_index_now)
 
-        self._conn = get_conn("kobato-eyes.db")
+        ensure_dirs()
+        self._conn = get_conn(get_db_path())
         self.destroyed.connect(lambda: self._conn.close())
 
         self._current_query: Optional[str] = None
@@ -195,7 +197,7 @@ class TagsTab(QWidget):
 
     def _on_index_now(self) -> None:
         db_row = self._conn.execute("PRAGMA database_list").fetchone()
-        db_file = Path(db_row[2]) if db_row and db_row[2] else Path("kobato-eyes.db")
+        db_file = Path(db_row[2]) if db_row and db_row[2] else get_db_path()
         run_index_once(db_file)
         self._status_label.setText("Indexing requested.")
 

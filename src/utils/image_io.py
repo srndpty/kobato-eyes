@@ -18,6 +18,7 @@ except ImportError:  # pragma: no cover - simplifies headless testing environmen
     QPixmap = None  # type: ignore[assignment]
 
 from utils.fs import to_system_path
+from utils.paths import ensure_dirs, get_cache_dir
 
 DEFAULT_THUMBNAIL_SIZE = (320, 320)
 _THUMB_CACHE_LIMIT = 256
@@ -26,11 +27,8 @@ _THUMB_CACHE_LOCK = Lock()
 
 
 def _thumb_cache_dir() -> Path:
-    if os.name == "nt":
-        base = Path(os.environ.get("APPDATA", Path.home()))
-    else:
-        base = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache"))
-    cache_dir = base / "KobatoEyes" / "cache" / "thumbs"
+    ensure_dirs()
+    cache_dir = get_cache_dir() / "thumbs"
     cache_dir.mkdir(parents=True, exist_ok=True)
     return cache_dir
 
