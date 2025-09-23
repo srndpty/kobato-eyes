@@ -7,10 +7,14 @@ from typing import Iterable
 from unittest.mock import patch
 
 import pytest
+
+pytest.importorskip("PyQt6.QtWidgets", reason="PyQt6 widgets required", exc_type=ImportError)
 from PyQt6.QtWidgets import QApplication
 
 from db.schema import apply_schema
 from ui.tags_tab import TagsTab
+
+pytestmark = pytest.mark.gui
 
 
 @pytest.fixture(scope="module")

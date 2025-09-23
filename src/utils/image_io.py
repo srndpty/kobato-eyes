@@ -9,8 +9,13 @@ from pathlib import Path
 from threading import Lock
 
 from PIL import Image, UnidentifiedImageError
-from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QPixmap
+
+try:  # pragma: no cover - handled at runtime when PyQt6 is missing
+    from PyQt6.QtCore import Qt
+    from PyQt6.QtGui import QPixmap
+except ImportError:  # pragma: no cover - simplifies headless testing environments
+    Qt = None  # type: ignore[assignment]
+    QPixmap = None  # type: ignore[assignment]
 
 from utils.fs import to_system_path
 
@@ -106,6 +111,10 @@ def get_thumbnail(
     height: int = 128,
 ) -> QPixmap:
     """Return a cached QPixmap thumbnail for ``source_path`` resized to fit within ``width``×``height``."""
+    if QPixmap is None or Qt is None:
+        raise RuntimeError(
+            "QPixmap is unavailable in this environment. Install PyQt6 with OpenGL support or unset KOE_HEADLESS."
+        )
     source = Path(source_path)
     key = f"{source.resolve()}::{width}x{height}"
 

@@ -19,7 +19,7 @@ from PyQt6.QtWidgets import (
 )
 
 from core.config import load_settings, save_settings
-from core.settings import PipelineSettings
+from core.settings import EmbedModel, PipelineSettings
 
 
 class SettingsTab(QWidget):
@@ -49,7 +49,7 @@ class SettingsTab(QWidget):
         self._ssim_spin.setValue(0.9)
 
         self._model_combo = QComboBox(self)
-        self._model_combo.addItems(["clip-vit", "ViT-H-14", "RN50"])
+        self._model_combo.addItems(["ViT-L-14", "ViT-H-14", "RN50"])
 
         apply_button = QPushButton("Apply", self)
         apply_button.clicked.connect(self._emit_settings)
@@ -83,10 +83,10 @@ class SettingsTab(QWidget):
         settings = PipelineSettings(
             roots=[Path(line) for line in self._lines(self._roots_edit) if line],
             excluded=[Path(line) for line in self._lines(self._excluded_edit) if line],
-            hamming_threshold=self._hamming_spin.value(),
-            cosine_threshold=self._cosine_spin.value(),
-            ssim_threshold=self._ssim_spin.value(),
-            model_name=self._model_combo.currentText(),
+            hamming_threshold=int(self._hamming_spin.value()),
+            cosine_threshold=float(self._cosine_spin.value()),
+            ssim_threshold=float(self._ssim_spin.value()),
+            embed_model=EmbedModel(name=self._model_combo.currentText()),
         )
         save_settings(settings)
         self.settings_applied.emit(settings)

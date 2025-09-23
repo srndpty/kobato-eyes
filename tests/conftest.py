@@ -2,11 +2,17 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
 import pytest
+
+
+if os.environ.get("KOE_HEADLESS", "0") == "1":
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    os.environ.setdefault("QT_OPENGL", "software")
 
 
 class _StubHNSWIndex:

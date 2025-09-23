@@ -6,14 +6,9 @@ import sqlite3
 from collections.abc import Iterable, Mapping, Sequence
 from typing import Any
 
-_FILE_COLUMN_CACHE: set[str] = set()
-
 
 def _ensure_file_columns(conn: sqlite3.Connection) -> None:
     """Make sure optional columns exist on the files table."""
-    global _FILE_COLUMN_CACHE
-    if _FILE_COLUMN_CACHE:
-        return
     rows = conn.execute("PRAGMA table_info(files)").fetchall()
     columns = {row[1] for row in rows}
     alterations: list[str] = []
@@ -27,9 +22,6 @@ def _ensure_file_columns(conn: sqlite3.Connection) -> None:
         conn.execute(statement)
     if alterations:
         conn.commit()
-        rows = conn.execute("PRAGMA table_info(files)").fetchall()
-        columns = {row[1] for row in rows}
-    _FILE_COLUMN_CACHE = columns
 
 
 def upsert_file(

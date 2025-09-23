@@ -255,7 +255,7 @@ def run_index_once(
         stats["elapsed_sec"] = time.perf_counter() - start_time
         return stats
 
-    excluded_paths = [Path(path).expanduser() for path in settings.excludes if path]
+    excluded_paths = [Path(path).expanduser() for path in settings.excluded if path]
     allow_exts = {ext.lower() for ext in (settings.allow_exts or DEFAULT_EXTENSIONS)}
     batch_size = max(1, settings.batch_size)
 
