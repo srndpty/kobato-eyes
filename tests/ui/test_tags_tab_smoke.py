@@ -34,8 +34,16 @@ def tags_tab(qapp: QApplication):
 
 
 def test_toggle_views(tags_tab: TagsTab) -> None:
+    tags_tab._stack.setCurrentWidget(tags_tab._table_view)  # type: ignore[attr-defined]
+    tags_tab._table_button.setChecked(True)  # type: ignore[attr-defined]
     assert tags_tab._stack.currentWidget() is tags_tab._table_view  # type: ignore[attr-defined]
     tags_tab._grid_button.setChecked(True)  # type: ignore[attr-defined]
     assert tags_tab._stack.currentWidget() is tags_tab._grid_view  # type: ignore[attr-defined]
     tags_tab._table_button.setChecked(True)  # type: ignore[attr-defined]
     assert tags_tab._stack.currentWidget() is tags_tab._table_view  # type: ignore[attr-defined]
+
+
+def test_index_now_triggers_pipeline(tags_tab: TagsTab) -> None:
+    with patch("ui.tags_tab.run_index_once") as mocked:
+        tags_tab._placeholder_button.click()  # type: ignore[attr-defined]
+        mocked.assert_called_once()

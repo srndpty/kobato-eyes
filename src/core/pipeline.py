@@ -189,4 +189,9 @@ class ProcessingPipeline(QObject):
         signals.finished.connect(lambda path=resolved: self._scheduled.discard(path))
 
 
-__all__ = ["PipelineSettings", "ProcessingPipeline"]
+def run_index_once(db_path: str | Path) -> None:
+    """Placeholder hook to trigger indexing, currently logs the request."""
+    logger.info("Indexing requested for database %s", db_path)
+
+
+__all__ = ["PipelineSettings", "ProcessingPipeline", "run_index_once"]

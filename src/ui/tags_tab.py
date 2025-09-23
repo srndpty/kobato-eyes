@@ -25,6 +25,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from core.pipeline import run_index_once
 from core.query import translate_query
 from db.connection import get_conn
 from db.repository import search_files
@@ -51,7 +52,7 @@ class _ThumbnailTask(QRunnable):
         self._height = height
         self._signal = signal
 
-    def run(self) -> None:  # noqa: D401 - QRunnable contract
+    def run(self) -> None:  # noqa: D401
         pixmap = get_thumbnail(self._path, self._width, self._height)
         self._signal.finished.emit(self._row, pixmap)
 
@@ -72,6 +73,15 @@ class TagsTab(QWidget):
         self._status_label = QLabel(self)
         self._status_label.setWordWrap(True)
 
+        self._placeholder = QWidget(self)
+        placeholder_layout = QVBoxLayout(self._placeholder)
+        placeholder_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._placeholder_label = QLabel("No results yet. Try indexing your library.", self._placeholder)
+        self._placeholder_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._placeholder_button = QPushButton("Index now", self._placeholder)
+        placeholder_layout.addWidget(self._placeholder_label)
+        placeholder_layout.addWidget(self._placeholder_button)
+
         self._table_button = QToolButton(self)
         self._table_button.setText("Table")
         self._table_button.setCheckable(True)
@@ -86,7 +96,6 @@ class TagsTab(QWidget):
 
         self._stack = QStackedWidget(self)
 
-        # Table view setup
         headers = [
             "Thumb",
             "File name",
@@ -106,7 +115,6 @@ class TagsTab(QWidget):
         self._table_view.horizontalHeader().setStretchLastSection(True)
         self._table_view.setIconSize(QSize(self._THUMB_SIZE, self._THUMB_SIZE))
 
-        # Grid view setup
         self._grid_model = QStandardItemModel(self)
         self._grid_view = QListView(self)
         self._grid_view.setViewMode(QListView.ViewMode.IconMode)
@@ -116,12 +124,12 @@ class TagsTab(QWidget):
         self._grid_view.setWrapping(True)
         self._grid_view.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self._grid_view.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
-        self._grid_view.setUniformItemSizes(False)
         self._grid_view.setIconSize(QSize(self._THUMB_SIZE, self._THUMB_SIZE))
         self._grid_view.setGridSize(QSize(self._THUMB_SIZE + 48, self._THUMB_SIZE + 72))
         self._grid_view.doubleClicked.connect(self._on_grid_double_clicked)
         self._grid_view.setModel(self._grid_model)
 
+        self._stack.addWidget(self._placeholder)
         self._stack.addWidget(self._table_view)
         self._stack.addWidget(self._grid_view)
 
@@ -146,6 +154,7 @@ class TagsTab(QWidget):
         self._query_input.returnPressed.connect(self._on_search_clicked)
         self._table_button.toggled.connect(self._on_table_toggled)
         self._grid_button.toggled.connect(self._on_grid_toggled)
+        self._placeholder_button.clicked.connect(self._on_index_now)
 
         self._conn = get_conn("kobato-eyes.db")
         self.destroyed.connect(lambda: self._conn.close())
@@ -162,16 +171,30 @@ class TagsTab(QWidget):
         self._thumb_signal.finished.connect(self._apply_thumbnail)
         self._pending_thumbs: set[int] = set()
 
+        self._show_placeholder(True)
+
+    def _show_placeholder(self, show: bool) -> None:
+        if show:
+            self._stack.setCurrentWidget(self._placeholder)
+            self._load_more_button.setEnabled(False)
+        else:
+            target = self._table_view if self._table_button.isChecked() else self._grid_view
+            self._stack.setCurrentWidget(target)
+
+    def _on_index_now(self) -> None:
+        db_row = self._conn.execute("PRAGMA database_list").fetchone()
+        db_file = Path(db_row[2]) if db_row and db_row[2] else Path("kobato-eyes.db")
+        run_index_once(db_file)
+        self._status_label.setText("Indexing requested.")
+
     def _on_table_toggled(self, checked: bool) -> None:
         if checked:
             self._stack.setCurrentWidget(self._table_view)
-            self._table_button.setChecked(True)
             self._grid_button.setChecked(False)
 
     def _on_grid_toggled(self, checked: bool) -> None:
         if checked:
             self._stack.setCurrentWidget(self._grid_view)
-            self._grid_button.setChecked(True)
             self._table_button.setChecked(False)
 
     def _set_busy(self, busy: bool) -> None:
@@ -209,6 +232,7 @@ class TagsTab(QWidget):
         if not self._current_where:
             self._status_label.setText("Enter a query to search tags.")
             self._set_busy(False)
+            self._show_placeholder(True)
             return
         try:
             rows = search_files(
@@ -218,17 +242,18 @@ class TagsTab(QWidget):
                 limit=self._PAGE_SIZE,
                 offset=self._offset,
             )
-        except Exception as exc:  # pragma: no cover - defensive
+        except Exception as exc:  # pragma: no cover
             self._status_label.setText(f"Search failed: {exc}")
             self._set_busy(False)
             return
 
         if reset and not rows:
-            self._status_label.setText("No results.")
-        elif rows:
+            self._status_label.setText("No results. Try indexing your library.")
+            self._show_placeholder(True)
+        else:
             total = self._offset + len(rows)
-            message = f"Showing {total} result(s) for '{self._current_query or '*'}'"
-            self._status_label.setText(message)
+            self._status_label.setText(f"Showing {total} result(s) for '{self._current_query or '*'}'")
+            self._show_placeholder(False)
         self._append_rows(rows)
         self._offset += len(rows)
         self._load_more_button.setEnabled(len(rows) == self._PAGE_SIZE)
@@ -289,8 +314,8 @@ class TagsTab(QWidget):
         self._open_row(index.row())
 
     def _on_grid_double_clicked(self, index: QModelIndex) -> None:
-        user_row = index.data(Qt.UserRole)
-        row = int(user_row) if user_row is not None else index.row()
+        stored_row = index.data(Qt.UserRole)
+        row = int(stored_row) if stored_row is not None else index.row()
         self._open_row(row)
 
     def _open_row(self, row: int) -> None:
@@ -349,7 +374,7 @@ class TagsTab(QWidget):
                 subprocess.Popen(["open", "-R", str(path)])
             else:
                 subprocess.Popen(["xdg-open", str(path.parent)])
-        except Exception as exc:  # pragma: no cover - defensive
+        except Exception as exc:  # pragma: no cover
             self._status_label.setText(f"Failed to open file: {exc}")
 
     def display_results(self, rows: Iterable[tuple[str, list[object]]]) -> None:
@@ -358,6 +383,10 @@ class TagsTab(QWidget):
         self._grid_model.removeRows(0, self._grid_model.rowCount())
         self._results_cache.clear()
         self._pending_thumbs.clear()
+        if rows:
+            self._show_placeholder(False)
+        else:
+            self._show_placeholder(True)
         for where_stmt, params in rows:
             table_stub = [QStandardItem("") for _ in range(self._table_model.columnCount())]
             if len(table_stub) > 1:
