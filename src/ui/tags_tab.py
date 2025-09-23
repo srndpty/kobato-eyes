@@ -12,11 +12,15 @@ from PyQt6.QtCore import QModelIndex, QObject, QRunnable, QSize, Qt, QThreadPool
 from PyQt6.QtGui import QPixmap, QStandardItem, QStandardItemModel
 from PyQt6.QtWidgets import (
     QAbstractItemView,
+    QButtonGroup,
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QListView,
     QPushButton,
+    QStackedWidget,
     QTableView,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -53,7 +57,7 @@ class _ThumbnailTask(QRunnable):
 
 
 class TagsTab(QWidget):
-    """Provide a search bar and tabular results for tag queries."""
+    """Provide a search bar and tabular or grid results for tag queries."""
 
     _PAGE_SIZE = 200
     _THUMB_SIZE = 128
@@ -68,12 +72,21 @@ class TagsTab(QWidget):
         self._status_label = QLabel(self)
         self._status_label.setWordWrap(True)
 
-        self._results_view = QTableView(self)
-        self._results_view.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
-        self._results_view.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
-        self._results_view.doubleClicked.connect(self._on_row_double_clicked)
-        self._results_view.setIconSize(QSize(self._THUMB_SIZE, self._THUMB_SIZE))
+        self._table_button = QToolButton(self)
+        self._table_button.setText("Table")
+        self._table_button.setCheckable(True)
+        self._grid_button = QToolButton(self)
+        self._grid_button.setText("Grid")
+        self._grid_button.setCheckable(True)
+        self._table_button.setChecked(True)
+        toggle_group = QButtonGroup(self)
+        toggle_group.setExclusive(True)
+        toggle_group.addButton(self._table_button)
+        toggle_group.addButton(self._grid_button)
 
+        self._stack = QStackedWidget(self)
+
+        # Table view setup
         headers = [
             "Thumb",
             "File name",
@@ -83,24 +96,56 @@ class TagsTab(QWidget):
             "Modified",
             "Top 5 Tags",
         ]
-        self._model = QStandardItemModel(0, len(headers), self)
-        self._model.setHorizontalHeaderLabels(headers)
-        self._results_view.setModel(self._model)
-        self._results_view.horizontalHeader().setStretchLastSection(True)
+        self._table_model = QStandardItemModel(0, len(headers), self)
+        self._table_model.setHorizontalHeaderLabels(headers)
+        self._table_view = QTableView(self)
+        self._table_view.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self._table_view.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self._table_view.doubleClicked.connect(self._on_table_double_clicked)
+        self._table_view.setModel(self._table_model)
+        self._table_view.horizontalHeader().setStretchLastSection(True)
+        self._table_view.setIconSize(QSize(self._THUMB_SIZE, self._THUMB_SIZE))
+
+        # Grid view setup
+        self._grid_model = QStandardItemModel(self)
+        self._grid_view = QListView(self)
+        self._grid_view.setViewMode(QListView.ViewMode.IconMode)
+        self._grid_view.setResizeMode(QListView.ResizeMode.Adjust)
+        self._grid_view.setMovement(QListView.Movement.Static)
+        self._grid_view.setSpacing(16)
+        self._grid_view.setWrapping(True)
+        self._grid_view.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self._grid_view.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self._grid_view.setUniformItemSizes(False)
+        self._grid_view.setIconSize(QSize(self._THUMB_SIZE, self._THUMB_SIZE))
+        self._grid_view.setGridSize(QSize(self._THUMB_SIZE + 48, self._THUMB_SIZE + 72))
+        self._grid_view.doubleClicked.connect(self._on_grid_double_clicked)
+        self._grid_view.setModel(self._grid_model)
+
+        self._stack.addWidget(self._table_view)
+        self._stack.addWidget(self._grid_view)
 
         search_layout = QHBoxLayout()
         search_layout.addWidget(self._query_input)
         search_layout.addWidget(self._search_button)
 
+        toggle_layout = QHBoxLayout()
+        toggle_layout.addWidget(self._table_button)
+        toggle_layout.addWidget(self._grid_button)
+        toggle_layout.addStretch()
+
         layout = QVBoxLayout(self)
         layout.addLayout(search_layout)
+        layout.addLayout(toggle_layout)
         layout.addWidget(self._status_label)
-        layout.addWidget(self._results_view)
+        layout.addWidget(self._stack)
         layout.addWidget(self._load_more_button)
 
         self._search_button.clicked.connect(self._on_search_clicked)
         self._load_more_button.clicked.connect(self._on_load_more_clicked)
         self._query_input.returnPressed.connect(self._on_search_clicked)
+        self._table_button.toggled.connect(self._on_table_toggled)
+        self._grid_button.toggled.connect(self._on_grid_toggled)
 
         self._conn = get_conn("kobato-eyes.db")
         self.destroyed.connect(lambda: self._conn.close())
@@ -116,6 +161,18 @@ class TagsTab(QWidget):
         self._thumb_signal = _ThumbnailSignal()
         self._thumb_signal.finished.connect(self._apply_thumbnail)
         self._pending_thumbs: set[int] = set()
+
+    def _on_table_toggled(self, checked: bool) -> None:
+        if checked:
+            self._stack.setCurrentWidget(self._table_view)
+            self._table_button.setChecked(True)
+            self._grid_button.setChecked(False)
+
+    def _on_grid_toggled(self, checked: bool) -> None:
+        if checked:
+            self._stack.setCurrentWidget(self._grid_view)
+            self._grid_button.setChecked(True)
+            self._table_button.setChecked(False)
 
     def _set_busy(self, busy: bool) -> None:
         self._search_button.setEnabled(not busy)
@@ -138,7 +195,8 @@ class TagsTab(QWidget):
         self._offset = 0
         self._results_cache.clear()
         self._pending_thumbs.clear()
-        self._model.removeRows(0, self._model.rowCount())
+        self._table_model.removeRows(0, self._table_model.rowCount())
+        self._grid_model.removeRows(0, self._grid_model.rowCount())
         self._fetch_results(reset=True)
 
     def _on_load_more_clicked(self) -> None:
@@ -178,9 +236,11 @@ class TagsTab(QWidget):
 
     def _append_rows(self, rows: Iterable[dict[str, object]]) -> None:
         for record in rows:
-            path_obj = Path(str(record.get("path", "")))
+            row_index = len(self._results_cache)
             self._results_cache.append(record)
-            items = [
+            path_obj = Path(str(record.get("path", "")))
+
+            table_items = [
                 QStandardItem(""),
                 QStandardItem(path_obj.name),
                 QStandardItem(str(path_obj.parent)),
@@ -189,16 +249,23 @@ class TagsTab(QWidget):
                 QStandardItem(self._format_mtime(record.get("mtime"))),
                 QStandardItem(self._format_tags(record.get("top_tags", []))),
             ]
-            items[0].setData(Qt.AlignCenter, Qt.TextAlignmentRole)
-            for item in items:
+            table_items[0].setData(Qt.AlignCenter, Qt.TextAlignmentRole)
+            for item in table_items:
                 item.setEditable(False)
-            self._model.appendRow(items)
-            row_index = self._model.rowCount() - 1
-            self._queue_thumbnail(row_index, path_obj)
+            self._table_model.appendRow(table_items)
+            self._table_view.setRowHeight(row_index, self._THUMB_SIZE + 16)
+
+            grid_item = QStandardItem(self._format_grid_text(path_obj.name, record.get("top_tags", [])))
+            grid_item.setEditable(False)
+            grid_item.setData(row_index, Qt.UserRole)
+            grid_item.setData(Qt.AlignCenter, Qt.TextAlignmentRole)
+            grid_item.setSizeHint(QSize(self._THUMB_SIZE + 48, self._THUMB_SIZE + 72))
+            self._grid_model.appendRow(grid_item)
+
+            if path_obj.exists():
+                self._queue_thumbnail(row_index, path_obj)
 
     def _queue_thumbnail(self, row: int, path: Path) -> None:
-        if not path.exists():
-            return
         if row in self._pending_thumbs:
             return
         self._pending_thumbs.add(row)
@@ -207,14 +274,29 @@ class TagsTab(QWidget):
 
     def _apply_thumbnail(self, row: int, pixmap: QPixmap) -> None:
         self._pending_thumbs.discard(row)
-        if row >= self._model.rowCount():
-            return
-        item = self._model.item(row, 0)
-        if item is None or pixmap.isNull():
-            return
-        item.setData(pixmap, Qt.DecorationRole)
-        item.setData(Qt.AlignCenter, Qt.TextAlignmentRole)
-        self._results_view.setRowHeight(row, max(self._THUMB_SIZE + 16, pixmap.height() + 16))
+        if row < self._table_model.rowCount():
+            table_item = self._table_model.item(row, 0)
+            if table_item is not None:
+                table_item.setData(pixmap, Qt.DecorationRole)
+                table_item.setData(Qt.AlignCenter, Qt.TextAlignmentRole)
+                self._table_view.setRowHeight(row, max(self._THUMB_SIZE + 16, pixmap.height() + 16))
+        if row < self._grid_model.rowCount():
+            grid_item = self._grid_model.item(row)
+            if grid_item is not None:
+                grid_item.setData(pixmap, Qt.DecorationRole)
+
+    def _on_table_double_clicked(self, index: QModelIndex) -> None:
+        self._open_row(index.row())
+
+    def _on_grid_double_clicked(self, index: QModelIndex) -> None:
+        user_row = index.data(Qt.UserRole)
+        row = int(user_row) if user_row is not None else index.row()
+        self._open_row(row)
+
+    def _open_row(self, row: int) -> None:
+        if 0 <= row < len(self._results_cache):
+            path = Path(str(self._results_cache[row].get("path", "")))
+            self._open_in_explorer(path)
 
     @staticmethod
     def _format_size(value: object) -> str:
@@ -253,11 +335,11 @@ class TagsTab(QWidget):
         parts = [f"{name} ({score:.2f})" for name, score in tags]
         return ", ".join(parts)
 
-    def _on_row_double_clicked(self, index: QModelIndex) -> None:
-        row = index.row()
-        if 0 <= row < len(self._results_cache):
-            path = Path(str(self._results_cache[row].get("path", "")))
-            self._open_in_explorer(path)
+    @staticmethod
+    def _format_grid_text(name: str, tags: Iterable[tuple[str, float]]) -> str:
+        tag_names = [tag for tag, _ in tags][:2]
+        subtitle = ", ".join(tag_names)
+        return f"{name}\n{subtitle}" if subtitle else name
 
     def _open_in_explorer(self, path: Path) -> None:
         try:
@@ -271,19 +353,23 @@ class TagsTab(QWidget):
             self._status_label.setText(f"Failed to open file: {exc}")
 
     def display_results(self, rows: Iterable[tuple[str, list[object]]]) -> None:
-        """Legacy hook retained for compatibility with earlier UI code."""
-        self._model.removeRows(0, self._model.rowCount())
+        """Legacy hook retained for backwards compatibility."""
+        self._table_model.removeRows(0, self._table_model.rowCount())
+        self._grid_model.removeRows(0, self._grid_model.rowCount())
         self._results_cache.clear()
         self._pending_thumbs.clear()
         for where_stmt, params in rows:
-            stub = [QStandardItem("") for _ in range(self._model.columnCount())]
-            if stub:
-                stub[1].setText(where_stmt)
-            if len(stub) > 2:
-                stub[2].setText(str(params))
-            for item in stub:
+            table_stub = [QStandardItem("") for _ in range(self._table_model.columnCount())]
+            if len(table_stub) > 1:
+                table_stub[1].setText(where_stmt)
+            if len(table_stub) > 2:
+                table_stub[2].setText(str(params))
+            for item in table_stub:
                 item.setEditable(False)
-            self._model.appendRow(stub)
+            self._table_model.appendRow(table_stub)
+            grid_item = QStandardItem(where_stmt)
+            grid_item.setEditable(False)
+            self._grid_model.appendRow(grid_item)
 
 
 __all__ = ["TagsTab"]
