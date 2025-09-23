@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol, Sequence
@@ -44,7 +45,7 @@ class DuplicateIndexer:
             self.index.build(dim, capacity)
         else:
             needed = self.index.current_count + additional
-            self.index.ensure_capacity(needed)
+            self.index.ensure_capacity(max(needed, self.initial_capacity))
 
     def index_paths(self, paths: Sequence[str | Path]) -> list[int]:
         """Compute hashes/embeddings for ``paths`` and persist them."""
@@ -80,6 +81,7 @@ class DuplicateIndexer:
         file_ids: list[int] = []
         vectors: list[np.ndarray] = []
         labels: list[int] = []
+        indexed_time = time.time()
 
         for entry, vector in zip(entries, embeddings):
             file_id = upsert_file(
@@ -88,6 +90,9 @@ class DuplicateIndexer:
                 size=entry["size"],
                 mtime=entry["mtime"],
                 sha256=entry["sha"],
+                width=entry["image"].width,
+                height=entry["image"].height,
+                indexed_at=indexed_time,
             )
             upsert_signatures(
                 self.conn,
@@ -96,7 +101,6 @@ class DuplicateIndexer:
                 dhash_u64=entry["dhash"],
             )
             normalized = vector.astype(np.float32)
-            # Safeguard: ensure unit length before persistence/indexing.
             norm = float(np.linalg.norm(normalized))
             if norm > 0:
                 normalized /= norm
@@ -116,5 +120,73 @@ class DuplicateIndexer:
 
         return file_ids
 
+    def save(self, path: str | Path) -> None:
+        target = Path(path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        self.index.save(target)
 
-__all__ = ["DuplicateIndexer", "EmbedderProtocol"]
+
+def load_hnsw_index(
+    path: str | Path,
+    *,
+    dim: int,
+    space: str = "cosine",
+    initial_capacity: int = 2048,
+) -> HNSWIndex:
+    target = Path(path)
+    if target.exists():
+        index = HNSWIndex.load(target)
+        index.ensure_capacity(index.current_count + initial_capacity)
+    else:
+        index = HNSWIndex(space=space)
+        index.build(dim, max(initial_capacity, dim))
+    return index
+
+
+def add_embeddings_to_hnsw(
+    index: HNSWIndex,
+    additions: Sequence[tuple[int, np.ndarray]],
+    *,
+    dim: int,
+    initial_capacity: int = 2048,
+    num_threads: int = 1,
+) -> int:
+    """Add embedding vectors to the provided HNSW index."""
+    if not additions:
+        return 0
+    vectors: list[np.ndarray] = []
+    labels: list[int] = []
+    for file_id, vector in additions:
+        array = np.asarray(vector, dtype=np.float32)
+        if array.ndim != 1:
+            raise ValueError("Embeddings must be one-dimensional vectors")
+        vectors.append(array)
+        labels.append(int(file_id))
+    matrix = np.vstack(vectors)
+    additional = len(labels)
+    if not index.is_initialized:
+        capacity = max(initial_capacity, index.current_count + additional + 256)
+        index.build(dim, capacity)
+    else:
+        current_dim = index.dim
+        if current_dim is not None and current_dim != dim:
+            raise ValueError("Embedding dimension does not match the index configuration")
+        index.ensure_capacity(index.current_count + additional + 256)
+    index.add(matrix, labels, num_threads=num_threads)
+    return additional
+
+
+def save_hnsw_index(index: HNSWIndex, path: str | Path) -> None:
+    """Persist the index to the filesystem, creating parent directories."""
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    index.save(target)
+
+
+__all__ = [
+    "DuplicateIndexer",
+    "EmbedderProtocol",
+    "load_hnsw_index",
+    "add_embeddings_to_hnsw",
+    "save_hnsw_index",
+]

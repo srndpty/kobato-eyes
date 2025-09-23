@@ -6,6 +6,31 @@ import sqlite3
 from collections.abc import Iterable, Mapping, Sequence
 from typing import Any
 
+_FILE_COLUMN_CACHE: set[str] = set()
+
+
+def _ensure_file_columns(conn: sqlite3.Connection) -> None:
+    """Make sure optional columns exist on the files table."""
+    global _FILE_COLUMN_CACHE
+    if _FILE_COLUMN_CACHE:
+        return
+    rows = conn.execute("PRAGMA table_info(files)").fetchall()
+    columns = {row[1] for row in rows}
+    alterations: list[str] = []
+    if "width" not in columns:
+        alterations.append("ALTER TABLE files ADD COLUMN width INTEGER")
+    if "height" not in columns:
+        alterations.append("ALTER TABLE files ADD COLUMN height INTEGER")
+    if "indexed_at" not in columns:
+        alterations.append("ALTER TABLE files ADD COLUMN indexed_at REAL")
+    for statement in alterations:
+        conn.execute(statement)
+    if alterations:
+        conn.commit()
+        rows = conn.execute("PRAGMA table_info(files)").fetchall()
+        columns = {row[1] for row in rows}
+    _FILE_COLUMN_CACHE = columns
+
 
 def upsert_file(
     conn: sqlite3.Connection,
@@ -14,22 +39,37 @@ def upsert_file(
     size: int | None = None,
     mtime: float | None = None,
     sha256: str | None = None,
+    width: int | None = None,
+    height: int | None = None,
+    indexed_at: float | None = None,
 ) -> int:
     """Insert or update a file record and return its identifier."""
+    _ensure_file_columns(conn)
     query = """
-        INSERT INTO files (path, size, mtime, sha256)
-        VALUES (?, ?, ?, ?)
+        INSERT INTO files (path, size, mtime, sha256, width, height, indexed_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(path) DO UPDATE SET
             size = excluded.size,
             mtime = excluded.mtime,
-            sha256 = excluded.sha256
+            sha256 = excluded.sha256,
+            width = COALESCE(excluded.width, files.width),
+            height = COALESCE(excluded.height, files.height),
+            indexed_at = COALESCE(excluded.indexed_at, files.indexed_at)
         RETURNING id
     """
 
     with conn:
-        cursor = conn.execute(query, (path, size, mtime, sha256))
+        cursor = conn.execute(
+            query,
+            (path, size, mtime, sha256, width, height, indexed_at),
+        )
         file_id = cursor.fetchone()[0]
     return int(file_id)
+
+
+def get_file_by_path(conn: sqlite3.Connection, path: str) -> sqlite3.Row | None:
+    cursor = conn.execute("SELECT * FROM files WHERE path = ?", (path,))
+    return cursor.fetchone()
 
 
 def upsert_tags(conn: sqlite3.Connection, tags: Sequence[Mapping[str, Any]]) -> dict[str, int]:
@@ -119,28 +159,16 @@ def search_files(
     offset: int = 0,
 ) -> list[dict[str, object]]:
     """Search files using a prebuilt WHERE clause and return enriched rows."""
-
-    def _has_column(name: str) -> bool:
-        cursor = conn.execute("PRAGMA table_info(files)")
-        return any(row[1] == name for row in cursor.fetchall())
-
-    has_width = _has_column("width")
-    has_height = _has_column("height")
-
-    select_parts = [
-        "f.id",
-        "f.path",
-        "f.size",
-        "f.mtime",
-    ]
-    select_parts.append("f.width AS width" if has_width else "NULL AS width")
-    select_parts.append("f.height AS height" if has_height else "NULL AS height")
-    select_clause = ", ".join(select_parts)
+    _ensure_file_columns(conn)
 
     limit = max(0, int(limit))
     offset = max(0, int(offset))
 
-    query = f"SELECT {select_clause} FROM files f WHERE {where_sql} ORDER BY {order_by} LIMIT ? OFFSET ?"
+    query = (
+        "SELECT f.id, f.path, f.size, f.mtime, f.width, f.height "
+        "FROM files f WHERE "
+        f"{where_sql} ORDER BY {order_by} LIMIT ? OFFSET ?"
+    )
 
     cursor = conn.execute(query, (*params, limit, offset))
     rows = cursor.fetchall()
@@ -158,8 +186,8 @@ def search_files(
             {
                 "id": file_id,
                 "path": row["path"],
-                "width": row["width"] if has_width else None,
-                "height": row["height"] if has_height else None,
+                "width": row["width"],
+                "height": row["height"],
                 "size": row["size"],
                 "mtime": row["mtime"],
                 "top_tags": top_tags,
@@ -168,12 +196,28 @@ def search_files(
     return results
 
 
+def mark_indexed_at(
+    conn: sqlite3.Connection,
+    file_id: int,
+    *,
+    indexed_at: float | None = None,
+) -> None:
+    """Update the ``indexed_at`` timestamp for the specified file."""
+    with conn:
+        conn.execute(
+            "UPDATE files SET indexed_at = ? WHERE id = ?",
+            (indexed_at, file_id),
+        )
+
+
 __all__ = [
     "upsert_file",
+    "get_file_by_path",
     "upsert_tags",
     "replace_file_tags",
     "update_fts",
     "upsert_signatures",
     "upsert_embedding",
     "search_files",
+    "mark_indexed_at",
 ]

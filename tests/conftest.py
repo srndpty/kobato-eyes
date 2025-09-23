@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
@@ -54,10 +55,16 @@ class _StubHNSWIndex:
         return np.asarray(labels_out, dtype=np.int64), np.asarray(distances_out, dtype=np.float32)
 
     def save_index(self, path: str) -> None:
-        raise NotImplementedError
+        target = Path(path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(b"HNSW")
 
     def load_index(self, path: str) -> None:
-        raise NotImplementedError
+        target = Path(path)
+        if target.exists():
+            data = target.read_bytes()
+            if not data.startswith(b"HNSW"):
+                raise ValueError("Corrupted stub index")
 
 
 @pytest.fixture(autouse=True)
