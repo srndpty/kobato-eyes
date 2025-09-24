@@ -50,6 +50,7 @@ def default_index_dir() -> str:
 class TaggerSettings:
     name: str = "dummy"
     model_path: str | None = None
+    tags_csv: str | None = None
     thresholds: dict[str, float] = field(default_factory=lambda: DEFAULT_TAG_THRESHOLDS.copy())
 
 
@@ -157,9 +158,12 @@ class PipelineSettings:
                 tagger_thresholds[str(key)] = float(value)
             except (TypeError, ValueError):
                 continue
+        tagger_model = _coerce_optional_path(tagger_conf.get("model_path", defaults.tagger.model_path))
+        tagger_csv = _coerce_optional_path(tagger_conf.get("tags_csv", defaults.tagger.tags_csv))
         tagger = TaggerSettings(
             name=str(tagger_conf.get("name", defaults.tagger.name)),
-            model_path=tagger_conf.get("model_path", defaults.tagger.model_path),
+            model_path=tagger_model,
+            tags_csv=tagger_csv,
             thresholds=tagger_thresholds,
         )
 
@@ -218,6 +222,7 @@ class PipelineSettings:
             "tagger": {
                 "name": self.tagger.name,
                 "model_path": self.tagger.model_path,
+                "tags_csv": self.tagger.tags_csv,
                 "thresholds": self.tagger.thresholds,
             },
             "embed_model": {
@@ -288,6 +293,12 @@ def _coerce_str(value: Any) -> str:
     if value is None:
         return ""
     return str(value).strip()
+
+
+def _coerce_optional_path(value: Any) -> str | None:
+    if value in (None, ""):
+        return None
+    return str(value)
 
 
 __all__ = [
