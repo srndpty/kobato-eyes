@@ -29,9 +29,12 @@ def _patch_openclip(
     def fake_list_pretrained() -> list[tuple[str, str]]:
         return [("ViT-L-14", tag) for tag in available]
 
-    def fake_create_model_and_transforms(model_name: str, pretrained: str):
+    def fake_create_model_and_transforms(
+        model_name: str, *, pretrained: str, device: object | None = None
+    ):
         recorded["model_name"] = model_name
         recorded["pretrained"] = pretrained
+        recorded["device"] = device
         return _DummyModel(), lambda image: image
 
     monkeypatch.setattr("sig.embedder.open_clip.list_pretrained", fake_list_pretrained)
