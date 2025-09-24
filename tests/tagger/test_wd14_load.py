@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -74,3 +75,45 @@ def test_wd14_tagger_respects_explicit_csv(tmp_path: Path, _mock_labels: list[Pa
 
     assert _mock_labels[0] == csv_path
     assert tagger._labels_path == csv_path  # type: ignore[attr-defined]
+
+
+def test_wd14_tagger_falls_back_to_cpu_provider(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    _mock_labels: list[Path],
+) -> None:
+    """WD14Tagger should gracefully fall back to CPU provider when CUDA fails."""
+
+    attempts: list[list[str]] = []
+
+    class _FailCUDAThenCPU:
+        def __init__(self, *args, **kwargs) -> None:  # noqa: D401 - signature compatibility
+            providers = kwargs.get("providers", [])
+            attempts.append(list(providers))
+            if providers == ["CUDAExecutionProvider"]:
+                raise RuntimeError("CUDAExecutionProvider not available")
+            self._inputs = [SimpleNamespace(name="input_0")]
+            self._outputs = [SimpleNamespace(name="output_0")]
+
+        def get_inputs(self) -> list[SimpleNamespace]:
+            return self._inputs
+
+        def get_outputs(self) -> list[SimpleNamespace]:
+            return self._outputs
+
+    monkeypatch.setattr(wd14_onnx.ort, "InferenceSession", _FailCUDAThenCPU)
+
+    model_path = tmp_path / "model.onnx"
+    model_path.write_bytes(b"dummy")
+    csv_path = tmp_path / "selected_tags.csv"
+    csv_path.write_text("tag,0\n", encoding="utf-8")
+
+    with caplog.at_level(logging.WARNING):
+        tagger = wd14_onnx.WD14Tagger(model_path)
+
+    assert attempts[0] == ["CUDAExecutionProvider"]
+    assert attempts[1] == ["CPUExecutionProvider"]
+    warning_messages = [record.message for record in caplog.records if record.levelno == logging.WARNING]
+    assert any("falling back to CPUExecutionProvider" in message for message in warning_messages)
+    assert tagger._session is not None  # type: ignore[attr-defined]

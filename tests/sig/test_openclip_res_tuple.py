@@ -86,3 +86,40 @@ def test_openclip_falls_back_when_pretrained_missing(
     assert any("falling back" in message for message in warning_messages)
     info_messages = [record.message for record in caplog.records if record.levelno == logging.INFO]
     assert any("laion2b_s32b_b82k" in message for message in info_messages)
+
+
+def test_openclip_auto_device_uses_cpu_when_cuda_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    model = _build_model(256)
+    preprocess = object()
+    create_mock = MagicMock(return_value=(model, preprocess))
+    monkeypatch.setattr(
+        "sig.embedder.open_clip.create_model_and_transforms", create_mock
+    )
+    monkeypatch.setattr("sig.embedder.torch.cuda.is_available", lambda: False)
+
+    embedder = OpenClipEmbedder("ViT-L-14", "openai", device="auto")
+
+    assert embedder._device.type == "cpu"  # type: ignore[attr-defined]
+    assert create_mock.call_args.kwargs["device"].type == "cpu"
+
+
+def test_openclip_cuda_device_falls_back_when_unavailable(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    model = _build_model(256)
+    preprocess = object()
+    create_mock = MagicMock(return_value=(model, preprocess))
+    monkeypatch.setattr(
+        "sig.embedder.open_clip.create_model_and_transforms", create_mock
+    )
+    monkeypatch.setattr("sig.embedder.torch.cuda.is_available", lambda: False)
+
+    with caplog.at_level(logging.WARNING):
+        embedder = OpenClipEmbedder("ViT-L-14", "openai", device="cuda")
+
+    assert embedder._device.type == "cpu"  # type: ignore[attr-defined]
+    assert create_mock.call_args.kwargs["device"].type == "cpu"
+    warning_messages = [record.message for record in caplog.records if record.levelno == logging.WARNING]
+    assert any("falling back to CPU" in message for message in warning_messages)

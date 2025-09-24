@@ -28,7 +28,29 @@ class OpenClipEmbedder:
         batch_size: int = 8,
         use_fp16: bool = True,
     ) -> None:
-        self._device = torch.device(device or ("cuda" if torch.cuda.is_available() else "cpu"))
+        requested_device: str
+        if isinstance(device, torch.device):
+            requested_device = device.type
+        else:
+            requested_device = str(device).strip().lower() if device is not None else "auto"
+        if requested_device not in {"auto", "cuda", "cpu"}:
+            logger.warning(
+                "OpenCLIP: unknown device '%s', defaulting to auto detection", requested_device
+            )
+            requested_device = "auto"
+        if requested_device == "auto":
+            resolved_type = "cuda" if torch.cuda.is_available() else "cpu"
+        elif requested_device == "cuda":
+            if torch.cuda.is_available():
+                resolved_type = "cuda"
+            else:
+                logger.warning(
+                    "OpenCLIP: CUDA requested but not available; falling back to CPU"
+                )
+                resolved_type = "cpu"
+        else:
+            resolved_type = "cpu"
+        self._device = torch.device(resolved_type)
         self._batch_size = max(1, batch_size)
 
         available_pretrained = _available_pretrained_tags(model_name)
@@ -41,9 +63,10 @@ class OpenClipEmbedder:
                 resolved_pretrained,
             )
         logger.info(
-            "Loading OpenCLIP model '%s' with pretrained '%s'",
+            "Loading OpenCLIP model '%s' with pretrained '%s' on %s",
             model_name,
             resolved_pretrained,
+            self._device.type,
         )
 
         model, preprocess = _create_model_and_preprocess(

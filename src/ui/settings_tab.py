@@ -55,6 +55,11 @@ class SettingsTab(QWidget):
         self._model_combo = QComboBox(self)
         self._model_combo.addItems(["ViT-L-14", "ViT-H-14", "RN50"])
 
+        self._device_combo = QComboBox(self)
+        self._device_combo.addItem("Auto", "auto")
+        self._device_combo.addItem("CUDA", "cuda")
+        self._device_combo.addItem("CPU", "cpu")
+
         self._pretrained_edit = QLineEdit(self)
         self._pretrained_edit.setPlaceholderText("e.g. openai")
 
@@ -85,6 +90,7 @@ class SettingsTab(QWidget):
         form.addRow("Cosine threshold", self._cosine_spin)
         form.addRow("SSIM threshold", self._ssim_spin)
         form.addRow("Model", self._model_combo)
+        form.addRow("Device", self._device_combo)
         form.addRow("Pretrained tag", self._pretrained_edit)
         form.addRow("Tagger", self._tagger_combo)
         form.addRow("Model path", tagger_model_row)
@@ -110,6 +116,11 @@ class SettingsTab(QWidget):
         if index >= 0:
             self._model_combo.setCurrentIndex(index)
         self._pretrained_edit.setText(settings.embed_model.pretrained)
+        device_index = self._device_combo.findData(settings.embed_model.device)
+        if device_index >= 0:
+            self._device_combo.setCurrentIndex(device_index)
+        else:
+            self._device_combo.setCurrentIndex(0)
         tagger_index = self._tagger_combo.findText(settings.tagger.name)
         if tagger_index >= 0:
             self._tagger_combo.setCurrentIndex(tagger_index)
@@ -140,6 +151,7 @@ class SettingsTab(QWidget):
             embed_model=EmbedModel(
                 name=self._model_combo.currentText(),
                 pretrained=self._pretrained_edit.text().strip(),
+                device=str(self._device_combo.currentData()),
             ),
             auto_index=self._auto_index_check.isChecked(),
             tagger=tagger_settings,

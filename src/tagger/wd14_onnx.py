@@ -83,23 +83,42 @@ class WD14Tagger(ITagger):
         self._default_thresholds = dict(default_thresholds or {})
         self._default_max_tags = dict(default_max_tags or {})
 
-        provider_list = (
-            list(providers)
-            if providers is not None
-            else [
-                "CUDAExecutionProvider",
-                "ROCMExecutionProvider",
-                "DirectMLExecutionProvider",
-                "CPUExecutionProvider",
-            ]
-        )
-
         session_options = ort.SessionOptions()
-        self._session = ort.InferenceSession(
-            str(self._model_path),
-            sess_options=session_options,
-            providers=provider_list,
+        provider_attempts = (
+            [list(providers)]
+            if providers is not None
+            else [["CUDAExecutionProvider"], ["CPUExecutionProvider"]]
         )
+        last_error: Exception | None = None
+        session = None
+        chosen_providers: list[str] | None = None
+        for provider_list in provider_attempts:
+            try:
+                session = ort.InferenceSession(
+                    str(self._model_path),
+                    sess_options=session_options,
+                    providers=provider_list,
+                )
+            except Exception as exc:  # pragma: no cover - handled in tests via mocks
+                last_error = exc
+                if providers is None and provider_list == ["CUDAExecutionProvider"]:
+                    logger.warning(
+                        "WD14: CUDAExecutionProvider unavailable, falling back to CPUExecutionProvider"
+                    )
+                    continue
+                raise
+            else:
+                chosen_providers = provider_list
+                break
+        if session is None or chosen_providers is None:
+            raise RuntimeError("WD14: failed to initialise ONNX Runtime session") from last_error
+        if providers is None and chosen_providers == ["CUDAExecutionProvider"]:
+            logger.info("WD14: using CUDAExecutionProvider")
+        elif providers is None and chosen_providers == ["CPUExecutionProvider"]:
+            logger.info("WD14: using CPUExecutionProvider")
+        else:
+            logger.info("WD14: using providers %s", chosen_providers)
+        self._session = session
         self._input_name = self._session.get_inputs()[0].name
         self._output_names = [output.name for output in self._session.get_outputs()]
 

@@ -61,6 +61,9 @@ _DEFAULT_PRETRAINED_TAGS = {
 }
 
 
+_VALID_EMBED_DEVICES = {"auto", "cuda", "cpu"}
+
+
 def _default_pretrained(model_name: str) -> str:
     return _DEFAULT_PRETRAINED_TAGS.get(model_name, "openai")
 
@@ -69,7 +72,7 @@ def _default_pretrained(model_name: str) -> str:
 class EmbedModel:
     name: str = "ViT-L-14"
     pretrained: str = "openai"
-    device: str = "cuda"
+    device: str = "auto"
     dim: int = 768
 
     def __post_init__(self) -> None:
@@ -78,6 +81,11 @@ class EmbedModel:
         self.pretrained = self.pretrained.strip()
         if not self.pretrained:
             self.pretrained = _default_pretrained(self.name)
+        device_value = (self.device or "auto") if isinstance(self.device, str) else str(self.device)
+        device_normalised = device_value.strip().lower()
+        if device_normalised not in _VALID_EMBED_DEVICES:
+            device_normalised = "auto"
+        self.device = device_normalised
 
 
 @dataclass
