@@ -6,7 +6,7 @@ import csv
 import logging
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable
+from typing import Iterable, Sequence
 
 import numpy as np
 from PIL import Image
@@ -20,6 +20,13 @@ except ImportError as exc:  # pragma: no cover - graceful degradation
     _IMPORT_ERROR = exc
 else:
     _IMPORT_ERROR = None
+
+
+ONNXRUNTIME_MISSING_MESSAGE = (
+    "onnxruntime is required. Try: pip install onnxruntime-gpu  (or onnxruntime for CPU)"
+)
+_CUDA_PROVIDER = "CUDAExecutionProvider"
+_CPU_PROVIDER = "CPUExecutionProvider"
 
 
 @dataclass(frozen=True)
@@ -57,6 +64,25 @@ _DEFAULT_TAG_FILES = (
 )
 
 
+def ensure_onnxruntime() -> None:
+    """Ensure onnxruntime is importable, raising a user-facing error otherwise."""
+
+    if ort is None:  # pragma: no cover - runtime guard
+        raise RuntimeError(ONNXRUNTIME_MISSING_MESSAGE) from _IMPORT_ERROR
+
+
+def get_available_providers() -> list[str]:
+    """Return the list of ONNX Runtime providers available on this system."""
+
+    ensure_onnxruntime()
+    try:
+        providers = list(ort.get_available_providers())  # type: ignore[call-arg]
+    except Exception as exc:  # pragma: no cover - defensive logging
+        logger.warning("WD14: failed to query ONNX providers: %s", exc)
+        return []
+    return providers
+
+
 class WD14Tagger(ITagger):
     """WD14 tagger backed by ONNX Runtime with CUDA acceleration when available."""
 
@@ -71,8 +97,7 @@ class WD14Tagger(ITagger):
         default_thresholds: ThresholdMap | None = None,
         default_max_tags: MaxTagsMap | None = None,
     ) -> None:
-        if ort is None:  # pragma: no cover - runtime guard
-            raise RuntimeError("onnxruntime is required to use WD14Tagger") from _IMPORT_ERROR
+        ensure_onnxruntime()
 
         self._model_path = Path(model_path)
         logger.info("WD14: using model %s", self._model_path)
@@ -84,11 +109,30 @@ class WD14Tagger(ITagger):
         self._default_max_tags = dict(default_max_tags or {})
 
         session_options = ort.SessionOptions()
-        provider_attempts = (
-            [list(providers)]
-            if providers is not None
-            else [["CUDAExecutionProvider"], ["CPUExecutionProvider"]]
-        )
+        available_providers = get_available_providers()
+        if available_providers:
+            logger.info("WD14: available ONNX providers: %s", ", ".join(available_providers))
+        else:
+            logger.warning("WD14: no ONNX providers reported by runtime")
+
+        requested_providers: Sequence[str] | None = providers
+        provider_attempts: list[list[str]]
+        if requested_providers is not None:
+            provider_attempts = [list(requested_providers)]
+            if _CUDA_PROVIDER in provider_attempts[0] and _CUDA_PROVIDER not in available_providers:
+                logger.warning(
+                    "WD14: %s requested but not available; falling back to %s",
+                    _CUDA_PROVIDER,
+                    _CPU_PROVIDER,
+                )
+                provider_attempts = [[_CPU_PROVIDER]]
+        else:
+            if available_providers and _CUDA_PROVIDER not in available_providers:
+                logger.info(
+                    "WD14: %s not reported by runtime; CPU provider will be used if CUDA fails",
+                    _CUDA_PROVIDER,
+                )
+            provider_attempts = [[_CUDA_PROVIDER], [_CPU_PROVIDER]]
         last_error: Exception | None = None
         session = None
         chosen_providers: list[str] | None = None
@@ -101,9 +145,11 @@ class WD14Tagger(ITagger):
                 )
             except Exception as exc:  # pragma: no cover - handled in tests via mocks
                 last_error = exc
-                if providers is None and provider_list == ["CUDAExecutionProvider"]:
+                if requested_providers is None and provider_list == [_CUDA_PROVIDER]:
                     logger.warning(
-                        "WD14: CUDAExecutionProvider unavailable, falling back to CPUExecutionProvider"
+                        "WD14: %s unavailable, falling back to %s",
+                        _CUDA_PROVIDER,
+                        _CPU_PROVIDER,
                     )
                     continue
                 raise
@@ -112,10 +158,10 @@ class WD14Tagger(ITagger):
                 break
         if session is None or chosen_providers is None:
             raise RuntimeError("WD14: failed to initialise ONNX Runtime session") from last_error
-        if providers is None and chosen_providers == ["CUDAExecutionProvider"]:
-            logger.info("WD14: using CUDAExecutionProvider")
-        elif providers is None and chosen_providers == ["CPUExecutionProvider"]:
-            logger.info("WD14: using CPUExecutionProvider")
+        if requested_providers is None and chosen_providers == [_CUDA_PROVIDER]:
+            logger.info("WD14: using %s", _CUDA_PROVIDER)
+        elif requested_providers is None and chosen_providers == [_CPU_PROVIDER]:
+            logger.info("WD14: using %s", _CPU_PROVIDER)
         else:
             logger.info("WD14: using providers %s", chosen_providers)
         self._session = session
@@ -251,4 +297,4 @@ class WD14Tagger(ITagger):
         return results
 
 
-__all__ = ["WD14Tagger"]
+__all__ = ["WD14Tagger", "ensure_onnxruntime", "get_available_providers", "ONNXRUNTIME_MISSING_MESSAGE"]

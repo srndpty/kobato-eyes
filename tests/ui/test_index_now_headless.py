@@ -14,6 +14,7 @@ pytest.importorskip("PyQt6.QtWidgets", reason="PyQt6 widgets required", exc_type
 from PyQt6.QtWidgets import QApplication
 
 from db.schema import apply_schema
+from tagger.wd14_onnx import ONNXRUNTIME_MISSING_MESSAGE
 from ui.tags_tab import TagsTab
 
 
@@ -83,4 +84,19 @@ def test_index_now_async_flow(tags_tab: TagsTab, qapp: QApplication) -> None:
         tags_tab._toast_label.text()  # type: ignore[attr-defined]
         == "Indexed: 3 files / Tagged: 2 / Embedded: 1 (tagger: dummy)"
     )
+    assert tags_tab._placeholder_button.isEnabled()  # type: ignore[attr-defined]
+
+
+def test_index_now_reports_missing_onnxruntime(tags_tab: TagsTab, qapp: QApplication) -> None:
+    with patch("ui.tags_tab.run_index_once", side_effect=RuntimeError(ONNXRUNTIME_MISSING_MESSAGE)):
+        tags_tab._placeholder_button.click()  # type: ignore[attr-defined]
+        for _ in range(100):
+            qapp.processEvents()
+            if not getattr(tags_tab, "_indexing_active", True):
+                break
+            time.sleep(0.01)
+
+    assert tags_tab._toast_label.isVisible()  # type: ignore[attr-defined]
+    assert tags_tab._toast_label.text() == ONNXRUNTIME_MISSING_MESSAGE  # type: ignore[attr-defined]
+    assert tags_tab._status_label.text() == ONNXRUNTIME_MISSING_MESSAGE  # type: ignore[attr-defined]
     assert tags_tab._placeholder_button.isEnabled()  # type: ignore[attr-defined]

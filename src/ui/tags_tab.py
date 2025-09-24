@@ -45,6 +45,7 @@ from db.connection import get_conn
 from db.repository import search_files
 from utils.image_io import get_thumbnail
 from utils.paths import ensure_dirs, get_db_path
+from tagger.wd14_onnx import ONNXRUNTIME_MISSING_MESSAGE
 
 logger = logging.getLogger(__name__)
 
@@ -646,8 +647,11 @@ class TagsTab(QWidget):
 
     def _handle_index_failed(self, message: str) -> None:
         self._indexing_active = False
-        prefix = "Retagging" if self._retag_active else "Indexing"
-        error_text = f"{prefix} failed (DB: {self._db_display}): {message}"
+        if message == ONNXRUNTIME_MISSING_MESSAGE:
+            error_text = message
+        else:
+            prefix = "Retagging" if self._retag_active else "Indexing"
+            error_text = f"{prefix} failed (DB: {self._db_display}): {message}"
         self._status_label.setText(error_text)
         self._show_toast(error_text)
         self._retag_active = False

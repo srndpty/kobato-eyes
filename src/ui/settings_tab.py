@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import Iterable
 
@@ -18,12 +19,16 @@ from PyQt6.QtWidgets import (
     QPlainTextEdit,
     QPushButton,
     QSpinBox,
+    QToolTip,
     QVBoxLayout,
     QWidget,
 )
 
 from core.config import load_settings, save_settings
 from core.settings import EmbedModel, PipelineSettings, TaggerSettings
+
+
+logger = logging.getLogger(__name__)
 
 
 class SettingsTab(QWidget):
@@ -80,6 +85,15 @@ class SettingsTab(QWidget):
         tagger_layout.addWidget(self._tagger_model_edit)
         tagger_layout.addWidget(self._tagger_model_button)
 
+        self._tagger_env_button = QPushButton("Check environment", self)
+        self._tagger_env_button.setToolTip("Log and display available ONNX providers")
+        self._tagger_env_button.clicked.connect(self._on_check_tagger_env)
+        tagger_env_row = QWidget(self)
+        tagger_env_layout = QHBoxLayout(tagger_env_row)
+        tagger_env_layout.setContentsMargins(0, 0, 0, 0)
+        tagger_env_layout.addWidget(self._tagger_env_button)
+        tagger_env_layout.addStretch()
+
         apply_button = QPushButton("Apply", self)
         apply_button.clicked.connect(self._emit_settings)
 
@@ -94,6 +108,7 @@ class SettingsTab(QWidget):
         form.addRow("Pretrained tag", self._pretrained_edit)
         form.addRow("Tagger", self._tagger_combo)
         form.addRow("Model path", tagger_model_row)
+        form.addRow("", tagger_env_row)
         form.addRow(self._auto_index_check)
 
         layout = QVBoxLayout(self)
@@ -172,6 +187,7 @@ class SettingsTab(QWidget):
         is_wd14 = name.lower() == "wd14-onnx"
         self._tagger_model_edit.setEnabled(is_wd14)
         self._tagger_model_button.setEnabled(is_wd14)
+        self._tagger_env_button.setEnabled(is_wd14)
 
     def _on_browse_model(self) -> None:
         text_value = self._tagger_model_edit.text().strip()
@@ -184,6 +200,28 @@ class SettingsTab(QWidget):
         )
         if file_path:
             self._tagger_model_edit.setText(file_path)
+
+    def _on_check_tagger_env(self) -> None:
+        try:
+            from tagger import wd14_onnx
+
+            providers = wd14_onnx.get_available_providers()
+        except RuntimeError as exc:
+            message = str(exc)
+            logger.warning("Tagger environment check failed: %s", exc)
+        else:
+            if providers:
+                joined = ", ".join(providers)
+            else:
+                joined = "<none>"
+            message = f"ONNX providers: {joined}"
+            logger.info("Available ONNX providers: %s", joined)
+        self._show_environment_message(message)
+
+    def _show_environment_message(self, message: str) -> None:
+        rect = self._tagger_env_button.rect()
+        global_pos = self._tagger_env_button.mapToGlobal(rect.center())
+        QToolTip.showText(global_pos, message, self._tagger_env_button, rect, 4000)
 
 
 __all__ = ["SettingsTab"]
