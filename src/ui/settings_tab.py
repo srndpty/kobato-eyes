@@ -7,6 +7,7 @@ from typing import Iterable
 
 from PyQt6.QtCore import pyqtSignal
 from PyQt6.QtWidgets import (
+    QCheckBox,
     QComboBox,
     QDoubleSpinBox,
     QFormLayout,
@@ -51,6 +52,9 @@ class SettingsTab(QWidget):
         self._model_combo = QComboBox(self)
         self._model_combo.addItems(["ViT-L-14", "ViT-H-14", "RN50"])
 
+        self._auto_index_check = QCheckBox("Auto index changes", self)
+        self._auto_index_check.setChecked(True)
+
         apply_button = QPushButton("Apply", self)
         apply_button.clicked.connect(self._emit_settings)
 
@@ -61,6 +65,7 @@ class SettingsTab(QWidget):
         form.addRow("Cosine threshold", self._cosine_spin)
         form.addRow("SSIM threshold", self._ssim_spin)
         form.addRow("Model", self._model_combo)
+        form.addRow(self._auto_index_check)
 
         layout = QVBoxLayout(self)
         layout.addLayout(form)
@@ -75,6 +80,7 @@ class SettingsTab(QWidget):
         self._hamming_spin.setValue(settings.hamming_threshold)
         self._cosine_spin.setValue(settings.cosine_threshold)
         self._ssim_spin.setValue(settings.ssim_threshold)
+        self._auto_index_check.setChecked(bool(settings.auto_index))
         index = self._model_combo.findText(settings.model_name)
         if index >= 0:
             self._model_combo.setCurrentIndex(index)
@@ -87,6 +93,7 @@ class SettingsTab(QWidget):
             cosine_threshold=float(self._cosine_spin.value()),
             ssim_threshold=float(self._ssim_spin.value()),
             embed_model=EmbedModel(name=self._model_combo.currentText()),
+            auto_index=self._auto_index_check.isChecked(),
         )
         save_settings(settings)
         self.settings_applied.emit(settings)

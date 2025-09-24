@@ -6,19 +6,18 @@ import logging
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from queue import Queue
 from typing import Iterable, Optional, Set
 
 import numpy as np
 from PIL import Image
-from PyQt6.QtCore import QObject, QTimer
+from PyQt6.QtCore import QObject
 
 from core.config import load_settings
 from core.jobs import BatchJob, JobManager
 from core.scanner import DEFAULT_EXTENSIONS, iter_images
 from core.settings import PipelineSettings
 from core.tag_job import TagJobConfig, run_tag_job
-from core.watcher import DirectoryWatcher, FileEvent
+from core.watcher import DirectoryWatcher
 from db.connection import get_conn
 from db.repository import (
     get_file_by_path,
@@ -138,42 +137,44 @@ class ProcessingPipeline(QObject):
         self._index = hnsw_index
         self._job_manager = job_manager
         self._settings = settings or PipelineSettings()
-        self._queue: Queue[FileEvent] = Queue()
         self._watcher: DirectoryWatcher | None = None
-        self._drain_timer = QTimer(self)
-        self._drain_timer.setInterval(250)
-        self._drain_timer.timeout.connect(self._drain_events)
         self._scheduled: Set[Path] = set()
         self._tag_config = TagJobConfig()
 
     def update_settings(self, settings: PipelineSettings) -> None:
         logger.info("Updating pipeline settings: %s", settings)
-        self._settings = settings
+        was_running = self._watcher is not None and self._watcher.is_running()
         if self._watcher is not None:
             self.stop()
+        self._settings = settings
+        if self._settings.auto_index and (was_running or self._watcher is None):
             self.start()
 
     def start(self) -> None:
         if self._watcher is not None:
+            return
+        if not self._settings.auto_index:
+            logger.info("Auto indexing disabled; watcher not started")
             return
         if not self._settings.roots:
             logger.warning("Cannot start pipeline without roots")
             return
         self._watcher = DirectoryWatcher(
             self._settings.roots,
-            self._queue,
+            callback=self.enqueue_index,
             excluded=self._settings.excluded,
-            extensions=DEFAULT_EXTENSIONS,
+            extensions=self._settings.allow_exts or DEFAULT_EXTENSIONS,
+            parent=self,
         )
         self._watcher.start()
-        self._drain_timer.start()
         logger.info("Processing pipeline started")
 
     def stop(self) -> None:
         if self._watcher is not None:
+            self._watcher.flush_pending()
             self._watcher.stop()
+            self._watcher.deleteLater()
             self._watcher = None
-        self._drain_timer.stop()
         self._scheduled.clear()
         logger.info("Processing pipeline stopped")
 
@@ -182,26 +183,31 @@ class ProcessingPipeline(QObject):
         self._job_manager.shutdown()
 
     def enqueue_path(self, path: Path) -> None:
-        self._schedule_path(path)
+        self.enqueue_index([path])
 
-    def _drain_events(self) -> None:
-        while not self._queue.empty():
-            event = self._queue.get()
-            path = Path(event.path)
-            self._schedule_path(path)
-
-    def _schedule_path(self, path: Path) -> None:
-        if not path.suffix:
+    def enqueue_index(self, paths: Iterable[Path]) -> None:
+        allow_exts = {ext.lower() for ext in (self._settings.allow_exts or DEFAULT_EXTENSIONS)}
+        scheduled_now: set[Path] = set()
+        resolved_paths: list[Path] = []
+        for path in paths:
+            candidate = Path(path)
+            suffix = candidate.suffix.lower()
+            if not suffix or suffix not in allow_exts:
+                continue
+            try:
+                resolved = candidate.expanduser().resolve()
+            except OSError:
+                resolved = candidate.expanduser().absolute()
+            if resolved in self._scheduled or resolved in scheduled_now:
+                continue
+            scheduled_now.add(resolved)
+            resolved_paths.append(resolved)
+        if not resolved_paths:
             return
-        if path.suffix.lower() not in DEFAULT_EXTENSIONS:
-            return
-        resolved = path.resolve()
-        if resolved in self._scheduled:
-            return
-        self._scheduled.add(resolved)
-        logger.debug("Scheduling processing for %s", resolved)
+        self._scheduled.update(scheduled_now)
+        logger.debug("Scheduling processing for %d file(s)", len(resolved_paths))
         job = _FileProcessJob(
-            [resolved],
+            resolved_paths,
             db_path=self._db_path,
             tagger=self._tagger,
             embedder=self._embedder,
@@ -210,7 +216,12 @@ class ProcessingPipeline(QObject):
             tag_config=self._tag_config,
         )
         signals = self._job_manager.submit(job)
-        signals.finished.connect(lambda path=resolved: self._scheduled.discard(path))
+
+        def _on_finished() -> None:
+            for resolved in resolved_paths:
+                self._scheduled.discard(resolved)
+
+        signals.finished.connect(_on_finished)
 
 
 @dataclass
