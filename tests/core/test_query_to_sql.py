@@ -7,6 +7,7 @@ from core.query import translate_query
 
 def test_translate_query_single_token() -> None:
     fragment = translate_query("1girl")
+    assert "ft.file_id = f.id" in fragment.where
     assert "t.name" in fragment.where
     assert fragment.params == ["1girl"]
 

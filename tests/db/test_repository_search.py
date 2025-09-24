@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pytest
 
+from core.query import translate_query
 from db.connection import get_conn
 from db.repository import search_files
 from db.schema import apply_schema
@@ -85,3 +86,13 @@ def test_search_files_order_limit_offset(conn) -> None:
 
     second = search_files(conn, where_sql, [], order_by="f.mtime ASC", limit=1, offset=1)
     assert second[0]["id"] == file_d
+
+
+def test_translate_query_integrates_with_search(conn) -> None:
+    file_id = _insert_file(conn, path="E.png", size=111, mtime=10.0, sha="e")
+    _insert_tag(conn, "1girl", 0.88, file_id)
+
+    fragment = translate_query("1girl", file_alias="f")
+    results = search_files(conn, fragment.where, fragment.params)
+
+    assert [row["id"] for row in results] == [file_id]
