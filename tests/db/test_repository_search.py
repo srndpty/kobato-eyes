@@ -68,10 +68,11 @@ def test_search_files_returns_expected_record(conn) -> None:
     assert record["width"] is None and record["height"] is None
     assert record["size"] == 123
     assert record["mtime"] == pytest.approx(200.0)
-    assert len(record["top_tags"]) == 5
-    names = [name for name, _ in record["top_tags"]]
-    assert names[0] == "1girl"
-    assert "outdoors" not in names
+    assert "tags" in record
+    assert len(record["tags"]) == len(tags)
+    tag_names = [name for name, _ in record["tags"]]
+    assert tag_names == [name for name, _ in tags]
+    assert record["top_tags"] == record["tags"]
 
 
 def test_search_files_order_limit_offset(conn) -> None:

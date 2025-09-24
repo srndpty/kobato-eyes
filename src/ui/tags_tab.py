@@ -274,7 +274,7 @@ class TagsTab(QWidget):
             "Size",
             "Dim",
             "Modified",
-            "Top 5 Tags",
+            "Tags",
         ]
         self._table_model = QStandardItemModel(0, len(headers), self)
         self._table_model.setHorizontalHeaderLabels(headers)
@@ -711,6 +711,8 @@ class TagsTab(QWidget):
             row_index = len(self._results_cache)
             self._results_cache.append(record)
             path_obj = Path(str(record.get("path", "")))
+            tags = list(record.get("tags") or record.get("top_tags") or [])
+            tags_text = self._format_tags(tags)
 
             table_items = [
                 QStandardItem(""),
@@ -719,23 +721,25 @@ class TagsTab(QWidget):
                 QStandardItem(self._format_size(record.get("size"))),
                 QStandardItem(self._format_dimensions(record.get("width"), record.get("height"))),
                 QStandardItem(self._format_mtime(record.get("mtime"))),
-                QStandardItem(self._format_tags(record.get("top_tags", []))),
+                QStandardItem(tags_text),
             ]
             table_items[0].setData(
                 Qt.AlignmentFlag.AlignCenter, Qt.ItemDataRole.TextAlignmentRole
             )
             for item in table_items:
                 item.setEditable(False)
+            table_items[-1].setToolTip(tags_text)
             self._table_model.appendRow(table_items)
             self._table_view.setRowHeight(row_index, self._THUMB_SIZE + 16)
 
-            grid_item = QStandardItem(self._format_grid_text(path_obj.name, record.get("top_tags", [])))
+            grid_item = QStandardItem(self._format_grid_text(path_obj.name, tags))
             grid_item.setEditable(False)
             grid_item.setData(row_index, Qt.ItemDataRole.UserRole)
             grid_item.setData(
                 Qt.AlignmentFlag.AlignCenter, Qt.ItemDataRole.TextAlignmentRole
             )
             grid_item.setSizeHint(QSize(self._THUMB_SIZE + 48, self._THUMB_SIZE + 72))
+            grid_item.setToolTip(tags_text)
             self._grid_model.appendRow(grid_item)
 
             if path_obj.exists():

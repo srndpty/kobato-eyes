@@ -210,10 +210,10 @@ def search_files(
         file_id = row["id"]
         tag_rows = conn.execute(
             "SELECT t.name, ft.score FROM file_tags ft JOIN tags t ON t.id = ft.tag_id "
-            "WHERE ft.file_id = ? ORDER BY ft.score DESC LIMIT 5",
+            "WHERE ft.file_id = ? ORDER BY ft.score DESC",
             (file_id,),
         ).fetchall()
-        top_tags = [(tag_row["name"], float(tag_row["score"])) for tag_row in tag_rows]
+        tags = [(tag_row["name"], float(tag_row["score"])) for tag_row in tag_rows]
         results.append(
             {
                 "id": file_id,
@@ -222,7 +222,8 @@ def search_files(
                 "height": row["height"],
                 "size": row["size"],
                 "mtime": row["mtime"],
-                "top_tags": top_tags,
+                "tags": tags,
+                "top_tags": tags,
             }
         )
     return results
