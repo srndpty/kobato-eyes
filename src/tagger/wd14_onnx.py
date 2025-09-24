@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Sequence
 
+import cv2
 import numpy as np
 from PIL import Image
 
@@ -22,9 +23,7 @@ else:
     _IMPORT_ERROR = None
 
 
-ONNXRUNTIME_MISSING_MESSAGE = (
-    "onnxruntime is required. Try: pip install onnxruntime-gpu  (or onnxruntime for CPU)"
-)
+ONNXRUNTIME_MISSING_MESSAGE = "onnxruntime is required. Try: pip install onnxruntime-gpu  (or onnxruntime for CPU)"
 _CUDA_PROVIDER = "CUDAExecutionProvider"
 _CPU_PROVIDER = "CPUExecutionProvider"
 
@@ -224,14 +223,59 @@ class WD14Tagger(ITagger):
             raise ValueError("No labels parsed from WD14 label CSV")
         return labels
 
+    # original
+    # def _preprocess(self, image: Image.Image) -> np.ndarray:
+    #     rgb = image.convert("RGB")
+    #     resample = getattr(Image, "Resampling", Image).BICUBIC  # type: ignore[attr-defined]
+    #     resized = rgb.resize((self._input_size, self._input_size), resample)
+    #     array = np.asarray(resized, dtype=np.float32) / 255.0  # 0..1
+    #     # ★ BGR反転もしない、転置もしない → NHWC のまま
+    #     return np.expand_dims(array, 0)  # (1, H, W, 3)
+
+    def make_square(self, img, target_size):
+        old_size = img.shape[:2]
+        desired_size = max(old_size)
+        desired_size = max(desired_size, target_size)
+
+        delta_w = desired_size - old_size[1]
+        delta_h = desired_size - old_size[0]
+        top, bottom = delta_h // 2, delta_h - (delta_h // 2)
+        left, right = delta_w // 2, delta_w - (delta_w // 2)
+
+        color = [255, 255, 255]
+        return cv2.copyMakeBorder(img, top, bottom, left, right, cv2.BORDER_CONSTANT, value=color)
+
+    # noinspection PyUnresolvedReferences
+    def smart_resize(self, img, size):
+        # Assumes the image has already gone through make_square
+        if img.shape[0] > size:
+            img = cv2.resize(img, (size, size), interpolation=cv2.INTER_AREA)
+        elif img.shape[0] < size:
+            img = cv2.resize(img, (size, size), interpolation=cv2.INTER_CUBIC)
+        else:  # just do nothing
+            pass
+
+        return img
+
+    # borrowed from: https://huggingface.co/spaces/deepghs/wd14_tagging_online/blob/main/app.py
     def _preprocess(self, image: Image.Image) -> np.ndarray:
-        rgb = image.convert("RGB")
-        resample = getattr(Image, "Resampling", Image).BICUBIC  # type: ignore[attr-defined]
-        resized = rgb.resize((self._input_size, self._input_size), resample)
-        array = np.asarray(resized).astype(np.float32) / 255.0
-        array = (array - 0.5) / 0.5
-        array = np.transpose(array, (2, 0, 1))
-        return np.expand_dims(array, 0)
+        _, height, _, _ = self._session.get_inputs()[0].shape
+
+        # alpha to white
+        image = image.convert("RGBA")
+        new_image = Image.new("RGBA", image.size, "WHITE")
+        new_image.paste(image, mask=image)
+        image = new_image.convert("RGB")
+        image = np.asarray(image)
+
+        # PIL RGB to OpenCV BGR
+        image = image[:, :, ::-1]
+
+        image = self.make_square(image, height)
+        image = self.smart_resize(image, height)
+        image = image.astype(np.float32)
+        image = np.expand_dims(image, 0)
+        return image
 
     @staticmethod
     def _resolve_thresholds(
@@ -269,7 +313,34 @@ class WD14Tagger(ITagger):
                 f"Model output dimension {logits.shape[1]} does not match label count {len(self._labels)}"
             )
 
-        probabilities = _sigmoid(logits)
+        # probabilities = _sigmoid(logits)
+        # Auto-detect: if the tensor already looks like probabilities in [0,1],
+        # skip sigmoid; otherwise apply sigmoid to logits.
+        minv = float(np.min(logits))
+        maxv = float(np.max(logits))
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug("WD14 LOGITS: min=%.4f max=%.4f", minv, maxv)
+
+        if 0.0 <= minv <= 1.0 and 0.0 <= maxv <= 1.0:
+            probabilities = logits.astype(np.float32, copy=False)  # already probs
+        else:
+            probabilities = _sigmoid(logits)
+
+        # --- DEBUG: dump raw top-k (before thresholds) for the 1st image in this batch ---
+        # try:
+        #     p0 = probabilities[0]
+        #     topk_n = 20
+        #     idx = np.argpartition(-p0, topk_n)[:topk_n]
+        #     idx = idx[np.argsort(-p0[idx])]
+        #     dump = []
+        #     for i in idx:
+        #         lab = self._labels[int(i)]
+        #         dump.append(f"{lab.name}({lab.category.name})={p0[i]:.3f}")
+        #     print("WD14 RAW top20: %s", ", ".join(dump))
+        # except Exception as _e:  # 失敗しても推論自体は続行
+        #     print("top-k debug dump failed: %r", _e)
+        # --- DEBUG end ---
+
         resolved_thresholds = self._resolve_thresholds(self._default_thresholds, thresholds)
         resolved_limits = self._resolve_max_tags(self._default_max_tags, max_tags)
 
