@@ -7,21 +7,14 @@ import os
 import sys
 from logging.handlers import RotatingFileHandler
 
-from PyQt6.QtCore import Qt, QUrl
-from PyQt6.QtGui import QAction, QDesktopServices, QGuiApplication
-from PyQt6.QtWidgets import QApplication, QMainWindow, QTabWidget
+from utils.env import is_headless
+from utils.paths import ensure_dirs, get_db_path, get_log_dir, migrate_data_dir_if_needed
 
-if os.environ.get("KOE_HEADLESS", "0") == "1":
+HEADLESS = is_headless()
+
+if HEADLESS:
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
     os.environ.setdefault("QT_OPENGL", "software")
-
-QGuiApplication.setAttribute(Qt.ApplicationAttribute.AA_UseSoftwareOpenGL)
-
-from db.connection import bootstrap_if_needed
-from ui.dup_tab import DupTab
-from ui.settings_tab import SettingsTab
-from ui.tags_tab import TagsTab
-from utils.paths import ensure_dirs, get_db_path, get_log_dir, migrate_data_dir_if_needed
 
 logger = logging.getLogger(__name__)
 
@@ -74,43 +67,71 @@ def setup_logging() -> None:
     root_logger.addHandler(file_handler)
 
 
-class MainWindow(QMainWindow):
-    """Main window presenting basic navigation tabs."""
+if HEADLESS:
 
-    def __init__(self) -> None:
-        super().__init__()
-        migrate_data_dir_if_needed()
-        ensure_dirs()
-        db_path = get_db_path()
-        logger.info("DB at %s", db_path)
-        bootstrap_if_needed(db_path)
-        self.setWindowTitle("kobato-eyes")
-        self._tabs = QTabWidget()
-        self._tabs.addTab(TagsTab(self), "Tags")
-        self._tabs.addTab(DupTab(self), "Duplicates")
-        self._tabs.addTab(SettingsTab(self), "Settings")
-        self.setCentralWidget(self._tabs)
-        self._init_menus()
+    class MainWindow:  # type: ignore[too-many-ancestors]
+        """Placeholder window used when Qt is unavailable."""
 
-    def _init_menus(self) -> None:
-        help_menu = self.menuBar().addMenu("Help")
-        open_logs_action = QAction("Open logs folder", self)
-        open_logs_action.triggered.connect(self._open_logs_folder)
-        help_menu.addAction(open_logs_action)
-
-    def _open_logs_folder(self) -> None:
-        log_dir = get_log_dir()
-        log_dir.mkdir(parents=True, exist_ok=True)
-        QDesktopServices.openUrl(QUrl.fromLocalFile(str(log_dir)))
+        def __init__(self, *args, **kwargs) -> None:  # noqa: D401 - Qt-compatible signature
+            raise RuntimeError("kobato-eyes UI is unavailable in headless mode")
 
 
-def run() -> None:
-    """Launch the kobato-eyes GUI application."""
-    setup_logging()
-    app = QApplication(sys.argv)
-    window = MainWindow()
-    window.show()
-    sys.exit(app.exec())
+    def run() -> None:
+        """Headless environments cannot launch the GUI."""
+
+        raise RuntimeError("kobato-eyes UI is unavailable in headless mode")
+
+
+else:
+    from PyQt6.QtCore import Qt, QUrl
+    from PyQt6.QtGui import QAction, QDesktopServices, QGuiApplication
+    from PyQt6.QtWidgets import QApplication, QMainWindow, QTabWidget
+
+    QGuiApplication.setAttribute(Qt.ApplicationAttribute.AA_UseSoftwareOpenGL)
+
+    from db.connection import bootstrap_if_needed
+    from ui.dup_tab import DupTab
+    from ui.settings_tab import SettingsTab
+    from ui.tags_tab import TagsTab
+
+    class MainWindow(QMainWindow):
+        """Main window presenting basic navigation tabs."""
+
+        def __init__(self) -> None:
+            super().__init__()
+            migrate_data_dir_if_needed()
+            ensure_dirs()
+            db_path = get_db_path()
+            logger.info("DB at %s", db_path)
+            bootstrap_if_needed(db_path)
+            self.setWindowTitle("kobato-eyes")
+            self._tabs = QTabWidget()
+            self._tabs.addTab(TagsTab(self), "Tags")
+            self._tabs.addTab(DupTab(self), "Duplicates")
+            self._tabs.addTab(SettingsTab(self), "Settings")
+            self.setCentralWidget(self._tabs)
+            self._init_menus()
+
+        def _init_menus(self) -> None:
+            help_menu = self.menuBar().addMenu("Help")
+            open_logs_action = QAction("Open logs folder", self)
+            open_logs_action.triggered.connect(self._open_logs_folder)
+            help_menu.addAction(open_logs_action)
+
+        def _open_logs_folder(self) -> None:
+            log_dir = get_log_dir()
+            log_dir.mkdir(parents=True, exist_ok=True)
+            QDesktopServices.openUrl(QUrl.fromLocalFile(str(log_dir)))
+
+
+    def run() -> None:
+        """Launch the kobato-eyes GUI application."""
+
+        setup_logging()
+        app = QApplication(sys.argv)
+        window = MainWindow()
+        window.show()
+        sys.exit(app.exec())
 
 
 if __name__ == "__main__":

@@ -15,6 +15,8 @@ pytest.importorskip(
 from ui.app import setup_logging
 from utils.paths import get_log_dir
 
+pytestmark = pytest.mark.gui
+
 
 def _clear_logging_handlers() -> None:
     root_logger = logging.getLogger()

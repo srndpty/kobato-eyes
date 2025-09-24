@@ -15,6 +15,8 @@ from core.settings import EmbedModel, PipelineSettings, TaggerSettings
 from db.connection import bootstrap_if_needed, get_conn
 from tagger.dummy import DummyTagger
 
+pytestmark = pytest.mark.integration
+
 
 class _ZeroEmbedder:
     """Return zero vectors for each supplied image."""

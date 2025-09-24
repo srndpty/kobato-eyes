@@ -7,11 +7,57 @@ from pathlib import Path
 from threading import Lock
 from typing import Callable, Iterable, Literal
 
-from PyQt6.QtCore import QObject, QTimer
 from watchdog.events import FileSystemEvent, FileSystemEventHandler
 from watchdog.observers import Observer
 
+from utils.env import is_headless
 from utils.fs import from_system_path, is_hidden, to_system_path
+
+if is_headless():
+    class QObject:  # type: ignore[too-many-ancestors]
+        """Simple QObject replacement when Qt is unavailable."""
+
+        def __init__(self, *args, **kwargs) -> None:  # noqa: D401 - Qt-compatible signature
+            pass
+
+
+    class _Signal:
+        def __init__(self) -> None:
+            self._callbacks: list[Callable[..., None]] = []
+
+        def connect(self, callback: Callable[..., None]) -> None:
+            self._callbacks.append(callback)
+
+        def emit(self, *args, **kwargs) -> None:
+            for callback in list(self._callbacks):
+                callback(*args, **kwargs)
+
+        def disconnect(self, callback: Callable[..., None]) -> None:
+            try:
+                self._callbacks.remove(callback)
+            except ValueError:
+                pass
+
+
+    class QTimer:
+        """Stub timer that mimics the Qt API shape."""
+
+        def __init__(self, parent: QObject | None = None) -> None:
+            self._interval = 0
+            self.timeout = _Signal()
+
+        def setInterval(self, interval: int) -> None:
+            self._interval = int(interval)
+
+        def start(self) -> None:
+            pass
+
+        def stop(self) -> None:
+            pass
+
+
+else:  # pragma: no branch - trivial import guard
+    from PyQt6.QtCore import QObject, QTimer
 
 FileEventType = Literal["created", "modified", "moved"]
 

@@ -11,7 +11,22 @@ from typing import Iterable, Mapping, Optional, Sequence, Set
 
 import numpy as np
 from PIL import Image
-from PyQt6.QtCore import QObject
+
+from utils.env import is_headless
+
+if is_headless():
+    class QObject:  # type: ignore[too-many-ancestors]
+        """Minimal stub used when Qt is unavailable."""
+
+        def __init__(self, *args, **kwargs) -> None:  # noqa: D401 - Qt-compatible signature
+            pass
+
+        def deleteLater(self) -> None:  # noqa: D401 - Qt-compatible signature
+            pass
+
+
+else:  # pragma: no branch - trivial import guard
+    from PyQt6.QtCore import QObject
 
 from core.config import load_settings
 from core.jobs import BatchJob, JobManager
