@@ -5,7 +5,12 @@ from __future__ import annotations
 import shutil
 from pathlib import Path
 
-from utils.paths import ensure_dirs, get_data_dir, get_db_path
+from utils.paths import (
+    ensure_dirs,
+    get_data_dir,
+    get_db_path,
+    migrate_data_dir_if_needed,
+)
 
 _LEGACY_BASENAME = "kobato-eyes.db"
 _LEGACY_SUFFIXES = ("", "-wal", "-shm")
@@ -15,8 +20,8 @@ def _repo_root() -> Path:
     return Path(__file__).resolve().parents[1]
 
 
-def migrate_legacy_data() -> bool:
-    """Move legacy database files into the current data directory."""
+def migrate_legacy_repo_database() -> bool:
+    """Move legacy database files from the repository root into the data directory."""
 
     ensure_dirs()
     target_db = get_db_path()
@@ -41,10 +46,18 @@ def migrate_legacy_data() -> bool:
     return True
 
 
+def migrate_legacy_data() -> bool:
+    """Perform all supported data migrations."""
+
+    moved_repo_db = migrate_legacy_repo_database()
+    moved_app_dir = migrate_data_dir_if_needed()
+    return moved_repo_db or moved_app_dir
+
+
 def main() -> None:
     moved = migrate_legacy_data()
     if moved:
-        print(f"Database migrated to {get_db_path()}")
+        print(f"Migration completed. Data directory is {get_data_dir()}")
     else:
         print(f"No migration required. Data directory is {get_data_dir()}")
 
