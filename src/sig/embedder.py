@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import Sequence
 
@@ -11,6 +12,8 @@ import torch
 from PIL import Image
 
 from utils.image_io import safe_load_image
+
+logger = logging.getLogger(__name__)
 
 
 class OpenClipEmbedder:
@@ -28,7 +31,25 @@ class OpenClipEmbedder:
         self._device = torch.device(device or ("cuda" if torch.cuda.is_available() else "cpu"))
         self._batch_size = max(1, batch_size)
 
-        model, preprocess = open_clip.create_model_and_transforms(model_name, pretrained=pretrained)
+        available_pretrained = _available_pretrained_tags(model_name)
+        resolved_pretrained, did_fallback = _select_pretrained_tag(pretrained, available_pretrained)
+        if did_fallback:
+            logger.warning(
+                "Pretrained tag '%s' is not available for model '%s'; falling back to '%s'",
+                pretrained,
+                model_name,
+                resolved_pretrained,
+            )
+        logger.info(
+            "Loading OpenCLIP model '%s' with pretrained '%s' (available=%s)",
+            model_name,
+            resolved_pretrained,
+            available_pretrained or "none",
+        )
+
+        model, preprocess = open_clip.create_model_and_transforms(
+            model_name, pretrained=resolved_pretrained
+        )
         model.to(self._device)
         model.eval()
 
@@ -82,3 +103,24 @@ class OpenClipEmbedder:
 
 
 __all__ = ["OpenClipEmbedder"]
+
+
+def _available_pretrained_tags(model_name: str) -> list[str]:
+    matches: list[str] = []
+    for candidate_name, tag in open_clip.list_pretrained():
+        if candidate_name.lower() == model_name.lower() and tag not in matches:
+            matches.append(tag)
+    return matches
+
+
+def _select_pretrained_tag(requested: str, available: Sequence[str]) -> tuple[str, bool]:
+    cleaned_requested = (requested or "").strip()
+    if cleaned_requested and cleaned_requested in available:
+        return cleaned_requested, False
+    for candidate in ("laion2b_s32b_b82k", "openai"):
+        if candidate in available:
+            return candidate, cleaned_requested != candidate
+    if available:
+        return available[0], cleaned_requested != available[0]
+    fallback = cleaned_requested or "openai"
+    return fallback, bool(cleaned_requested and cleaned_requested != fallback)

@@ -80,7 +80,7 @@ class _IndexSignals(QObject):
 class _IndexTask(QRunnable):
     def __init__(self, db_path: Path) -> None:
         super().__init__()
-        self._db_path = db_path
+        self._db_path = Path(db_path)
         self.signals = _IndexSignals()
 
     def run(self) -> None:  # noqa: D401
@@ -88,7 +88,7 @@ class _IndexTask(QRunnable):
         try:
             stats = run_index_once(self._db_path)
         except Exception as exc:  # pragma: no cover - defensive logging
-            logger.exception("Indexing failed")
+            logger.exception("Indexing failed for database %s", self._db_path)
             self.signals.failed.emit(str(exc))
         else:
             self.signals.finished.emit(stats)
@@ -123,7 +123,9 @@ class TagsTab(QWidget):
         self._placeholder = QWidget(self)
         placeholder_layout = QVBoxLayout(self._placeholder)
         placeholder_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._placeholder_label = QLabel("No results yet. Try indexing your library.", self._placeholder)
+        self._placeholder_label = QLabel(
+            "No results yet. Try indexing your library.", self._placeholder
+        )
         self._placeholder_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._placeholder_button = QPushButton("Index now", self._placeholder)
         placeholder_layout.addWidget(self._placeholder_label)
@@ -205,7 +207,9 @@ class TagsTab(QWidget):
         self._placeholder_button.clicked.connect(self._on_index_now)
 
         ensure_dirs()
+        self._db_display = str(get_db_path())
         self._conn = get_conn(get_db_path())
+        self._db_path = self._resolve_db_path()
         self.destroyed.connect(lambda: self._conn.close())
 
         self._current_query: Optional[str] = None
@@ -257,9 +261,8 @@ class TagsTab(QWidget):
     def _on_index_now(self) -> None:
         if self._indexing_active:
             return
-        db_row = self._conn.execute("PRAGMA database_list").fetchone()
-        db_file = Path(db_row[2]) if db_row and db_row[2] else get_db_path()
-        task = _IndexTask(db_file)
+        self._db_path = self._resolve_db_path()
+        task = _IndexTask(self._db_path)
         task.signals.started.connect(self._handle_index_started)
         task.signals.finished.connect(self._handle_index_finished)
         task.signals.failed.connect(self._handle_index_failed)
@@ -358,7 +361,9 @@ class TagsTab(QWidget):
                 QStandardItem(self._format_mtime(record.get("mtime"))),
                 QStandardItem(self._format_tags(record.get("top_tags", []))),
             ]
-            table_items[0].setData(Qt.AlignCenter, Qt.TextAlignmentRole)
+            table_items[0].setData(
+                Qt.AlignmentFlag.AlignCenter, Qt.ItemDataRole.TextAlignmentRole
+            )
             for item in table_items:
                 item.setEditable(False)
             self._table_model.appendRow(table_items)
@@ -366,8 +371,10 @@ class TagsTab(QWidget):
 
             grid_item = QStandardItem(self._format_grid_text(path_obj.name, record.get("top_tags", [])))
             grid_item.setEditable(False)
-            grid_item.setData(row_index, Qt.UserRole)
-            grid_item.setData(Qt.AlignCenter, Qt.TextAlignmentRole)
+            grid_item.setData(row_index, Qt.ItemDataRole.UserRole)
+            grid_item.setData(
+                Qt.AlignmentFlag.AlignCenter, Qt.ItemDataRole.TextAlignmentRole
+            )
             grid_item.setSizeHint(QSize(self._THUMB_SIZE + 48, self._THUMB_SIZE + 72))
             self._grid_model.appendRow(grid_item)
 
@@ -386,19 +393,21 @@ class TagsTab(QWidget):
         if row < self._table_model.rowCount():
             table_item = self._table_model.item(row, 0)
             if table_item is not None:
-                table_item.setData(pixmap, Qt.DecorationRole)
-                table_item.setData(Qt.AlignCenter, Qt.TextAlignmentRole)
+                table_item.setData(pixmap, Qt.ItemDataRole.DecorationRole)
+                table_item.setData(
+                    Qt.AlignmentFlag.AlignCenter, Qt.ItemDataRole.TextAlignmentRole
+                )
                 self._table_view.setRowHeight(row, max(self._THUMB_SIZE + 16, pixmap.height() + 16))
         if row < self._grid_model.rowCount():
             grid_item = self._grid_model.item(row)
             if grid_item is not None:
-                grid_item.setData(pixmap, Qt.DecorationRole)
+                grid_item.setData(pixmap, Qt.ItemDataRole.DecorationRole)
 
     def _on_table_double_clicked(self, index: QModelIndex) -> None:
         self._open_row(index.row())
 
     def _on_grid_double_clicked(self, index: QModelIndex) -> None:
-        stored_row = index.data(Qt.UserRole)
+        stored_row = index.data(Qt.ItemDataRole.UserRole)
         row = int(stored_row) if stored_row is not None else index.row()
         self._open_row(row)
 
@@ -516,9 +525,24 @@ class TagsTab(QWidget):
 
     def _handle_index_failed(self, message: str) -> None:
         self._indexing_active = False
-        self._status_label.setText(f"Indexing failed: {message}")
-        self._show_toast(f"Indexing failed: {message}")
+        error_text = f"Indexing failed (DB: {self._db_display}): {message}"
+        self._status_label.setText(error_text)
+        self._show_toast(error_text)
         self._update_control_states()
+
+    def _resolve_db_path(self) -> Path:
+        db_row = self._conn.execute("PRAGMA database_list").fetchone()
+        literal = db_row[2] if db_row else None
+        if literal and literal not in {":memory:", ""}:
+            path = Path(literal).expanduser()
+            self._db_display = str(path)
+            return path
+        if literal == ":memory:":
+            self._db_display = ":memory:"
+            return Path(get_db_path()).expanduser()
+        fallback = Path(get_db_path()).expanduser()
+        self._db_display = str(fallback)
+        return fallback
 
     def _show_toast(self, message: str, *, timeout_ms: int = 4000) -> None:
         self._toast_timer.stop()

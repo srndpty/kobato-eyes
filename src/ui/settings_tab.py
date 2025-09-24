@@ -11,6 +11,7 @@ from PyQt6.QtWidgets import (
     QComboBox,
     QDoubleSpinBox,
     QFormLayout,
+    QLineEdit,
     QLabel,
     QPlainTextEdit,
     QPushButton,
@@ -52,6 +53,9 @@ class SettingsTab(QWidget):
         self._model_combo = QComboBox(self)
         self._model_combo.addItems(["ViT-L-14", "ViT-H-14", "RN50"])
 
+        self._pretrained_edit = QLineEdit(self)
+        self._pretrained_edit.setPlaceholderText("e.g. openai")
+
         self._auto_index_check = QCheckBox("Auto index changes", self)
         self._auto_index_check.setChecked(True)
 
@@ -65,6 +69,7 @@ class SettingsTab(QWidget):
         form.addRow("Cosine threshold", self._cosine_spin)
         form.addRow("SSIM threshold", self._ssim_spin)
         form.addRow("Model", self._model_combo)
+        form.addRow("Pretrained tag", self._pretrained_edit)
         form.addRow(self._auto_index_check)
 
         layout = QVBoxLayout(self)
@@ -84,6 +89,7 @@ class SettingsTab(QWidget):
         index = self._model_combo.findText(settings.model_name)
         if index >= 0:
             self._model_combo.setCurrentIndex(index)
+        self._pretrained_edit.setText(settings.embed_model.pretrained)
 
     def _emit_settings(self) -> None:
         settings = PipelineSettings(
@@ -92,7 +98,10 @@ class SettingsTab(QWidget):
             hamming_threshold=int(self._hamming_spin.value()),
             cosine_threshold=float(self._cosine_spin.value()),
             ssim_threshold=float(self._ssim_spin.value()),
-            embed_model=EmbedModel(name=self._model_combo.currentText()),
+            embed_model=EmbedModel(
+                name=self._model_combo.currentText(),
+                pretrained=self._pretrained_edit.text().strip(),
+            ),
             auto_index=self._auto_index_check.isChecked(),
         )
         save_settings(settings)
