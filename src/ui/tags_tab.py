@@ -515,10 +515,12 @@ class TagsTab(QWidget):
         self._indexing_active = False
         elapsed = float(stats.get("elapsed_sec", 0.0) or 0.0)
         self._status_label.setText(f"Indexing complete in {elapsed:.2f}s.")
+        tagger_name = str(stats.get("tagger_name") or "unknown")
         self._show_toast(
             f"Indexed: {int(stats.get('scanned', 0))} files / "
             f"Tagged: {int(stats.get('tagged', 0))} / "
-            f"Embedded: {int(stats.get('embedded', 0))}"
+            f"Embedded: {int(stats.get('embedded', 0))} "
+            f"(tagger: {tagger_name})"
         )
         self._update_control_states()
         QTimer.singleShot(0, self._on_search_clicked)

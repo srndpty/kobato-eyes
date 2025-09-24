@@ -52,6 +52,7 @@ def test_index_now_async_flow(tags_tab: TagsTab, qapp: QApplication) -> None:
             "new_or_changed": 2,
             "signatures": 2,
             "hnsw_added": 1,
+            "tagger_name": "dummy",
         }
 
     search_spy = mock.MagicMock()
@@ -80,6 +81,6 @@ def test_index_now_async_flow(tags_tab: TagsTab, qapp: QApplication) -> None:
     assert tags_tab._toast_label.isVisible()  # type: ignore[attr-defined]
     assert (
         tags_tab._toast_label.text()  # type: ignore[attr-defined]
-        == "Indexed: 3 files / Tagged: 2 / Embedded: 1"
+        == "Indexed: 3 files / Tagged: 2 / Embedded: 1 (tagger: dummy)"
     )
     assert tags_tab._placeholder_button.isEnabled()  # type: ignore[attr-defined]

@@ -6,7 +6,7 @@ import logging
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, Optional, Set
+from typing import Iterable, Mapping, Optional, Set
 
 import numpy as np
 from PIL import Image
@@ -140,6 +140,15 @@ class ProcessingPipeline(QObject):
         self._watcher: DirectoryWatcher | None = None
         self._scheduled: Set[Path] = set()
         self._tag_config = TagJobConfig()
+        self._refresh_tag_config()
+
+    def _refresh_tag_config(self) -> None:
+        thresholds = _build_threshold_map(self._settings.tagger.thresholds)
+        max_tags_map = _build_max_tags_map(getattr(self._settings.tagger, "max_tags", None))
+        self._tag_config = TagJobConfig(
+            thresholds=thresholds or None,
+            max_tags=max_tags_map or None,
+        )
 
     def update_settings(self, settings: PipelineSettings) -> None:
         logger.info("Updating pipeline settings: %s", settings)
@@ -147,6 +156,7 @@ class ProcessingPipeline(QObject):
         if self._watcher is not None:
             self.stop()
         self._settings = settings
+        self._refresh_tag_config()
         if self._settings.auto_index and (was_running or self._watcher is None):
             self.start()
 
@@ -275,6 +285,7 @@ def run_index_once(
         "embedded": 0,
         "hnsw_added": 0,
         "elapsed_sec": 0.0,
+        "tagger_name": settings.tagger.name,
     }
 
     roots = [Path(root).expanduser() for root in settings.roots if root]
@@ -397,11 +408,24 @@ def run_index_once(
         tag_records = [record for record in records if record.needs_tagging]
         if tag_records:
             try:
-                tagger = _resolve_tagger(settings, tagger_override)
+                max_tags_map = _build_max_tags_map(getattr(settings.tagger, "max_tags", None))
+                thresholds = _build_threshold_map(settings.tagger.thresholds)
+                tagger = _resolve_tagger(
+                    settings,
+                    tagger_override,
+                    thresholds=thresholds,
+                    max_tags=max_tags_map,
+                )
             except Exception as exc:  # pragma: no cover - defensive logging
                 logger.warning("Failed to instantiate tagger: %s", exc)
                 raise
-            thresholds = _build_threshold_map(settings.tagger.thresholds)
+            serialised_thresholds = _serialise_thresholds(thresholds)
+            serialised_max_tags = _serialise_max_tags(max_tags_map)
+            stats["tagger_name"] = (
+                type(tagger).__name__
+                if tagger_override is not None
+                else settings.tagger.name
+            )
             logger.info("Tagging %d image(s)", len(tag_records))
             processed_tags = 0
             last_logged = 0
@@ -420,7 +444,11 @@ def run_index_once(
                     idx += len(batch_slice)
                     continue
                 try:
-                    results = tagger.infer_batch(images, thresholds=thresholds)
+                    results = tagger.infer_batch(
+                        images,
+                        thresholds=thresholds or None,
+                        max_tags=max_tags_map or None,
+                    )
                 except Exception as exc:  # pragma: no cover - defensive logging
                     if current_batch > 1:
                         current_batch = max(1, current_batch // 2)
@@ -434,6 +462,7 @@ def run_index_once(
                     idx += len(batch_slice)
                     continue
                 for record, image, result in zip(valid_records, images, results):
+                    total_predictions = len(result.tags)
                     merged: dict[str, float] = {}
                     categories: dict[str, TagCategory] = {}
                     for prediction in result.tags:
@@ -468,6 +497,14 @@ def run_index_once(
                     )
                     record.needs_tagging = False
                     record.tag_exists = True
+                    logger.debug(
+                        "kept %d/%d tags (max_tags=%s, thresholds=%s) for %s",
+                        len(merged),
+                        total_predictions,
+                        serialised_max_tags,
+                        serialised_thresholds,
+                        record.path,
+                    )
                     processed_tags += 1
                     last_logged = log_progress(
                         "Tagging",
@@ -616,22 +653,57 @@ def run_index_once(
     return stats
 
 
-def _resolve_tagger(settings: PipelineSettings, override: ITagger | None) -> ITagger:
+def _resolve_tagger(
+    settings: PipelineSettings,
+    override: ITagger | None,
+    *,
+    thresholds: Mapping[TagCategory, float] | None = None,
+    max_tags: Mapping[TagCategory, int] | None = None,
+) -> ITagger:
+    serialised_thresholds = _serialise_thresholds(thresholds)
+    serialised_max_tags = _serialise_max_tags(max_tags)
     if override is not None:
+        name = type(override).__name__
+        model_path = getattr(override, "model_path", None)
+        tags_csv = getattr(override, "tags_csv", None)
+        logger.info(
+            "Tagger in use: %s, model=%s, tags_csv=%s, thresholds=%s, max_tags=%s",
+            name,
+            model_path,
+            tags_csv,
+            serialised_thresholds,
+            serialised_max_tags,
+        )
         return override
-    name = settings.tagger.name.lower()
-    if name == "dummy":
+
+    tagger_name = settings.tagger.name
+    lowered = tagger_name.lower()
+    model_path_value = settings.tagger.model_path
+    tags_csv_value = getattr(settings.tagger, "tags_csv", None)
+    if lowered == "dummy":
         from tagger.dummy import DummyTagger
 
-        return DummyTagger()
-    if name == "wd14-onnx":
+        tagger_instance: ITagger = DummyTagger()
+    elif lowered == "wd14-onnx":
         from tagger.wd14_onnx import WD14Tagger
 
         if not settings.tagger.model_path:
             raise ValueError("WD14: model_path is required")
-        model_path = Path(settings.tagger.model_path)
-        return WD14Tagger(model_path, tags_csv=settings.tagger.tags_csv)
-    raise ValueError(f"Unknown tagger '{settings.tagger.name}'")
+        model_path_obj = Path(settings.tagger.model_path)
+        tagger_instance = WD14Tagger(model_path_obj, tags_csv=settings.tagger.tags_csv)
+        model_path_value = str(model_path_obj)
+    else:
+        raise ValueError(f"Unknown tagger '{settings.tagger.name}'")
+
+    logger.info(
+        "Tagger in use: %s, model=%s, tags_csv=%s, thresholds=%s, max_tags=%s",
+        tagger_name,
+        model_path_value,
+        tags_csv_value,
+        serialised_thresholds,
+        serialised_max_tags,
+    )
+    return tagger_instance
 
 
 def _resolve_embedder(settings: PipelineSettings) -> EmbedderProtocol:
@@ -648,17 +720,51 @@ def _resolve_embedder(settings: PipelineSettings) -> EmbedderProtocol:
 def _build_threshold_map(thresholds: dict[str, float]) -> dict[TagCategory, float]:
     mapping: dict[TagCategory, float] = {}
     for key, value in thresholds.items():
-        category = {
-            "general": TagCategory.GENERAL,
-            "character": TagCategory.CHARACTER,
-            "copyright": TagCategory.COPYRIGHT,
-            "artist": TagCategory.ARTIST,
-            "meta": TagCategory.META,
-            "rating": TagCategory.RATING,
-        }.get(key.lower())
+        category = _CATEGORY_KEY_LOOKUP.get(key.lower())
         if category is not None:
             mapping[category] = float(value)
     return mapping
+
+
+def _build_max_tags_map(max_tags: Mapping[str, int] | None) -> dict[TagCategory, int]:
+    mapping: dict[TagCategory, int] = {}
+    if not max_tags:
+        return mapping
+    for key, value in max_tags.items():
+        category = _CATEGORY_KEY_LOOKUP.get(str(key).lower())
+        if category is None:
+            continue
+        try:
+            mapping[category] = int(value)
+        except (TypeError, ValueError):
+            continue
+    return mapping
+
+
+def _serialise_thresholds(
+    thresholds: Mapping[TagCategory, float] | None,
+) -> dict[str, float]:
+    if not thresholds:
+        return {}
+    return {category.name.lower(): float(value) for category, value in thresholds.items()}
+
+
+def _serialise_max_tags(
+    max_tags: Mapping[TagCategory, int] | None,
+) -> dict[str, int]:
+    if not max_tags:
+        return {}
+    return {category.name.lower(): int(value) for category, value in max_tags.items()}
+
+
+_CATEGORY_KEY_LOOKUP = {
+    "general": TagCategory.GENERAL,
+    "character": TagCategory.CHARACTER,
+    "copyright": TagCategory.COPYRIGHT,
+    "artist": TagCategory.ARTIST,
+    "meta": TagCategory.META,
+    "rating": TagCategory.RATING,
+}
 
 
 __all__ = ["PipelineSettings", "ProcessingPipeline", "run_index_once"]
