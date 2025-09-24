@@ -123,7 +123,9 @@ class TagsTab(QWidget):
         self._placeholder = QWidget(self)
         placeholder_layout = QVBoxLayout(self._placeholder)
         placeholder_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._placeholder_label = QLabel("No results yet. Try indexing your library.", self._placeholder)
+        self._placeholder_label = QLabel(
+            "No results yet. Try indexing your library.", self._placeholder
+        )
         self._placeholder_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._placeholder_button = QPushButton("Index now", self._placeholder)
         placeholder_layout.addWidget(self._placeholder_label)
@@ -359,7 +361,9 @@ class TagsTab(QWidget):
                 QStandardItem(self._format_mtime(record.get("mtime"))),
                 QStandardItem(self._format_tags(record.get("top_tags", []))),
             ]
-            table_items[0].setData(Qt.AlignCenter, Qt.TextAlignmentRole)
+            table_items[0].setData(
+                Qt.AlignmentFlag.AlignCenter, Qt.ItemDataRole.TextAlignmentRole
+            )
             for item in table_items:
                 item.setEditable(False)
             self._table_model.appendRow(table_items)
@@ -367,8 +371,10 @@ class TagsTab(QWidget):
 
             grid_item = QStandardItem(self._format_grid_text(path_obj.name, record.get("top_tags", [])))
             grid_item.setEditable(False)
-            grid_item.setData(row_index, Qt.UserRole)
-            grid_item.setData(Qt.AlignCenter, Qt.TextAlignmentRole)
+            grid_item.setData(row_index, Qt.ItemDataRole.UserRole)
+            grid_item.setData(
+                Qt.AlignmentFlag.AlignCenter, Qt.ItemDataRole.TextAlignmentRole
+            )
             grid_item.setSizeHint(QSize(self._THUMB_SIZE + 48, self._THUMB_SIZE + 72))
             self._grid_model.appendRow(grid_item)
 
@@ -387,19 +393,21 @@ class TagsTab(QWidget):
         if row < self._table_model.rowCount():
             table_item = self._table_model.item(row, 0)
             if table_item is not None:
-                table_item.setData(pixmap, Qt.DecorationRole)
-                table_item.setData(Qt.AlignCenter, Qt.TextAlignmentRole)
+                table_item.setData(pixmap, Qt.ItemDataRole.DecorationRole)
+                table_item.setData(
+                    Qt.AlignmentFlag.AlignCenter, Qt.ItemDataRole.TextAlignmentRole
+                )
                 self._table_view.setRowHeight(row, max(self._THUMB_SIZE + 16, pixmap.height() + 16))
         if row < self._grid_model.rowCount():
             grid_item = self._grid_model.item(row)
             if grid_item is not None:
-                grid_item.setData(pixmap, Qt.DecorationRole)
+                grid_item.setData(pixmap, Qt.ItemDataRole.DecorationRole)
 
     def _on_table_double_clicked(self, index: QModelIndex) -> None:
         self._open_row(index.row())
 
     def _on_grid_double_clicked(self, index: QModelIndex) -> None:
-        stored_row = index.data(Qt.UserRole)
+        stored_row = index.data(Qt.ItemDataRole.UserRole)
         row = int(stored_row) if stored_row is not None else index.row()
         self._open_row(row)
 
