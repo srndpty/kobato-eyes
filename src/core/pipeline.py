@@ -6,8 +6,9 @@ import hashlib
 import logging
 import time
 from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
-from typing import Iterable, Mapping, Optional, Sequence, Set
+from typing import Callable, Iterable, Mapping, Optional, Sequence, Set
 
 import numpy as np
 from PIL import Image
@@ -15,6 +16,7 @@ from PIL import Image
 from utils.env import is_headless
 
 if is_headless():
+
     class QObject:  # type: ignore[too-many-ancestors]
         """Minimal stub used when Qt is unavailable."""
 
@@ -54,6 +56,27 @@ from utils.image_io import safe_load_image
 from utils.paths import ensure_dirs, get_index_dir
 
 logger = logging.getLogger(__name__)
+
+
+class IndexPhase(Enum):
+    """Phases reported during ``run_index_once`` progress updates."""
+
+    SCAN = "scan"
+    TAG = "tag"
+    EMBED = "embed"
+    HNSW = "hnsw"
+    FTS = "fts"
+    DONE = "done"
+
+
+@dataclass
+class IndexProgress:
+    """Structured payload describing indexing progress."""
+
+    phase: IndexPhase
+    done: int
+    total: int
+    message: str | None = None
 
 
 class _FileProcessJob(BatchJob):
@@ -288,6 +311,8 @@ def run_index_once(
     *,
     tagger_override: ITagger | None = None,
     embedder_override: EmbedderProtocol | None = None,
+    progress_cb: Callable[[IndexProgress], None] | None = None,
+    is_cancelled: Callable[[], bool] | None = None,
 ) -> dict[str, object]:
     """Perform a full indexing pass across all configured roots.
 
@@ -313,6 +338,7 @@ def run_index_once(
         "elapsed_sec": 0.0,
         "tagger_name": settings.tagger.name,
         "retagged": 0,
+        "cancelled": False,
     }
 
     thresholds = _build_threshold_map(settings.tagger.thresholds)
@@ -326,6 +352,38 @@ def run_index_once(
     serialised_max_tags = _serialise_max_tags(max_tags_map)
     stats["tagger_sig"] = tagger_sig
 
+    last_emit: dict[IndexPhase, tuple[int, float]] = {}
+    last_messages: dict[IndexPhase, str | None] = {}
+
+    def _emit(progress: IndexProgress, *, force: bool = False) -> None:
+        if progress_cb is None:
+            return
+        now = time.perf_counter()
+        last = last_emit.get(progress.phase)
+        should_emit = force or last is None
+        if not should_emit and last is not None:
+            last_done, last_time = last
+            delta = progress.done - last_done
+            percent_reached = False
+            if progress.total > 0:
+                threshold = max(1, progress.total // 100)
+                percent_reached = progress.done >= progress.total or delta >= threshold
+            time_elapsed = now - last_time >= 0.1
+            should_emit = percent_reached or time_elapsed
+        if should_emit:
+            last_emit[progress.phase] = (progress.done, now)
+            last_messages[progress.phase] = progress.message
+            progress_cb(progress)
+
+    def _should_cancel() -> bool:
+        if is_cancelled is None:
+            return False
+        try:
+            return bool(is_cancelled())
+        except Exception:  # pragma: no cover - defensive logging
+            logger.exception("Cancellation callback failed")
+            return False
+
     roots = [Path(root).expanduser() for root in settings.roots if root]
     roots = [root for root in roots if root.exists()]
     if not roots:
@@ -337,6 +395,18 @@ def run_index_once(
     allow_exts = {ext.lower() for ext in (settings.allow_exts or DEFAULT_EXTENSIONS)}
     batch_size = max(1, settings.batch_size)
 
+    # ここからスキャン開始することを UI/テストに明示するため、
+    # 必ず最初に“不確定”イベントを1回送る
+    _emit(
+        IndexProgress(
+            phase=IndexPhase.SCAN,
+            done=0,
+            total=-1,
+            message="start",
+        ),
+        force=True,
+    )
+
     records: list[_FileRecord] = []
     hnsw_additions: list[tuple[int, np.ndarray]] = []
 
@@ -347,10 +417,23 @@ def run_index_once(
         resolved_db = Path(db_path).expanduser()
         resolved_db.parent.mkdir(parents=True, exist_ok=True)
         conn = get_conn(resolved_db)
+    cancelled = False
+
     try:
         logger.info("Scanning %d root(s) for eligible images", len(roots))
         for image_path in iter_images(roots, excluded=excluded_paths, extensions=allow_exts):
+            if cancelled or _should_cancel():
+                cancelled = True
+                break
             stats["scanned"] += 1
+            _emit(
+                IndexProgress(
+                    phase=IndexPhase.SCAN,
+                    done=stats["scanned"],
+                    total=-1,
+                    message=str(image_path),
+                )
+            )
             try:
                 stat = image_path.stat()
             except OSError as exc:
@@ -400,17 +483,8 @@ def run_index_once(
             stored_sig = row["tagger_sig"] if row is not None else None
             stored_sig = str(stored_sig) if stored_sig is not None else None
             stored_tagged_at = row["last_tagged_at"] if row is not None else None
-            last_tagged_at = (
-                float(stored_tagged_at)
-                if stored_tagged_at is not None
-                else None
-            )
-            needs_tagging = (
-                is_new
-                or changed
-                or not tag_exists
-                or stored_sig != tagger_sig
-            )
+            last_tagged_at = float(stored_tagged_at) if stored_tagged_at is not None else None
+            needs_tagging = is_new or changed or not tag_exists or stored_sig != tagger_sig
 
             record = _FileRecord(
                 file_id=file_id,
@@ -429,6 +503,9 @@ def run_index_once(
                 last_tagged_at=last_tagged_at,
             )
             records.append(record)
+            if _should_cancel():
+                cancelled = True
+                break
         conn.commit()
 
         stats["new_or_changed"] = sum(1 for record in records if record.is_new or record.changed)
@@ -437,6 +514,15 @@ def run_index_once(
             stats["scanned"],
             stats["new_or_changed"],
         )
+        if not cancelled:
+            _emit(
+                IndexProgress(
+                    phase=IndexPhase.SCAN,
+                    done=stats["scanned"],
+                    total=stats["scanned"],
+                ),
+                force=True,
+            )
 
         def ensure_image_loaded(record: _FileRecord) -> bool:
             if record.load_failed:
@@ -462,7 +548,18 @@ def run_index_once(
             return last_value
 
         tag_records = [record for record in records if record.needs_tagging]
-        if tag_records:
+
+        # ▼ 追加: 件数0でも必ず「TAG開始」を通知
+        _emit(
+            IndexProgress(phase=IndexPhase.TAG, done=0, total=len(tag_records)),
+            force=True,
+        )
+        _emit(
+            IndexProgress(phase=IndexPhase.FTS, done=0, total=len(tag_records)),
+            force=True,
+        )
+
+        if tag_records and not cancelled:
             try:
                 tagger = _resolve_tagger(
                     settings,
@@ -473,17 +570,17 @@ def run_index_once(
             except Exception as exc:  # pragma: no cover - defensive logging
                 logger.warning("Failed to instantiate tagger: %s", exc)
                 raise
-            stats["tagger_name"] = (
-                type(tagger).__name__
-                if tagger_override is not None
-                else settings.tagger.name
-            )
+            stats["tagger_name"] = type(tagger).__name__ if tagger_override is not None else settings.tagger.name
             logger.info("Tagging %d image(s)", len(tag_records))
             processed_tags = 0
+            fts_processed = 0
             last_logged = 0
             idx = 0
             current_batch = batch_size
             while idx < len(tag_records):
+                if cancelled or _should_cancel():
+                    cancelled = True
+                    break
                 current_batch = max(1, current_batch)
                 batch_slice = tag_records[idx : idx + current_batch]
                 images: list[Image.Image] = []
@@ -514,6 +611,9 @@ def run_index_once(
                     idx += len(batch_slice)
                     continue
                 for record, image, result in zip(valid_records, images, results):
+                    if cancelled or _should_cancel():
+                        cancelled = True
+                        break
                     total_predictions = len(result.tags)
                     merged: dict[str, float] = {}
                     categories: dict[str, TagCategory] = {}
@@ -530,8 +630,7 @@ def run_index_once(
                         tag_defs = [{"name": name, "category": int(categories[name])} for name in merged]
                         tag_id_map = upsert_tags(conn, tag_defs)
                         tag_scores = [
-                            (tag_id_map[name], merged[name])
-                            for name in sorted(merged, key=merged.get, reverse=True)
+                            (tag_id_map[name], merged[name]) for name in sorted(merged, key=merged.get, reverse=True)
                         ]
                         replace_file_tags(conn, record.file_id, tag_scores)
                         update_fts(conn, record.file_id, " ".join(merged.keys()))
@@ -573,13 +672,58 @@ def run_index_once(
                         len(tag_records),
                         last_logged,
                     )
+                    fts_processed += 1
+                    _emit(
+                        IndexProgress(
+                            phase=IndexPhase.TAG,
+                            done=processed_tags,
+                            total=len(tag_records),
+                        )
+                    )
+                    _emit(
+                        IndexProgress(
+                            phase=IndexPhase.FTS,
+                            done=fts_processed,
+                            total=len(tag_records),
+                        )
+                    )
+                if cancelled:
+                    break
                 idx += len(batch_slice)
             conn.commit()
             stats["tagged"] = processed_tags
             logger.info("Tagging complete: %d image(s) processed", processed_tags)
+            if cancelled:
+                logger.info("Tagging cancelled after %d image(s)", processed_tags)
+            _emit(
+                IndexProgress(
+                    phase=IndexPhase.TAG,
+                    done=processed_tags,
+                    total=len(tag_records),
+                ),
+                force=True,
+            )
+            _emit(
+                IndexProgress(
+                    phase=IndexPhase.FTS,
+                    done=fts_processed,
+                    total=len(tag_records),
+                ),
+                force=True,
+            )
 
         embed_records = [record for record in records if record.needs_embedding and not record.load_failed]
-        if embed_records:
+
+        _emit(
+            IndexProgress(
+                phase=IndexPhase.EMBED,
+                done=0,
+                total=len(embed_records),
+            ),
+            force=True,
+        )
+
+        if embed_records and not cancelled:
             try:
                 embedder = embedder_override or _resolve_embedder(settings)
             except Exception as exc:  # pragma: no cover - defensive logging
@@ -591,6 +735,9 @@ def run_index_once(
                 idx = 0
                 current_batch = batch_size
                 while idx < len(embed_records):
+                    if cancelled or _should_cancel():
+                        cancelled = True
+                        break
                     current_batch = max(1, current_batch)
                     batch_slice = embed_records[idx : idx + current_batch]
                     images: list[Image.Image] = []
@@ -625,6 +772,9 @@ def run_index_once(
                         idx += len(batch_slice)
                         continue
                     for record, image, vector in zip(valid_records, images, vectors):
+                        if cancelled or _should_cancel():
+                            cancelled = True
+                            break
                         array = np.asarray(vector, dtype=np.float32)
                         if array.ndim != 1:
                             array = np.reshape(array, (-1,))
@@ -670,11 +820,30 @@ def run_index_once(
                             len(embed_records),
                             last_logged,
                         )
+                        _emit(
+                            IndexProgress(
+                                phase=IndexPhase.EMBED,
+                                done=processed_embeddings,
+                                total=len(embed_records),
+                            )
+                        )
+                    if cancelled:
+                        break
                     idx += len(batch_slice)
                 conn.commit()
                 stats["signatures"] = processed_embeddings
                 stats["embedded"] = processed_embeddings
                 logger.info("Embedding complete: %d image(s) processed", processed_embeddings)
+                if cancelled:
+                    logger.info("Embedding cancelled after %d image(s)", processed_embeddings)
+                _emit(
+                    IndexProgress(
+                        phase=IndexPhase.EMBED,
+                        done=processed_embeddings,
+                        total=len(embed_records),
+                    ),
+                    force=True,
+                )
 
         for record in records:
             record.image = None
@@ -682,7 +851,16 @@ def run_index_once(
     finally:
         conn.close()
 
-    if hnsw_additions:
+    _emit(
+        IndexProgress(
+            phase=IndexPhase.HNSW,
+            done=0,
+            total=len(hnsw_additions),
+        ),
+        force=True,
+    )
+
+    if hnsw_additions and not cancelled:
         dim = hnsw_additions[0][1].shape[0]
         ensure_dirs()
         if settings.index_dir:
@@ -698,10 +876,28 @@ def run_index_once(
                 save_hnsw_index(index, index_path)
             stats["hnsw_added"] = added
             logger.info("HNSW index updated with %d new vector(s)", added)
+            _emit(
+                IndexProgress(
+                    phase=IndexPhase.HNSW,
+                    done=added,
+                    total=len(hnsw_additions),
+                ),
+                force=True,
+            )
         except Exception as exc:  # pragma: no cover - defensive logging
             logger.exception("Failed to update HNSW index: %s", exc)
 
     stats["elapsed_sec"] = time.perf_counter() - start_time
+    stats["cancelled"] = cancelled
+    _emit(
+        IndexProgress(
+            phase=IndexPhase.DONE,
+            done=1,
+            total=1,
+            message="cancelled" if cancelled else None,
+        ),
+        force=True,
+    )
     logger.info(
         "Indexing complete: scanned=%d, new=%d, tagged=%d, embedded=%d, hnsw_added=%d (%.2fs)",
         stats["scanned"],
@@ -735,10 +931,7 @@ def current_tagger_sig(
     csv_digest = _digest_identifier(tags_csv)
     thresholds_part = _format_sig_mapping(serialised_thresholds)
     max_tags_part = _format_sig_mapping(serialised_max_tags)
-    return (
-        f"{tagger_name}:{model_digest}:csv={csv_digest}:"
-        f"thr={thresholds_part}:max={max_tags_part}"
-    )
+    return f"{tagger_name}:{model_digest}:csv={csv_digest}:" f"thr={thresholds_part}:max={max_tags_part}"
 
 
 def retag_query(
@@ -944,6 +1137,8 @@ _CATEGORY_KEY_LOOKUP = {
 
 
 __all__ = [
+    "IndexPhase",
+    "IndexProgress",
     "PipelineSettings",
     "ProcessingPipeline",
     "current_tagger_sig",

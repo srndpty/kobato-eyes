@@ -5,9 +5,10 @@ from __future__ import annotations
 import logging
 import subprocess
 import sys
+import threading
 from datetime import datetime
 from pathlib import Path
-from typing import Iterable, List, Optional, Sequence
+from typing import Callable, Iterable, List, Optional, Sequence
 
 from PyQt6.QtCore import (
     QModelIndex,
@@ -30,6 +31,7 @@ from PyQt6.QtWidgets import (
     QListView,
     QMenu,
     QMessageBox,
+    QProgressDialog,
     QPushButton,
     QStackedWidget,
     QTableView,
@@ -39,7 +41,8 @@ from PyQt6.QtWidgets import (
 )
 
 from core.config import load_settings
-from core.pipeline import retag_all, retag_query, run_index_once
+from core.pipeline import IndexProgress, retag_all, retag_query, run_index_once
+from core.settings import PipelineSettings
 from core.query import translate_query
 from db.connection import get_conn
 from db.repository import search_files
@@ -75,58 +78,55 @@ class _ThumbnailTask(QRunnable):
         self._signal.finished.emit(self._row, pixmap)
 
 
-class _IndexSignals(QObject):
-    started = pyqtSignal()
-    finished = pyqtSignal(dict)
-    failed = pyqtSignal(str)
+class IndexRunnable(QRunnable):
+    """Execute ``run_index_once`` on a worker thread with progress reporting."""
 
+    class IndexSignals(QObject):
+        progress = pyqtSignal(int, int, str)
+        finished = pyqtSignal(dict)
+        error = pyqtSignal(str)
 
-class _IndexTask(QRunnable):
-    def __init__(self, db_path: Path) -> None:
-        super().__init__()
-        self._db_path = Path(db_path)
-        self.signals = _IndexSignals()
-
-    def run(self) -> None:  # noqa: D401
-        self.signals.started.emit()
-        try:
-            stats = run_index_once(self._db_path)
-        except Exception as exc:  # pragma: no cover - defensive logging
-            logger.exception("Indexing failed for database %s", self._db_path)
-            self.signals.failed.emit(str(exc))
-        else:
-            self.signals.finished.emit(stats)
-
-
-class _RetagTask(QRunnable):
     def __init__(
         self,
         db_path: Path,
         *,
-        predicate: str | None = None,
-        params: Sequence[object] | None = None,
-        force_all: bool = False,
+        settings: PipelineSettings | None = None,
+        pre_run: Callable[[], dict[str, object]] | None = None,
     ) -> None:
         super().__init__()
         self._db_path = Path(db_path)
-        self._predicate = predicate
-        self._params = list(params or [])
-        self._force_all = force_all
-        self.signals = _IndexSignals()
+        self._settings = settings
+        self._pre_run = pre_run
+        self.signals = self.IndexSignals()
+        self._cancel_event = threading.Event()
+
+    def cancel(self) -> None:
+        """Request cancellation of the current indexing run."""
+
+        self._cancel_event.set()
+
+    def _emit_progress(self, progress: IndexProgress) -> None:
+        label = progress.phase.name.title()
+        if progress.total < 0 and progress.message:
+            label = progress.message
+        self.signals.progress.emit(progress.done, progress.total, label)
 
     def run(self) -> None:  # noqa: D401
-        self.signals.started.emit()
         try:
-            settings = load_settings()
-            if self._predicate is None:
-                marked = retag_all(self._db_path, force=self._force_all, settings=settings)
-            else:
-                marked = retag_query(self._db_path, self._predicate, self._params)
-            stats = run_index_once(self._db_path, settings=settings)
-            stats["retagged_marked"] = marked
+            extra: dict[str, object] = {}
+            if self._pre_run is not None:
+                extra = self._pre_run()
+            stats = run_index_once(
+                self._db_path,
+                settings=self._settings,
+                progress_cb=self._emit_progress,
+                is_cancelled=self._cancel_event.is_set,
+            )
+            if extra:
+                stats.update(extra)
         except Exception as exc:  # pragma: no cover - defensive logging
-            logger.exception("Retagging failed for database %s", self._db_path)
-            self.signals.failed.emit(str(exc))
+            logger.exception("Indexing failed for database %s", self._db_path)
+            self.signals.error.emit(str(exc))
         else:
             self.signals.finished.emit(stats)
 
@@ -277,6 +277,8 @@ class TagsTab(QWidget):
         self._indexing_active = False
         self._retag_active = False
         self._can_load_more = False
+        self._progress_dialog: QProgressDialog | None = None
+        self._current_index_task: IndexRunnable | None = None
 
         self._toast_label = QLabel("", self)
         self._toast_label.setObjectName("toastLabel")
@@ -311,11 +313,8 @@ class TagsTab(QWidget):
             return
         self._retag_active = False
         self._db_path = self._resolve_db_path()
-        task = _IndexTask(self._db_path)
-        task.signals.started.connect(self._handle_index_started)
-        task.signals.finished.connect(self._handle_index_finished)
-        task.signals.failed.connect(self._handle_index_failed)
-        self._index_pool.start(task)
+        task = IndexRunnable(self._db_path)
+        self._start_indexing_task(task)
 
     def _run_retag(
         self,
@@ -327,17 +326,23 @@ class TagsTab(QWidget):
         if self._indexing_active:
             return
         self._db_path = self._resolve_db_path()
-        task = _RetagTask(
+        settings = load_settings()
+        params_list = list(params or [])
+
+        def _pre_run() -> dict[str, object]:
+            if predicate is None:
+                marked = retag_all(self._db_path, force=force_all, settings=settings)
+            else:
+                marked = retag_query(self._db_path, predicate, params_list)
+            return {"retagged_marked": marked}
+
+        task = IndexRunnable(
             self._db_path,
-            predicate=predicate,
-            params=list(params or []),
-            force_all=force_all,
+            settings=settings,
+            pre_run=_pre_run,
         )
-        task.signals.started.connect(self._handle_index_started)
-        task.signals.finished.connect(self._handle_index_finished)
-        task.signals.failed.connect(self._handle_index_failed)
         self._retag_active = True
-        self._index_pool.start(task)
+        self._start_indexing_task(task)
 
     def _on_retag_all(self) -> None:
         if self._indexing_active:
@@ -367,6 +372,58 @@ class TagsTab(QWidget):
             params=list(self._current_params),
             force_all=False,
         )
+
+    def _start_indexing_task(self, task: IndexRunnable) -> None:
+        self._current_index_task = task
+        task.signals.progress.connect(self._handle_index_progress)
+        task.signals.finished.connect(self._handle_index_finished)
+        task.signals.error.connect(self._handle_index_failed)
+        self._handle_index_started()
+        self._progress_dialog = self._create_progress_dialog()
+        self._index_pool.start(task)
+
+    def _create_progress_dialog(self) -> QProgressDialog:
+        dialog = QProgressDialog("Preparing…", "Cancel", 0, 0, self)
+        dialog.setWindowTitle("Retagging" if self._retag_active else "Indexing")
+        dialog.setWindowModality(Qt.WindowModality.WindowModal)
+        dialog.setMinimumDuration(0)
+        dialog.setAutoReset(False)
+        dialog.setAutoClose(False)
+        dialog.canceled.connect(self._cancel_indexing)
+        dialog.show()
+        return dialog
+
+    def _cancel_indexing(self) -> None:
+        if self._current_index_task is not None:
+            self._current_index_task.cancel()
+        prefix = "Retagging" if self._retag_active else "Indexing"
+        self._status_label.setText(f"{prefix} cancelling…")
+        if self._progress_dialog is not None:
+            self._progress_dialog.setLabelText("Cancelling…")
+
+    def _handle_index_progress(self, done: int, total: int, label: str) -> None:
+        if self._progress_dialog is None:
+            return
+        if total < 0:
+            self._progress_dialog.setRange(0, 0)
+            self._progress_dialog.setLabelText(label)
+            return
+        maximum = max(total, 0)
+        value = max(0, min(done, total))
+        self._progress_dialog.setRange(0, maximum)
+        self._progress_dialog.setValue(value)
+        if total > 0:
+            percent = min(100, (value * 100) // total)
+        else:
+            percent = 100 if value else 0
+        self._progress_dialog.setLabelText(f"{label}: {value}/{total} ({percent}%)")
+
+    def _close_progress_dialog(self) -> None:
+        if self._progress_dialog is not None:
+            self._progress_dialog.hide()
+            self._progress_dialog.deleteLater()
+            self._progress_dialog = None
+        self._current_index_task = None
 
     def _on_table_toggled(self, checked: bool) -> None:
         if checked:
@@ -618,8 +675,17 @@ class TagsTab(QWidget):
         self._update_control_states()
 
     def _handle_index_finished(self, stats: dict[str, object]) -> None:
+        self._close_progress_dialog()
         self._indexing_active = False
         elapsed = float(stats.get("elapsed_sec", 0.0) or 0.0)
+        cancelled = bool(stats.get("cancelled", False))
+        prefix = "Retagging" if self._retag_active else "Indexing"
+        if cancelled:
+            self._status_label.setText(f"{prefix} cancelled after {elapsed:.2f}s.")
+            self._show_toast(f"{prefix} cancelled.")
+            self._retag_active = False
+            self._update_control_states()
+            return
         if self._retag_active:
             self._status_label.setText(f"Retagging complete in {elapsed:.2f}s.")
         else:
@@ -646,6 +712,7 @@ class TagsTab(QWidget):
         QTimer.singleShot(0, self._on_search_clicked)
 
     def _handle_index_failed(self, message: str) -> None:
+        self._close_progress_dialog()
         self._indexing_active = False
         if message == ONNXRUNTIME_MISSING_MESSAGE:
             error_text = message
