@@ -18,6 +18,10 @@ def _ensure_file_columns(conn: sqlite3.Connection) -> None:
         alterations.append("ALTER TABLE files ADD COLUMN height INTEGER")
     if "indexed_at" not in columns:
         alterations.append("ALTER TABLE files ADD COLUMN indexed_at REAL")
+    if "tagger_sig" not in columns:
+        alterations.append("ALTER TABLE files ADD COLUMN tagger_sig TEXT")
+    if "last_tagged_at" not in columns:
+        alterations.append("ALTER TABLE files ADD COLUMN last_tagged_at REAL")
     for statement in alterations:
         conn.execute(statement)
     if alterations:
@@ -34,26 +38,50 @@ def upsert_file(
     width: int | None = None,
     height: int | None = None,
     indexed_at: float | None = None,
+    tagger_sig: str | None = None,
+    last_tagged_at: float | None = None,
 ) -> int:
     """Insert or update a file record and return its identifier."""
     _ensure_file_columns(conn)
     query = """
-        INSERT INTO files (path, size, mtime, sha256, width, height, indexed_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO files (
+            path,
+            size,
+            mtime,
+            sha256,
+            width,
+            height,
+            indexed_at,
+            tagger_sig,
+            last_tagged_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(path) DO UPDATE SET
             size = excluded.size,
             mtime = excluded.mtime,
             sha256 = excluded.sha256,
             width = COALESCE(excluded.width, files.width),
             height = COALESCE(excluded.height, files.height),
-            indexed_at = COALESCE(excluded.indexed_at, files.indexed_at)
+            indexed_at = COALESCE(excluded.indexed_at, files.indexed_at),
+            tagger_sig = COALESCE(excluded.tagger_sig, files.tagger_sig),
+            last_tagged_at = COALESCE(excluded.last_tagged_at, files.last_tagged_at)
         RETURNING id
     """
 
     with conn:
         cursor = conn.execute(
             query,
-            (path, size, mtime, sha256, width, height, indexed_at),
+            (
+                path,
+                size,
+                mtime,
+                sha256,
+                width,
+                height,
+                indexed_at,
+                tagger_sig,
+                last_tagged_at,
+            ),
         )
         file_id = cursor.fetchone()[0]
     return int(file_id)

@@ -51,16 +51,24 @@ def get_cache_dir() -> Path:
     return get_data_dir() / "cache"
 
 
+def get_log_dir() -> Path:
+    """Return the directory used to store application log files."""
+
+    return get_data_dir() / "logs"
+
+
 def ensure_dirs() -> None:
     """Ensure that the application data directories exist."""
 
     data_dir = get_data_dir()
     index_dir = get_index_dir()
     cache_dir = get_cache_dir()
+    log_dir = get_log_dir()
 
     data_dir.mkdir(parents=True, exist_ok=True)
     index_dir.mkdir(parents=True, exist_ok=True)
     cache_dir.mkdir(parents=True, exist_ok=True)
+    log_dir.mkdir(parents=True, exist_ok=True)
 
 
 def migrate_data_dir_if_needed() -> bool:
@@ -137,6 +145,7 @@ __all__ = [
     "get_cache_dir",
     "get_data_dir",
     "get_db_path",
+    "get_log_dir",
     "get_index_dir",
     "migrate_data_dir_if_needed",
 ]

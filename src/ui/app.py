@@ -5,9 +5,10 @@ from __future__ import annotations
 import logging
 import os
 import sys
+from logging.handlers import RotatingFileHandler
 
-from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QGuiApplication
+from PyQt6.QtCore import Qt, QUrl
+from PyQt6.QtGui import QAction, QDesktopServices, QGuiApplication
 from PyQt6.QtWidgets import QApplication, QMainWindow, QTabWidget
 
 if os.environ.get("KOE_HEADLESS", "0") == "1":
@@ -20,9 +21,57 @@ from db.connection import bootstrap_if_needed
 from ui.dup_tab import DupTab
 from ui.settings_tab import SettingsTab
 from ui.tags_tab import TagsTab
-from utils.paths import ensure_dirs, get_db_path, migrate_data_dir_if_needed
+from utils.paths import ensure_dirs, get_db_path, get_log_dir, migrate_data_dir_if_needed
 
 logger = logging.getLogger(__name__)
+
+
+def _resolve_log_level(value: str | None) -> int:
+    if not value:
+        return logging.INFO
+    level = logging.getLevelName(value.upper())
+    if isinstance(level, int):
+        return level
+    return logging.INFO
+
+
+def setup_logging() -> None:
+    """Configure logging to stdout and a rotating application log file."""
+
+    level = _resolve_log_level(os.environ.get("KOE_LOG_LEVEL"))
+    root_logger = logging.getLogger()
+
+    for handler in list(root_logger.handlers):
+        root_logger.removeHandler(handler)
+        try:
+            handler.close()
+        except Exception:  # pragma: no cover - best effort cleanup
+            pass
+
+    root_logger.setLevel(level)
+
+    formatter = logging.Formatter(
+        "%(asctime)s %(levelname)s [%(name)s] %(message)s",
+        "%Y-%m-%d %H:%M:%S",
+    )
+
+    stream_handler = logging.StreamHandler(sys.stdout)
+    stream_handler.setLevel(level)
+    stream_handler.setFormatter(formatter)
+    root_logger.addHandler(stream_handler)
+
+    log_dir = get_log_dir()
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_path = log_dir / "app.log"
+    file_handler = RotatingFileHandler(
+        log_path,
+        maxBytes=5 * 1024 * 1024,
+        backupCount=5,
+        encoding="utf-8",
+    )
+    file_handler.setLevel(level)
+    file_handler.setFormatter(formatter)
+    root_logger.addHandler(file_handler)
 
 
 class MainWindow(QMainWindow):
@@ -41,10 +90,23 @@ class MainWindow(QMainWindow):
         self._tabs.addTab(DupTab(self), "Duplicates")
         self._tabs.addTab(SettingsTab(self), "Settings")
         self.setCentralWidget(self._tabs)
+        self._init_menus()
+
+    def _init_menus(self) -> None:
+        help_menu = self.menuBar().addMenu("Help")
+        open_logs_action = QAction("Open logs folder", self)
+        open_logs_action.triggered.connect(self._open_logs_folder)
+        help_menu.addAction(open_logs_action)
+
+    def _open_logs_folder(self) -> None:
+        log_dir = get_log_dir()
+        log_dir.mkdir(parents=True, exist_ok=True)
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(log_dir)))
 
 
 def run() -> None:
     """Launch the kobato-eyes GUI application."""
+    setup_logging()
     app = QApplication(sys.argv)
     window = MainWindow()
     window.show()

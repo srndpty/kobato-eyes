@@ -61,6 +61,7 @@ def test_index_now_triggers_pipeline(tags_tab: TagsTab) -> None:
             "new_or_changed": 1,
             "signatures": 1,
             "hnsw_added": 1,
+            "tagger_name": "dummy",
         }
 
     with patch("ui.tags_tab.run_index_once", side_effect=_fake_run_index_once) as mocked:

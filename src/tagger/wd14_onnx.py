@@ -6,8 +6,9 @@ import csv
 import logging
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable
+from typing import Iterable, Sequence
 
+import cv2
 import numpy as np
 from PIL import Image
 
@@ -20,6 +21,11 @@ except ImportError as exc:  # pragma: no cover - graceful degradation
     _IMPORT_ERROR = exc
 else:
     _IMPORT_ERROR = None
+
+
+ONNXRUNTIME_MISSING_MESSAGE = "onnxruntime is required. Try: pip install onnxruntime-gpu  (or onnxruntime for CPU)"
+_CUDA_PROVIDER = "CUDAExecutionProvider"
+_CPU_PROVIDER = "CPUExecutionProvider"
 
 
 @dataclass(frozen=True)
@@ -57,6 +63,25 @@ _DEFAULT_TAG_FILES = (
 )
 
 
+def ensure_onnxruntime() -> None:
+    """Ensure onnxruntime is importable, raising a user-facing error otherwise."""
+
+    if ort is None:  # pragma: no cover - runtime guard
+        raise RuntimeError(ONNXRUNTIME_MISSING_MESSAGE) from _IMPORT_ERROR
+
+
+def get_available_providers() -> list[str]:
+    """Return the list of ONNX Runtime providers available on this system."""
+
+    ensure_onnxruntime()
+    try:
+        providers = list(ort.get_available_providers())  # type: ignore[call-arg]
+    except Exception as exc:  # pragma: no cover - defensive logging
+        logger.warning("WD14: failed to query ONNX providers: %s", exc)
+        return []
+    return providers
+
+
 class WD14Tagger(ITagger):
     """WD14 tagger backed by ONNX Runtime with CUDA acceleration when available."""
 
@@ -71,8 +96,7 @@ class WD14Tagger(ITagger):
         default_thresholds: ThresholdMap | None = None,
         default_max_tags: MaxTagsMap | None = None,
     ) -> None:
-        if ort is None:  # pragma: no cover - runtime guard
-            raise RuntimeError("onnxruntime is required to use WD14Tagger") from _IMPORT_ERROR
+        ensure_onnxruntime()
 
         self._model_path = Path(model_path)
         logger.info("WD14: using model %s", self._model_path)
@@ -84,11 +108,30 @@ class WD14Tagger(ITagger):
         self._default_max_tags = dict(default_max_tags or {})
 
         session_options = ort.SessionOptions()
-        provider_attempts = (
-            [list(providers)]
-            if providers is not None
-            else [["CUDAExecutionProvider"], ["CPUExecutionProvider"]]
-        )
+        available_providers = get_available_providers()
+        if available_providers:
+            logger.info("WD14: available ONNX providers: %s", ", ".join(available_providers))
+        else:
+            logger.warning("WD14: no ONNX providers reported by runtime")
+
+        requested_providers: Sequence[str] | None = providers
+        provider_attempts: list[list[str]]
+        if requested_providers is not None:
+            provider_attempts = [list(requested_providers)]
+            if _CUDA_PROVIDER in provider_attempts[0] and _CUDA_PROVIDER not in available_providers:
+                logger.warning(
+                    "WD14: %s requested but not available; falling back to %s",
+                    _CUDA_PROVIDER,
+                    _CPU_PROVIDER,
+                )
+                provider_attempts = [[_CPU_PROVIDER]]
+        else:
+            if available_providers and _CUDA_PROVIDER not in available_providers:
+                logger.info(
+                    "WD14: %s not reported by runtime; CPU provider will be used if CUDA fails",
+                    _CUDA_PROVIDER,
+                )
+            provider_attempts = [[_CUDA_PROVIDER], [_CPU_PROVIDER]]
         last_error: Exception | None = None
         session = None
         chosen_providers: list[str] | None = None
@@ -101,9 +144,11 @@ class WD14Tagger(ITagger):
                 )
             except Exception as exc:  # pragma: no cover - handled in tests via mocks
                 last_error = exc
-                if providers is None and provider_list == ["CUDAExecutionProvider"]:
+                if requested_providers is None and provider_list == [_CUDA_PROVIDER]:
                     logger.warning(
-                        "WD14: CUDAExecutionProvider unavailable, falling back to CPUExecutionProvider"
+                        "WD14: %s unavailable, falling back to %s",
+                        _CUDA_PROVIDER,
+                        _CPU_PROVIDER,
                     )
                     continue
                 raise
@@ -112,10 +157,10 @@ class WD14Tagger(ITagger):
                 break
         if session is None or chosen_providers is None:
             raise RuntimeError("WD14: failed to initialise ONNX Runtime session") from last_error
-        if providers is None and chosen_providers == ["CUDAExecutionProvider"]:
-            logger.info("WD14: using CUDAExecutionProvider")
-        elif providers is None and chosen_providers == ["CPUExecutionProvider"]:
-            logger.info("WD14: using CPUExecutionProvider")
+        if requested_providers is None and chosen_providers == [_CUDA_PROVIDER]:
+            logger.info("WD14: using %s", _CUDA_PROVIDER)
+        elif requested_providers is None and chosen_providers == [_CPU_PROVIDER]:
+            logger.info("WD14: using %s", _CPU_PROVIDER)
         else:
             logger.info("WD14: using providers %s", chosen_providers)
         self._session = session
@@ -178,14 +223,59 @@ class WD14Tagger(ITagger):
             raise ValueError("No labels parsed from WD14 label CSV")
         return labels
 
+    # original
+    # def _preprocess(self, image: Image.Image) -> np.ndarray:
+    #     rgb = image.convert("RGB")
+    #     resample = getattr(Image, "Resampling", Image).BICUBIC  # type: ignore[attr-defined]
+    #     resized = rgb.resize((self._input_size, self._input_size), resample)
+    #     array = np.asarray(resized, dtype=np.float32) / 255.0  # 0..1
+    #     # ★ BGR反転もしない、転置もしない → NHWC のまま
+    #     return np.expand_dims(array, 0)  # (1, H, W, 3)
+
+    def make_square(self, img, target_size):
+        old_size = img.shape[:2]
+        desired_size = max(old_size)
+        desired_size = max(desired_size, target_size)
+
+        delta_w = desired_size - old_size[1]
+        delta_h = desired_size - old_size[0]
+        top, bottom = delta_h // 2, delta_h - (delta_h // 2)
+        left, right = delta_w // 2, delta_w - (delta_w // 2)
+
+        color = [255, 255, 255]
+        return cv2.copyMakeBorder(img, top, bottom, left, right, cv2.BORDER_CONSTANT, value=color)
+
+    # noinspection PyUnresolvedReferences
+    def smart_resize(self, img, size):
+        # Assumes the image has already gone through make_square
+        if img.shape[0] > size:
+            img = cv2.resize(img, (size, size), interpolation=cv2.INTER_AREA)
+        elif img.shape[0] < size:
+            img = cv2.resize(img, (size, size), interpolation=cv2.INTER_CUBIC)
+        else:  # just do nothing
+            pass
+
+        return img
+
+    # borrowed from: https://huggingface.co/spaces/deepghs/wd14_tagging_online/blob/main/app.py
     def _preprocess(self, image: Image.Image) -> np.ndarray:
-        rgb = image.convert("RGB")
-        resample = getattr(Image, "Resampling", Image).BICUBIC  # type: ignore[attr-defined]
-        resized = rgb.resize((self._input_size, self._input_size), resample)
-        array = np.asarray(resized).astype(np.float32) / 255.0
-        array = (array - 0.5) / 0.5
-        array = np.transpose(array, (2, 0, 1))
-        return np.expand_dims(array, 0)
+        _, height, _, _ = self._session.get_inputs()[0].shape
+
+        # alpha to white
+        image = image.convert("RGBA")
+        new_image = Image.new("RGBA", image.size, "WHITE")
+        new_image.paste(image, mask=image)
+        image = new_image.convert("RGB")
+        image = np.asarray(image)
+
+        # PIL RGB to OpenCV BGR
+        image = image[:, :, ::-1]
+
+        image = self.make_square(image, height)
+        image = self.smart_resize(image, height)
+        image = image.astype(np.float32)
+        image = np.expand_dims(image, 0)
+        return image
 
     @staticmethod
     def _resolve_thresholds(
@@ -223,7 +313,34 @@ class WD14Tagger(ITagger):
                 f"Model output dimension {logits.shape[1]} does not match label count {len(self._labels)}"
             )
 
-        probabilities = _sigmoid(logits)
+        # probabilities = _sigmoid(logits)
+        # Auto-detect: if the tensor already looks like probabilities in [0,1],
+        # skip sigmoid; otherwise apply sigmoid to logits.
+        minv = float(np.min(logits))
+        maxv = float(np.max(logits))
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug("WD14 LOGITS: min=%.4f max=%.4f", minv, maxv)
+
+        if 0.0 <= minv <= 1.0 and 0.0 <= maxv <= 1.0:
+            probabilities = logits.astype(np.float32, copy=False)  # already probs
+        else:
+            probabilities = _sigmoid(logits)
+
+        # --- DEBUG: dump raw top-k (before thresholds) for the 1st image in this batch ---
+        # try:
+        #     p0 = probabilities[0]
+        #     topk_n = 20
+        #     idx = np.argpartition(-p0, topk_n)[:topk_n]
+        #     idx = idx[np.argsort(-p0[idx])]
+        #     dump = []
+        #     for i in idx:
+        #         lab = self._labels[int(i)]
+        #         dump.append(f"{lab.name}({lab.category.name})={p0[i]:.3f}")
+        #     print("WD14 RAW top20: %s", ", ".join(dump))
+        # except Exception as _e:  # 失敗しても推論自体は続行
+        #     print("top-k debug dump failed: %r", _e)
+        # --- DEBUG end ---
+
         resolved_thresholds = self._resolve_thresholds(self._default_thresholds, thresholds)
         resolved_limits = self._resolve_max_tags(self._default_max_tags, max_tags)
 
@@ -251,4 +368,4 @@ class WD14Tagger(ITagger):
         return results
 
 
-__all__ = ["WD14Tagger"]
+__all__ = ["WD14Tagger", "ensure_onnxruntime", "get_available_providers", "ONNXRUNTIME_MISSING_MESSAGE"]
