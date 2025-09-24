@@ -17,8 +17,10 @@ kobato-eyes is a Windows-first desktop application for indexing local images wit
 
 ## Testing
 
-- Run unit tests locally: `pytest`
-- In cloud/CI environments use the headless invocation: `KOE_HEADLESS=1 PYTHONPATH=src pytest`
+- Run the default headless test suite (excludes GUI/integration):
+  `KOE_HEADLESS=1 PYTHONPATH=src pytest`
+- Include GUI and integration tests when running locally:
+  `PYTHONPATH=src pytest -m "gui or integration"`
 
 ## Packaging
 

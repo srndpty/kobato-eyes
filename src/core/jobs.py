@@ -1,14 +1,151 @@
-"""Asynchronous job management for kobato-eyes."""
+"""Job management helpers with optional Qt fallbacks for headless mode."""
 
 from __future__ import annotations
 
 import enum
 import heapq
+import threading
+import time
 import traceback
 from abc import ABC
-from typing import Any, Sequence
+from typing import Any, Callable, Sequence
 
-from PyQt6.QtCore import QObject, QRunnable, QThreadPool, QTimer, pyqtSignal
+from utils.env import is_headless
+
+if is_headless():
+    _sender_local = threading.local()
+
+    class QObject:  # type: ignore[too-many-ancestors]
+        """Very small QObject stand-in used without PyQt6."""
+
+        def __init__(self, *args, **kwargs) -> None:  # noqa: D401 - Qt-compatible signature
+            pass
+
+        def deleteLater(self) -> None:  # noqa: D401 - Qt-compatible signature
+            pass
+
+        @staticmethod
+        def _push_sender(sender: "QObject") -> None:
+            stack = getattr(_sender_local, "stack", None)
+            if stack is None:
+                stack = []
+                _sender_local.stack = stack
+            stack.append(sender)
+
+        @staticmethod
+        def _pop_sender() -> None:
+            stack = getattr(_sender_local, "stack", None)
+            if stack:
+                stack.pop()
+
+        def sender(self) -> "QObject | None":  # noqa: D401 - Qt-compatible signature
+            stack = getattr(_sender_local, "stack", None)
+            if stack:
+                return stack[-1]
+            return None
+
+
+    class QRunnable:
+        """Minimal runnable base class compatible with the Qt API."""
+
+        def run(self) -> None:  # noqa: D401 - Qt-compatible signature
+            raise NotImplementedError
+
+
+    class QThreadPool:
+        """Thread pool that mimics the Qt API using Python threads."""
+
+        def __init__(self) -> None:
+            self._max_thread_count = max(1, threading.active_count())
+            self._threads: list[threading.Thread] = []
+
+        def setMaxThreadCount(self, count: int) -> None:
+            self._max_thread_count = max(1, int(count))
+
+        def maxThreadCount(self) -> int:
+            return self._max_thread_count
+
+        def start(self, runnable: QRunnable) -> None:
+            thread = threading.Thread(target=runnable.run, daemon=True)
+            self._threads.append(thread)
+            thread.start()
+
+        def waitForDone(self, timeout_ms: int = -1) -> bool:
+            deadline = None
+            if timeout_ms >= 0:
+                deadline = time.time() + (timeout_ms / 1000.0)
+            for thread in list(self._threads):
+                remaining = None
+                if deadline is not None:
+                    remaining = max(0.0, deadline - time.time())
+                thread.join(remaining)
+            finished = all(not thread.is_alive() for thread in self._threads)
+            if finished:
+                self._threads.clear()
+            return finished
+
+
+    class QTimer:
+        """Provide the static Qt timer helpers needed by JobManager."""
+
+        @staticmethod
+        def singleShot(interval_ms: int, callback: Callable[[], None]) -> None:
+            if interval_ms <= 0:
+                callback()
+                return
+            timer = threading.Timer(interval_ms / 1000.0, callback)
+            timer.daemon = True
+            timer.start()
+
+
+    class _Signal:
+        def __init__(self, owner: QObject) -> None:
+            self._owner = owner
+            self._callbacks: list[Callable[..., None]] = []
+
+        def connect(self, callback: Callable[..., None]) -> None:
+            self._callbacks.append(callback)
+
+        def disconnect(self, callback: Callable[..., None]) -> None:
+            try:
+                self._callbacks.remove(callback)
+            except ValueError:
+                pass
+
+        def emit(self, *args, **kwargs) -> None:
+            for callback in list(self._callbacks):
+                QObject._push_sender(self._owner)
+                try:
+                    callback(*args, **kwargs)
+                finally:
+                    QObject._pop_sender()
+
+
+    class _SignalDescriptor:
+        def __init__(self) -> None:
+            self._name: str | None = None
+
+        def __set_name__(self, owner: type[QObject], name: str) -> None:
+            self._name = name
+
+        def __get__(self, instance: QObject | None, owner: type[QObject]) -> _Signal:
+            if instance is None:
+                raise AttributeError("Signal descriptors are only available on instances")
+            if self._name is None:
+                raise AttributeError("Signal descriptor not initialised")
+            signal = instance.__dict__.get(self._name)
+            if signal is None:
+                signal = _Signal(instance)
+                instance.__dict__[self._name] = signal
+            return signal
+
+
+    def pyqtSignal(*_args, **_kwargs) -> _SignalDescriptor:  # noqa: D401 - Qt-compatible signature
+        return _SignalDescriptor()
+
+
+else:  # pragma: no branch - trivial import guard
+    from PyQt6.QtCore import QObject, QRunnable, QThreadPool, QTimer, pyqtSignal
 
 
 class JobPriority(enum.IntEnum):

@@ -16,6 +16,8 @@ from db.connection import get_conn
 from db.schema import apply_schema
 from tagger.dummy import DummyTagger
 
+pytestmark = pytest.mark.integration
+
 
 class TinyEmbedder:
     def __init__(self, dim: int = 4) -> None:

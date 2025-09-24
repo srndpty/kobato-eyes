@@ -9,6 +9,8 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
+pytest.importorskip("PyQt6", reason="PyQt6 not available")
+
 
 if os.environ.get("KOE_HEADLESS", "0") == "1":
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")

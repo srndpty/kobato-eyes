@@ -22,7 +22,7 @@ from dup.indexer import EmbedderProtocol
 from index.hnsw import HNSWIndex
 from tagger.base import ITagger, TagCategory, TagPrediction, TagResult
 
-pytestmark = pytest.mark.gui
+pytestmark = [pytest.mark.gui, pytest.mark.integration]
 
 
 @pytest.fixture(scope="module")

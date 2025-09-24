@@ -17,6 +17,8 @@ from db.schema import apply_schema
 from tagger.wd14_onnx import ONNXRUNTIME_MISSING_MESSAGE
 from ui.tags_tab import TagsTab
 
+pytestmark = pytest.mark.gui
+
 
 @pytest.fixture(scope="module")
 def qapp() -> Iterable[QApplication]:

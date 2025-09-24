@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
 import sqlite3
 from PIL import Image
 
@@ -11,6 +12,8 @@ from core.pipeline import current_tagger_sig, run_index_once
 from core.settings import PipelineSettings, TaggerSettings
 from db.connection import get_conn
 from tagger.base import ITagger, TagCategory, TagPrediction, TagResult
+
+pytestmark = pytest.mark.integration
 
 
 class _StubTagger(ITagger):
