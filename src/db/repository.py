@@ -92,6 +92,18 @@ def get_file_by_path(conn: sqlite3.Connection, path: str) -> sqlite3.Row | None:
     return cursor.fetchone()
 
 
+def list_tag_names(conn: sqlite3.Connection, limit: int = 0) -> list[str]:
+    """Return tag names ordered alphabetically, optionally limited."""
+
+    sql = "SELECT name FROM tags ORDER BY name ASC"
+    params: tuple[object, ...] = ()
+    if limit > 0:
+        sql += " LIMIT ?"
+        params = (int(limit),)
+    cursor = conn.execute(sql, params)
+    return [str(row[0]) for row in cursor.fetchall()]
+
+
 def upsert_tags(conn: sqlite3.Connection, tags: Sequence[Mapping[str, Any]]) -> dict[str, int]:
     """Ensure tags exist and return a mapping from tag name to identifier."""
     results: dict[str, int] = {}
