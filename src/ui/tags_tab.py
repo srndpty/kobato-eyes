@@ -15,16 +15,14 @@ from PyQt6.QtCore import (
     QModelIndex,
     QObject,
     QRunnable,
-    QRect,
     QSize,
     Qt,
     QThreadPool,
     QTimer,
     pyqtSignal,
 )
-from PyQt6.QtGui import QPalette, QPixmap, QStandardItem, QStandardItemModel
+from PyQt6.QtGui import QPixmap, QStandardItem, QStandardItemModel
 from PyQt6.QtWidgets import (
-    QApplication,
     QAbstractItemView,
     QButtonGroup,
     QCompleter,
@@ -39,9 +37,6 @@ from PyQt6.QtWidgets import (
     QPushButton,
     QStackedWidget,
     QTableView,
-    QStyle,
-    QStyleOptionViewItem,
-    QStyledItemDelegate,
     QToolButton,
     QVBoxLayout,
     QWidget,
@@ -174,23 +169,18 @@ class TagsTab(QWidget):
         def data(self, index: QModelIndex, role: int = Qt.ItemDataRole.DisplayRole):  # type: ignore[override]
             if not index.isValid():
                 return None
+            try:
+                item = self._items[index.row()]
+            except IndexError:
+                return None
             if role in {Qt.ItemDataRole.DisplayRole, Qt.ItemDataRole.EditRole}:
-                try:
-                    return self._items[index.row()].name
-                except IndexError:
-                    return None
+                count_text = abbreviate_count(item.count)
+                return f"{item.name} ({count_text})" if count_text else item.name
             if role == int(self.NAME_ROLE):
-                try:
-                    return self._items[index.row()].name
-                except IndexError:
-                    return None
+                return item.name
             if role == int(self.COUNT_ROLE):
                 try:
-                    value = self._items[index.row()].count
-                except IndexError:
-                    return 0
-                try:
-                    return int(value or 0)
+                    return int(item.count or 0)
                 except (TypeError, ValueError):
                     return 0
             return None
@@ -206,79 +196,6 @@ class TagsTab(QWidget):
             self._items = list(items)
             self.endResetModel()
 
-    class TagSuggestDelegate(QStyledItemDelegate):
-        """Render tag suggestions with the tag name and abbreviated count."""
-
-        _HORIZONTAL_PADDING = 8
-        _COUNT_SPACING = 12
-
-        @staticmethod
-        def format_count(value: object) -> str:
-            """Return a human readable abbreviated representation for ``value``."""
-
-            return abbreviate_count(value)
-
-        def paint(self, painter, option, index):  # type: ignore[override]
-            opt = QStyleOptionViewItem(option)
-            self.initStyleOption(opt, index)
-            widget = opt.widget or option.widget
-            style = widget.style() if widget else QApplication.style()
-            opt.text = ""
-            style.drawControl(QStyle.ControlElement.CE_ItemViewItem, opt, painter, widget)
-
-            text_rect = style.subElementRect(QStyle.SubElement.SE_ItemViewItemText, opt, widget)
-            text_rect = text_rect.adjusted(
-                self._HORIZONTAL_PADDING,
-                0,
-                -self._HORIZONTAL_PADDING,
-                0,
-            )
-            name = index.data(Qt.ItemDataRole.DisplayRole) or ""
-            count_value = index.data(TagsTab.TagListModel.COUNT_ROLE)
-            count_text = self.format_count(count_value)
-            metrics = opt.fontMetrics
-            available_width = text_rect.width()
-            count_rect = QRect(text_rect)
-
-            painter.save()
-            try:
-                if opt.state & QStyle.StateFlag.State_Selected:
-                    color = opt.palette.color(QPalette.ColorRole.HighlightedText)
-                else:
-                    color = opt.palette.color(QPalette.ColorRole.Text)
-                painter.setPen(color)
-                painter.setFont(opt.font)
-
-                if count_text:
-                    count_width = metrics.horizontalAdvance(count_text)
-                    available_width = max(
-                        0, available_width - count_width - self._COUNT_SPACING
-                    )
-                    count_rect.setWidth(min(count_width, text_rect.width()))
-                    count_rect.setLeft(
-                        max(text_rect.left(), text_rect.right() - count_rect.width() + 1)
-                    )
-                    painter.drawText(
-                        count_rect,
-                        Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignRight,
-                        count_text,
-                    )
-
-                name_rect = QRect(text_rect)
-                name_rect.setWidth(max(0, available_width))
-                elided = metrics.elidedText(
-                    str(name),
-                    Qt.TextElideMode.ElideRight,
-                    name_rect.width(),
-                )
-                painter.drawText(
-                    name_rect,
-                    Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
-                    elided,
-                )
-            finally:
-                painter.restore()
-
     _PAGE_SIZE = 200
     _THUMB_SIZE = 128
 
@@ -290,13 +207,7 @@ class TagsTab(QWidget):
         self._completer = QCompleter(self._tag_model, self)
         self._completer.setCompletionMode(QCompleter.CompletionMode.PopupCompletion)
         self._completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
-        self._completer.activated[str].connect(self._on_completion_activated)
-        self._completer_delegate: TagsTab.TagSuggestDelegate | None = None
-        popup = self._completer.popup()
-        if isinstance(popup, QListView):
-            delegate = self.TagSuggestDelegate(popup)
-            popup.setItemDelegate(delegate)
-            self._completer_delegate = delegate
+        self._completer.activated[QModelIndex].connect(self._on_completion_activated)
         self._query_edit.setCompleter(self._completer)
         self._autocomplete_timer = QTimer(self)
         self._autocomplete_timer.setSingleShot(True)
@@ -512,10 +423,18 @@ class TagsTab(QWidget):
         if popup is not None and popup.isVisible():
             popup.hide()
 
-    def _on_completion_activated(self, completion: str) -> None:
+    def _on_completion_activated(self, index: QModelIndex) -> None:
+        if not index.isValid():
+            return
+        completion = index.data(int(self._tag_model.NAME_ROLE))
+        if not completion:
+            completion = index.data(Qt.ItemDataRole.DisplayRole)
+        if not completion:
+            return
+        completion_text = str(completion)
         text = self._query_edit.text()
         start, end = self._current_completion_range
-        new_text, cursor = replace_completion_token(text, start, end, completion)
+        new_text, cursor = replace_completion_token(text, start, end, completion_text)
         block = self._query_edit.blockSignals(True)
         self._query_edit.setText(new_text)
         self._query_edit.blockSignals(block)
