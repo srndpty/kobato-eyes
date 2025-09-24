@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import sys
 
@@ -15,9 +16,13 @@ if os.environ.get("KOE_HEADLESS", "0") == "1":
 
 QGuiApplication.setAttribute(Qt.ApplicationAttribute.AA_UseSoftwareOpenGL)
 
+from db.connection import bootstrap_if_needed
 from ui.dup_tab import DupTab
 from ui.settings_tab import SettingsTab
 from ui.tags_tab import TagsTab
+from utils.paths import ensure_dirs, get_db_path
+
+logger = logging.getLogger(__name__)
 
 
 class MainWindow(QMainWindow):
@@ -25,6 +30,10 @@ class MainWindow(QMainWindow):
 
     def __init__(self) -> None:
         super().__init__()
+        ensure_dirs()
+        db_path = get_db_path()
+        logger.info("DB at %s", db_path)
+        bootstrap_if_needed(db_path)
         self.setWindowTitle("kobato-eyes")
         self._tabs = QTabWidget()
         self._tabs.addTab(TagsTab(self), "Tags")

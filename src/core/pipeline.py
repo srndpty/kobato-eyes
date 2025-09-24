@@ -18,7 +18,7 @@ from core.scanner import DEFAULT_EXTENSIONS, iter_images
 from core.settings import PipelineSettings
 from core.tag_job import TagJobConfig, run_tag_job
 from core.watcher import DirectoryWatcher
-from db.connection import get_conn
+from db.connection import bootstrap_if_needed, get_conn
 from db.repository import (
     get_file_by_path,
     mark_indexed_at,
@@ -186,6 +186,7 @@ class ProcessingPipeline(QObject):
         self.enqueue_index([path])
 
     def enqueue_index(self, paths: Iterable[Path]) -> None:
+        bootstrap_if_needed(self._db_path)
         allow_exts = {ext.lower() for ext in (self._settings.allow_exts or DEFAULT_EXTENSIONS)}
         scheduled_now: set[Path] = set()
         resolved_paths: list[Path] = []
@@ -264,6 +265,7 @@ def run_index_once(
     """
     start_time = time.perf_counter()
     settings = settings or load_settings()
+    bootstrap_if_needed(db_path)
     ensure_dirs()
     stats: dict[str, object] = {
         "scanned": 0,

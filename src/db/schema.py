@@ -5,6 +5,8 @@ from __future__ import annotations
 import sqlite3
 from typing import Iterable
 
+CURRENT_SCHEMA_VERSION = 1
+
 SCHEMA_STATEMENTS: tuple[str, ...] = (
     """
     CREATE TABLE IF NOT EXISTS files (
@@ -13,6 +15,9 @@ SCHEMA_STATEMENTS: tuple[str, ...] = (
         size INTEGER,
         mtime REAL,
         sha256 TEXT,
+        width INTEGER,
+        height INTEGER,
+        indexed_at REAL,
         created_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
     """,
@@ -70,15 +75,31 @@ SCHEMA_STATEMENTS: tuple[str, ...] = (
 )
 
 
-def apply_schema(conn: sqlite3.Connection, statements: Iterable[str] | None = None) -> None:
-    """Create database objects required by the application."""
+def ensure_schema(conn: sqlite3.Connection, statements: Iterable[str] | None = None) -> None:
+    """Ensure all database tables and indexes exist with the latest version."""
+
     cursor = conn.cursor()
     try:
+        version_row = cursor.execute("PRAGMA user_version").fetchone()
+        current_version = int(version_row[0]) if version_row else 0
         for statement in statements or SCHEMA_STATEMENTS:
             cursor.execute(statement)
+        if current_version < CURRENT_SCHEMA_VERSION:
+            cursor.execute(f"PRAGMA user_version = {CURRENT_SCHEMA_VERSION}")
+        conn.commit()
     finally:
         cursor.close()
-    conn.commit()
 
 
-__all__ = ["apply_schema", "SCHEMA_STATEMENTS"]
+def apply_schema(conn: sqlite3.Connection, statements: Iterable[str] | None = None) -> None:
+    """Backward compatible wrapper for :func:`ensure_schema`."""
+
+    ensure_schema(conn, statements=statements)
+
+
+__all__ = [
+    "CURRENT_SCHEMA_VERSION",
+    "SCHEMA_STATEMENTS",
+    "apply_schema",
+    "ensure_schema",
+]

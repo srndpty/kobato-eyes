@@ -80,7 +80,7 @@ class _IndexSignals(QObject):
 class _IndexTask(QRunnable):
     def __init__(self, db_path: Path) -> None:
         super().__init__()
-        self._db_path = db_path
+        self._db_path = Path(db_path)
         self.signals = _IndexSignals()
 
     def run(self) -> None:  # noqa: D401
@@ -88,7 +88,7 @@ class _IndexTask(QRunnable):
         try:
             stats = run_index_once(self._db_path)
         except Exception as exc:  # pragma: no cover - defensive logging
-            logger.exception("Indexing failed")
+            logger.exception("Indexing failed for database %s", self._db_path)
             self.signals.failed.emit(str(exc))
         else:
             self.signals.finished.emit(stats)
@@ -205,7 +205,9 @@ class TagsTab(QWidget):
         self._placeholder_button.clicked.connect(self._on_index_now)
 
         ensure_dirs()
+        self._db_display = str(get_db_path())
         self._conn = get_conn(get_db_path())
+        self._db_path = self._resolve_db_path()
         self.destroyed.connect(lambda: self._conn.close())
 
         self._current_query: Optional[str] = None
@@ -257,9 +259,8 @@ class TagsTab(QWidget):
     def _on_index_now(self) -> None:
         if self._indexing_active:
             return
-        db_row = self._conn.execute("PRAGMA database_list").fetchone()
-        db_file = Path(db_row[2]) if db_row and db_row[2] else get_db_path()
-        task = _IndexTask(db_file)
+        self._db_path = self._resolve_db_path()
+        task = _IndexTask(self._db_path)
         task.signals.started.connect(self._handle_index_started)
         task.signals.finished.connect(self._handle_index_finished)
         task.signals.failed.connect(self._handle_index_failed)
@@ -516,9 +517,24 @@ class TagsTab(QWidget):
 
     def _handle_index_failed(self, message: str) -> None:
         self._indexing_active = False
-        self._status_label.setText(f"Indexing failed: {message}")
-        self._show_toast(f"Indexing failed: {message}")
+        error_text = f"Indexing failed (DB: {self._db_display}): {message}"
+        self._status_label.setText(error_text)
+        self._show_toast(error_text)
         self._update_control_states()
+
+    def _resolve_db_path(self) -> Path:
+        db_row = self._conn.execute("PRAGMA database_list").fetchone()
+        literal = db_row[2] if db_row else None
+        if literal and literal not in {":memory:", ""}:
+            path = Path(literal).expanduser()
+            self._db_display = str(path)
+            return path
+        if literal == ":memory:":
+            self._db_display = ":memory:"
+            return Path(get_db_path()).expanduser()
+        fallback = Path(get_db_path()).expanduser()
+        self._db_display = str(fallback)
+        return fallback
 
     def _show_toast(self, message: str, *, timeout_ms: int = 4000) -> None:
         self._toast_timer.stop()
