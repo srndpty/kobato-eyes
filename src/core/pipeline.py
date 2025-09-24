@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, Mapping, Optional, Set
+from typing import Iterable, Mapping, Optional, Sequence, Set
 
 import numpy as np
 from PIL import Image
@@ -140,14 +141,21 @@ class ProcessingPipeline(QObject):
         self._watcher: DirectoryWatcher | None = None
         self._scheduled: Set[Path] = set()
         self._tag_config = TagJobConfig()
+        self._tagger_sig: str | None = None
         self._refresh_tag_config()
 
     def _refresh_tag_config(self) -> None:
         thresholds = _build_threshold_map(self._settings.tagger.thresholds)
         max_tags_map = _build_max_tags_map(getattr(self._settings.tagger, "max_tags", None))
+        self._tagger_sig = current_tagger_sig(
+            self._settings,
+            thresholds=thresholds,
+            max_tags=max_tags_map,
+        )
         self._tag_config = TagJobConfig(
             thresholds=thresholds or None,
             max_tags=max_tags_map or None,
+            tagger_sig=self._tagger_sig,
         )
 
     def update_settings(self, settings: PipelineSettings) -> None:
@@ -250,6 +258,9 @@ class _FileRecord:
     embed_exists: bool
     needs_tagging: bool
     needs_embedding: bool
+    stored_tagger_sig: str | None = None
+    current_tagger_sig: str | None = None
+    last_tagged_at: float | None = None
     image: Image.Image | None = None
     width: int | None = None
     height: int | None = None
@@ -286,7 +297,19 @@ def run_index_once(
         "hnsw_added": 0,
         "elapsed_sec": 0.0,
         "tagger_name": settings.tagger.name,
+        "retagged": 0,
     }
+
+    thresholds = _build_threshold_map(settings.tagger.thresholds)
+    max_tags_map = _build_max_tags_map(getattr(settings.tagger, "max_tags", None))
+    tagger_sig = current_tagger_sig(
+        settings,
+        thresholds=thresholds,
+        max_tags=max_tags_map,
+    )
+    serialised_thresholds = _serialise_thresholds(thresholds)
+    serialised_max_tags = _serialise_max_tags(max_tags_map)
+    stats["tagger_sig"] = tagger_sig
 
     roots = [Path(root).expanduser() for root in settings.roots if root]
     roots = [root for root in roots if root.exists()]
@@ -359,6 +382,21 @@ def run_index_once(
                 is not None
             )
 
+            stored_sig = row["tagger_sig"] if row is not None else None
+            stored_sig = str(stored_sig) if stored_sig is not None else None
+            stored_tagged_at = row["last_tagged_at"] if row is not None else None
+            last_tagged_at = (
+                float(stored_tagged_at)
+                if stored_tagged_at is not None
+                else None
+            )
+            needs_tagging = (
+                is_new
+                or changed
+                or not tag_exists
+                or stored_sig != tagger_sig
+            )
+
             record = _FileRecord(
                 file_id=file_id,
                 path=image_path,
@@ -369,8 +407,11 @@ def run_index_once(
                 changed=changed,
                 tag_exists=tag_exists,
                 embed_exists=embed_exists,
-                needs_tagging=is_new or changed or not tag_exists,
+                needs_tagging=needs_tagging,
                 needs_embedding=is_new or changed or not embed_exists,
+                stored_tagger_sig=stored_sig,
+                current_tagger_sig=tagger_sig,
+                last_tagged_at=last_tagged_at,
             )
             records.append(record)
         conn.commit()
@@ -408,19 +449,15 @@ def run_index_once(
         tag_records = [record for record in records if record.needs_tagging]
         if tag_records:
             try:
-                max_tags_map = _build_max_tags_map(getattr(settings.tagger, "max_tags", None))
-                thresholds = _build_threshold_map(settings.tagger.thresholds)
                 tagger = _resolve_tagger(
                     settings,
                     tagger_override,
-                    thresholds=thresholds,
-                    max_tags=max_tags_map,
+                    thresholds=thresholds or None,
+                    max_tags=max_tags_map or None,
                 )
             except Exception as exc:  # pragma: no cover - defensive logging
                 logger.warning("Failed to instantiate tagger: %s", exc)
                 raise
-            serialised_thresholds = _serialise_thresholds(thresholds)
-            serialised_max_tags = _serialise_max_tags(max_tags_map)
             stats["tagger_name"] = (
                 type(tagger).__name__
                 if tagger_override is not None
@@ -486,6 +523,8 @@ def run_index_once(
                     else:
                         replace_file_tags(conn, record.file_id, [])
                         update_fts(conn, record.file_id, None)
+                    previous_sig = record.stored_tagger_sig
+                    tagged_at = time.time()
                     upsert_file(
                         conn,
                         path=str(record.path),
@@ -494,9 +533,16 @@ def run_index_once(
                         sha256=record.sha,
                         width=image.width,
                         height=image.height,
+                        tagger_sig=tagger_sig,
+                        last_tagged_at=tagged_at,
                     )
                     record.needs_tagging = False
                     record.tag_exists = True
+                    record.stored_tagger_sig = tagger_sig
+                    record.current_tagger_sig = tagger_sig
+                    record.last_tagged_at = tagged_at
+                    if not record.is_new and not record.changed and previous_sig != tagger_sig:
+                        stats["retagged"] = int(stats.get("retagged", 0)) + 1
                     logger.debug(
                         "kept %d/%d tags (max_tags=%s, thresholds=%s) for %s",
                         len(merged),
@@ -653,6 +699,82 @@ def run_index_once(
     return stats
 
 
+def current_tagger_sig(
+    settings: PipelineSettings,
+    *,
+    thresholds: Mapping[TagCategory, float] | None = None,
+    max_tags: Mapping[TagCategory, int] | None = None,
+) -> str:
+    """Derive a stable signature that captures the active tagger configuration."""
+
+    threshold_map = thresholds or _build_threshold_map(settings.tagger.thresholds)
+    max_tags_map = max_tags or _build_max_tags_map(getattr(settings.tagger, "max_tags", None))
+    serialised_thresholds = _serialise_thresholds(threshold_map)
+    serialised_max_tags = _serialise_max_tags(max_tags_map)
+
+    tagger_name = str(getattr(settings.tagger, "name", "") or "").lower()
+    model_path = getattr(settings.tagger, "model_path", None)
+    tags_csv = getattr(settings.tagger, "tags_csv", None)
+
+    model_digest = _digest_identifier(model_path)
+    csv_digest = _digest_identifier(tags_csv)
+    thresholds_part = _format_sig_mapping(serialised_thresholds)
+    max_tags_part = _format_sig_mapping(serialised_max_tags)
+    return (
+        f"{tagger_name}:{model_digest}:csv={csv_digest}:"
+        f"thr={thresholds_part}:max={max_tags_part}"
+    )
+
+
+def retag_query(
+    db_path: str | Path,
+    where_sql: str,
+    params: Sequence[object] | None,
+) -> int:
+    """Mark files matching the provided WHERE clause for re-tagging."""
+
+    predicate = where_sql.strip() or "1=1"
+    arguments: tuple[object, ...] = tuple(params or ())
+    conn = get_conn(db_path)
+    try:
+        conn.execute(
+            f"UPDATE files SET tagger_sig = NULL, last_tagged_at = NULL WHERE {predicate}",
+            arguments,
+        )
+        affected = conn.execute("SELECT changes()").fetchone()[0] or 0
+        conn.commit()
+        logger.info("Flagged %d file(s) for re-tagging (predicate=%s)", affected, predicate)
+        return int(affected)
+    finally:
+        conn.close()
+
+
+def retag_all(
+    db_path: str | Path,
+    *,
+    force: bool = False,
+    settings: PipelineSettings | None = None,
+) -> int:
+    """Reset tagger signatures across the library to trigger re-tagging."""
+
+    effective_settings = settings or load_settings()
+    signature = current_tagger_sig(effective_settings)
+    if force:
+        predicate = "1=1"
+        params: tuple[object, ...] = ()
+    else:
+        predicate = "tagger_sig = ?"
+        params = (signature,)
+    affected = retag_query(db_path, predicate, params)
+    logger.info(
+        "Scheduled %d file(s) for re-tagging (force=%s, signature=%s)",
+        affected,
+        force,
+        signature,
+    )
+    return affected
+
+
 def _resolve_tagger(
     settings: PipelineSettings,
     override: ITagger | None,
@@ -717,6 +839,45 @@ def _resolve_embedder(settings: PipelineSettings) -> EmbedderProtocol:
     )
 
 
+def _format_sig_mapping(mapping: Mapping[str, float | int]) -> str:
+    if not mapping:
+        return "none"
+    parts: list[str] = []
+    for key in sorted(mapping):
+        value = mapping[key]
+        if isinstance(value, float):
+            formatted = format(value, ".6f").rstrip("0").rstrip(".")
+        else:
+            formatted = str(int(value))
+        parts.append(f"{key}={formatted}")
+    return ",".join(parts)
+
+
+def _digest_identifier(value: str | Path | None) -> str:
+    normalised = _normalise_sig_source(value)
+    if normalised is None:
+        return "none"
+    return hashlib.sha256(normalised.encode("utf-8")).hexdigest()
+
+
+def _normalise_sig_source(value: str | Path | None) -> str | None:
+    if value in (None, ""):
+        return None
+    if isinstance(value, Path):
+        candidate = value
+    else:
+        try:
+            candidate = Path(str(value))
+        except (TypeError, ValueError):
+            return str(value)
+    expanded = candidate.expanduser()
+    try:
+        resolved = expanded.resolve(strict=False)
+    except OSError:
+        resolved = expanded.absolute()
+    return str(resolved)
+
+
 def _build_threshold_map(thresholds: dict[str, float]) -> dict[TagCategory, float]:
     mapping: dict[TagCategory, float] = {}
     for key, value in thresholds.items():
@@ -767,4 +928,11 @@ _CATEGORY_KEY_LOOKUP = {
 }
 
 
-__all__ = ["PipelineSettings", "ProcessingPipeline", "run_index_once"]
+__all__ = [
+    "PipelineSettings",
+    "ProcessingPipeline",
+    "current_tagger_sig",
+    "retag_all",
+    "retag_query",
+    "run_index_once",
+]

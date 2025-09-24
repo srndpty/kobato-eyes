@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -18,6 +19,8 @@ class TagJobConfig:
 
     thresholds: ThresholdMap | None = None
     max_tags: MaxTagsMap | None = None
+    tagger_sig: str | None = None
+    tagged_at: float | None = None
 
 
 @dataclass(frozen=True)
@@ -56,12 +59,17 @@ def run_tag_job(
 
     stat = source.stat()
     sha256_hex = compute_sha256(source)
+    tagged_at = cfg.tagged_at if cfg.tagged_at is not None else time.time()
     file_id = upsert_file(
         conn,
         path=str(source),
         size=stat.st_size,
         mtime=stat.st_mtime,
         sha256=sha256_hex,
+        width=image.width,
+        height=image.height,
+        tagger_sig=cfg.tagger_sig,
+        last_tagged_at=tagged_at,
     )
 
     tag_defs = [{"name": prediction.name, "category": int(prediction.category)} for prediction in tag_result.tags]

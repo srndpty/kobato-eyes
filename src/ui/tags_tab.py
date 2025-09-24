@@ -7,7 +7,7 @@ import subprocess
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import Iterable, List, Optional
+from typing import Iterable, List, Optional, Sequence
 
 from PyQt6.QtCore import (
     QModelIndex,
@@ -28,6 +28,8 @@ from PyQt6.QtWidgets import (
     QLabel,
     QLineEdit,
     QListView,
+    QMenu,
+    QMessageBox,
     QPushButton,
     QStackedWidget,
     QTableView,
@@ -36,7 +38,8 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from core.pipeline import run_index_once
+from core.config import load_settings
+from core.pipeline import retag_all, retag_query, run_index_once
 from core.query import translate_query
 from db.connection import get_conn
 from db.repository import search_files
@@ -94,6 +97,39 @@ class _IndexTask(QRunnable):
             self.signals.finished.emit(stats)
 
 
+class _RetagTask(QRunnable):
+    def __init__(
+        self,
+        db_path: Path,
+        *,
+        predicate: str | None = None,
+        params: Sequence[object] | None = None,
+        force_all: bool = False,
+    ) -> None:
+        super().__init__()
+        self._db_path = Path(db_path)
+        self._predicate = predicate
+        self._params = list(params or [])
+        self._force_all = force_all
+        self.signals = _IndexSignals()
+
+    def run(self) -> None:  # noqa: D401
+        self.signals.started.emit()
+        try:
+            settings = load_settings()
+            if self._predicate is None:
+                marked = retag_all(self._db_path, force=self._force_all, settings=settings)
+            else:
+                marked = retag_query(self._db_path, self._predicate, self._params)
+            stats = run_index_once(self._db_path, settings=settings)
+            stats["retagged_marked"] = marked
+        except Exception as exc:  # pragma: no cover - defensive logging
+            logger.exception("Retagging failed for database %s", self._db_path)
+            self.signals.failed.emit(str(exc))
+        else:
+            self.signals.finished.emit(stats)
+
+
 class TagsTab(QWidget):
     """Provide a search bar and tabular or grid results for tag queries."""
 
@@ -105,6 +141,13 @@ class TagsTab(QWidget):
         self._query_input = QLineEdit(self)
         self._query_input.setPlaceholderText("Search tags…")
         self._search_button = QPushButton("Search", self)
+        self._retag_menu = QMenu("Retag with current model", self)
+        self._retag_all_action = self._retag_menu.addAction("All library")
+        self._retag_results_action = self._retag_menu.addAction("Current results")
+        self._retag_button = QToolButton(self)
+        self._retag_button.setText("Retag…")
+        self._retag_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        self._retag_button.setMenu(self._retag_menu)
         self._load_more_button = QPushButton("Load more", self)
         self._load_more_button.setEnabled(False)
         self._status_label = QLabel(self)
@@ -185,6 +228,7 @@ class TagsTab(QWidget):
         search_layout = QHBoxLayout()
         search_layout.addWidget(self._query_input)
         search_layout.addWidget(self._search_button)
+        search_layout.addWidget(self._retag_button)
 
         toggle_layout = QHBoxLayout()
         toggle_layout.addWidget(self._table_button)
@@ -202,6 +246,8 @@ class TagsTab(QWidget):
         self._search_button.clicked.connect(self._on_search_clicked)
         self._load_more_button.clicked.connect(self._on_load_more_clicked)
         self._query_input.returnPressed.connect(self._on_search_clicked)
+        self._retag_all_action.triggered.connect(self._on_retag_all)
+        self._retag_results_action.triggered.connect(self._on_retag_results)
         self._table_button.toggled.connect(self._on_table_toggled)
         self._grid_button.toggled.connect(self._on_grid_toggled)
         self._placeholder_button.clicked.connect(self._on_index_now)
@@ -228,6 +274,7 @@ class TagsTab(QWidget):
         self._index_pool.setMaxThreadCount(1)
         self._search_busy = False
         self._indexing_active = False
+        self._retag_active = False
         self._can_load_more = False
 
         self._toast_label = QLabel("", self)
@@ -261,12 +308,64 @@ class TagsTab(QWidget):
     def _on_index_now(self) -> None:
         if self._indexing_active:
             return
+        self._retag_active = False
         self._db_path = self._resolve_db_path()
         task = _IndexTask(self._db_path)
         task.signals.started.connect(self._handle_index_started)
         task.signals.finished.connect(self._handle_index_finished)
         task.signals.failed.connect(self._handle_index_failed)
         self._index_pool.start(task)
+
+    def _run_retag(
+        self,
+        *,
+        predicate: str | None,
+        params: Sequence[object] | None = None,
+        force_all: bool = False,
+    ) -> None:
+        if self._indexing_active:
+            return
+        self._db_path = self._resolve_db_path()
+        task = _RetagTask(
+            self._db_path,
+            predicate=predicate,
+            params=list(params or []),
+            force_all=force_all,
+        )
+        task.signals.started.connect(self._handle_index_started)
+        task.signals.finished.connect(self._handle_index_finished)
+        task.signals.failed.connect(self._handle_index_failed)
+        self._retag_active = True
+        self._index_pool.start(task)
+
+    def _on_retag_all(self) -> None:
+        if self._indexing_active:
+            return
+        answer = QMessageBox.question(
+            self,
+            "Retag all files",
+            (
+                "Retagging the entire library may take a long time.\n"
+                "Do you want to continue?"
+            ),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        self._run_retag(predicate=None, params=None, force_all=True)
+
+    def _on_retag_results(self) -> None:
+        if self._indexing_active:
+            return
+        if not self._current_where:
+            self._show_toast("Search results are required before retagging.")
+            return
+        self._run_retag(
+            predicate=self._current_where,
+            params=list(self._current_params),
+            force_all=False,
+        )
 
     def _on_table_toggled(self, checked: bool) -> None:
         if checked:
@@ -505,31 +604,53 @@ class TagsTab(QWidget):
         self._placeholder_button.setEnabled(not self._indexing_active)
         self._table_button.setEnabled(not self._indexing_active)
         self._grid_button.setEnabled(not self._indexing_active)
+        retag_enabled = not self._indexing_active and not self._search_busy
+        self._retag_button.setEnabled(retag_enabled)
+        self._retag_results_action.setEnabled(bool(self._current_where) and retag_enabled)
 
     def _handle_index_started(self) -> None:
         self._indexing_active = True
-        self._status_label.setText("Indexing…")
+        if self._retag_active:
+            self._status_label.setText("Retagging…")
+        else:
+            self._status_label.setText("Indexing…")
         self._update_control_states()
 
     def _handle_index_finished(self, stats: dict[str, object]) -> None:
         self._indexing_active = False
         elapsed = float(stats.get("elapsed_sec", 0.0) or 0.0)
-        self._status_label.setText(f"Indexing complete in {elapsed:.2f}s.")
+        if self._retag_active:
+            self._status_label.setText(f"Retagging complete in {elapsed:.2f}s.")
+        else:
+            self._status_label.setText(f"Indexing complete in {elapsed:.2f}s.")
         tagger_name = str(stats.get("tagger_name") or "unknown")
-        self._show_toast(
+        message = (
             f"Indexed: {int(stats.get('scanned', 0))} files / "
             f"Tagged: {int(stats.get('tagged', 0))} / "
-            f"Embedded: {int(stats.get('embedded', 0))} "
-            f"(tagger: {tagger_name})"
+            f"Embedded: {int(stats.get('embedded', 0))}"
         )
+        retagged = int(stats.get("retagged", 0) or 0)
+        requested = int(stats.get("retagged_marked", retagged) or 0)
+        if self._retag_active:
+            if requested and requested != retagged:
+                message += f" / Retagged: {retagged}/{requested}"
+            else:
+                message += f" / Retagged: {retagged}"
+        elif retagged:
+            message += f" / Retagged: {retagged}"
+        message += f" (tagger: {tagger_name})"
+        self._show_toast(message)
+        self._retag_active = False
         self._update_control_states()
         QTimer.singleShot(0, self._on_search_clicked)
 
     def _handle_index_failed(self, message: str) -> None:
         self._indexing_active = False
-        error_text = f"Indexing failed (DB: {self._db_display}): {message}"
+        prefix = "Retagging" if self._retag_active else "Indexing"
+        error_text = f"{prefix} failed (DB: {self._db_display}): {message}"
         self._status_label.setText(error_text)
         self._show_toast(error_text)
+        self._retag_active = False
         self._update_control_states()
 
     def _resolve_db_path(self) -> Path:

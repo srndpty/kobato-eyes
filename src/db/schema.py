@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import sqlite3
-from typing import Iterable
+from typing import Callable, Iterable
 
-CURRENT_SCHEMA_VERSION = 1
+CURRENT_SCHEMA_VERSION = 2
 
 SCHEMA_STATEMENTS: tuple[str, ...] = (
     """
@@ -18,6 +18,8 @@ SCHEMA_STATEMENTS: tuple[str, ...] = (
         width INTEGER,
         height INTEGER,
         indexed_at REAL,
+        tagger_sig TEXT,
+        last_tagged_at REAL,
         created_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
     """,
@@ -75,6 +77,31 @@ SCHEMA_STATEMENTS: tuple[str, ...] = (
 )
 
 
+def _add_column_if_missing(
+    conn: sqlite3.Connection,
+    table: str,
+    column: str,
+    definition: str,
+) -> None:
+    cursor = conn.execute("PRAGMA table_info(%s)" % table)
+    try:
+        columns = {row[1] for row in cursor.fetchall()}
+    finally:
+        cursor.close()
+    if column not in columns:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+
+
+def _migrate_to_v2(conn: sqlite3.Connection) -> None:
+    _add_column_if_missing(conn, "files", "tagger_sig", "TEXT")
+    _add_column_if_missing(conn, "files", "last_tagged_at", "REAL")
+
+
+MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
+    2: _migrate_to_v2,
+}
+
+
 def ensure_schema(conn: sqlite3.Connection, statements: Iterable[str] | None = None) -> None:
     """Ensure all database tables and indexes exist with the latest version."""
 
@@ -84,8 +111,16 @@ def ensure_schema(conn: sqlite3.Connection, statements: Iterable[str] | None = N
         current_version = int(version_row[0]) if version_row else 0
         for statement in statements or SCHEMA_STATEMENTS:
             cursor.execute(statement)
-        if current_version < CURRENT_SCHEMA_VERSION:
-            cursor.execute(f"PRAGMA user_version = {CURRENT_SCHEMA_VERSION}")
+        target_version = CURRENT_SCHEMA_VERSION
+        while current_version < target_version:
+            next_version = current_version + 1
+            migration = MIGRATIONS.get(next_version)
+            if migration is not None:
+                migration(conn)
+            current_version = next_version
+        if current_version != target_version:
+            current_version = target_version
+        cursor.execute(f"PRAGMA user_version = {target_version}")
         conn.commit()
     finally:
         cursor.close()
