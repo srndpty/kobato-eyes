@@ -53,20 +53,30 @@ class TaggerSettings:
     thresholds: dict[str, float] = field(default_factory=lambda: DEFAULT_TAG_THRESHOLDS.copy())
 
 
+_DEFAULT_PRETRAINED_TAGS = {
+    "ViT-L-14": "openai",
+    "ViT-H-14": "laion2b_s32b_b82k",
+    "RN50": "openai",
+}
+
+
+def _default_pretrained(model_name: str) -> str:
+    return _DEFAULT_PRETRAINED_TAGS.get(model_name, "openai")
+
+
 @dataclass
 class EmbedModel:
     name: str = "ViT-L-14"
+    pretrained: str = "openai"
     device: str = "cuda"
     dim: int = 768
 
-    @property
-    def pretrained(self) -> str:
-        defaults = {
-            "ViT-L-14": "laion2b_s32b_b79k",
-            "ViT-H-14": "laion2b_s32b_b79k",
-            "RN50": "openai",
-        }
-        return defaults.get(self.name, "openai")
+    def __post_init__(self) -> None:
+        if not isinstance(self.pretrained, str):
+            self.pretrained = "" if self.pretrained is None else str(self.pretrained)
+        self.pretrained = self.pretrained.strip()
+        if not self.pretrained:
+            self.pretrained = _default_pretrained(self.name)
 
 
 @dataclass
@@ -157,8 +167,10 @@ class PipelineSettings:
         embed_name = embed_conf.get("name")
         if embed_name is None and "model_name" in data:
             embed_name = data["model_name"]
+        embed_pretrained = _coerce_str(embed_conf.get("pretrained"))
         embed_model = EmbedModel(
             name=str(embed_name or defaults.embed_model.name),
+            pretrained=embed_pretrained,
             device=str(embed_conf.get("device", defaults.embed_model.device)),
             dim=_coerce_int(embed_conf.get("dim", embed_conf.get("dims")), defaults.embed_model.dim),
         )
@@ -210,6 +222,7 @@ class PipelineSettings:
             },
             "embed_model": {
                 "name": self.embed_model.name,
+                "pretrained": self.embed_model.pretrained,
                 "device": self.embed_model.device,
                 "dim": self.embed_model.dim,
             },
@@ -269,6 +282,12 @@ def _coerce_bool(value: Any, default: bool) -> bool:
         if lowered in {"0", "false", "no", "off"}:
             return False
     return default
+
+
+def _coerce_str(value: Any) -> str:
+    if value is None:
+        return ""
+    return str(value).strip()
 
 
 __all__ = [
