@@ -3,10 +3,9 @@
 from __future__ import annotations
 
 import csv
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable
-
-from tagger.base import TagCategory
+from typing import Iterable, Iterator
 
 
 _DEFAULT_TAG_FILENAMES: tuple[str, ...] = (
@@ -15,20 +14,29 @@ _DEFAULT_TAG_FILENAMES: tuple[str, ...] = (
     "selected_tags_v3c.csv",
 )
 
-_CATEGORY_LOOKUP: dict[str, TagCategory] = {
-    "0": TagCategory.GENERAL,
-    "general": TagCategory.GENERAL,
-    "1": TagCategory.CHARACTER,
-    "character": TagCategory.CHARACTER,
-    "2": TagCategory.RATING,
-    "rating": TagCategory.RATING,
-    "3": TagCategory.COPYRIGHT,
-    "copyright": TagCategory.COPYRIGHT,
-    "4": TagCategory.ARTIST,
-    "artist": TagCategory.ARTIST,
-    "5": TagCategory.META,
-    "meta": TagCategory.META,
+_CATEGORY_LOOKUP: dict[str, int] = {
+    "0": 0,
+    "general": 0,
+    "1": 1,
+    "character": 1,
+    "2": 2,
+    "rating": 2,
+    "3": 3,
+    "copyright": 3,
+    "4": 4,
+    "artist": 4,
+    "5": 5,
+    "meta": 5,
 }
+
+
+@dataclass(frozen=True)
+class TagMeta:
+    """Basic metadata describing a single tag."""
+
+    name: str
+    category: int
+    count: int | None = None
 
 
 def _looks_like_int(value: str) -> bool:
@@ -39,23 +47,35 @@ def _looks_like_int(value: str) -> bool:
     return True
 
 
-def _parse_category(value: str | None) -> TagCategory:
+def _parse_category(value: str | None) -> int:
     if not value:
-        return TagCategory.GENERAL
+        return 0
     normalised = value.strip().lower()
     if not normalised:
-        return TagCategory.GENERAL
+        return 0
     if normalised in _CATEGORY_LOOKUP:
         return _CATEGORY_LOOKUP[normalised]
     if _looks_like_int(normalised):
         try:
-            return TagCategory(int(normalised))
+            return int(normalised)
         except ValueError:
-            return TagCategory.GENERAL
-    return TagCategory.GENERAL
+            return 0
+    return 0
 
 
-def _iter_csv_rows(csv_path: Path) -> Iterable[list[str]]:
+def _parse_count(value: str | None) -> int:
+    if not value:
+        return 0
+    stripped = value.strip()
+    if not stripped:
+        return 0
+    try:
+        return int(float(stripped))
+    except ValueError:
+        return 0
+
+
+def _iter_csv_rows(csv_path: Path) -> Iterator[list[str]]:
     with csv_path.open("r", encoding="utf-8-sig", newline="") as handle:
         reader = csv.reader(handle)
         for row in reader:
@@ -76,7 +96,40 @@ def _iter_csv_rows(csv_path: Path) -> Iterable[list[str]]:
             yield cells
 
 
-def load_selected_tags(csv_path: str | Path) -> list[tuple[str, int]]:
+def _parse_row(cells: list[str]) -> TagMeta | None:
+    name = ""
+    category = 0
+    count = 0
+    cell_count = len(cells)
+    if cell_count == 1:
+        name = cells[0]
+    elif cell_count == 2:
+        first, second = cells
+        if _looks_like_int(first):
+            name = second
+        else:
+            name = first
+            category = _parse_category(second)
+    elif cell_count >= 3 and _looks_like_int(cells[0]):
+        padded = (cells + ["", "", "", ""])[:4]
+        name = padded[1]
+        category = _parse_category(padded[2])
+        count = _parse_count(padded[3])
+    else:
+        first = cells[0]
+        name = first
+        second = cells[1] if cell_count > 1 else None
+        third = cells[2] if cell_count > 2 else None
+        category = _parse_category(second)
+        if cell_count > 2:
+            count = _parse_count(third)
+    cleaned = name.strip()
+    if not cleaned:
+        return None
+    return TagMeta(name=cleaned, category=category, count=count)
+
+
+def load_selected_tags(csv_path: str | Path) -> list[TagMeta]:
     """Parse a WD14 ``selected_tags.csv`` file.
 
     Parameters
@@ -87,35 +140,16 @@ def load_selected_tags(csv_path: str | Path) -> list[tuple[str, int]]:
 
     Returns
     -------
-    list[tuple[str, int]]
-        Tag names paired with their category as integers.
+    list[TagMeta]
+        Metadata for each tag.
     """
 
     path = Path(csv_path)
-    labels: list[tuple[str, int]] = []
+    labels: list[TagMeta] = []
     for cells in _iter_csv_rows(path):
-        name = ""
-        category = TagCategory.GENERAL
-        if len(cells) == 1:
-            name = cells[0]
-        elif len(cells) == 2:
-            first, second = cells
-            if _looks_like_int(first):
-                name = second
-            else:
-                name = first
-                category = _parse_category(second)
-        else:
-            first, second, *rest = cells
-            if _looks_like_int(first) and second:
-                name = second
-                category_value = rest[0] if rest else None
-                category = _parse_category(category_value)
-            else:
-                name = first
-                category = _parse_category(second if second else None)
-        if name:
-            labels.append((name, int(category)))
+        tag = _parse_row(cells)
+        if tag is not None:
+            labels.append(tag)
     return labels
 
 
@@ -148,5 +182,11 @@ def discover_labels_csv(
     return None
 
 
-__all__ = ["discover_labels_csv", "load_selected_tags"]
+def sort_by_popularity(tags: Iterable[TagMeta]) -> list[TagMeta]:
+    """Return tags ordered by count (descending) then name (ascending)."""
+
+    return sorted(tags, key=lambda tag: (-int(tag.count or 0), tag.name.lower()))
+
+
+__all__ = ["TagMeta", "discover_labels_csv", "load_selected_tags", "sort_by_popularity"]
 

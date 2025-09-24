@@ -144,10 +144,12 @@ class TagsTab(QWidget):
     """Provide a search bar and tabular or grid results for tag queries."""
 
     class TagListModel(QAbstractListModel):
-        """Simple list model backed by a list of tag strings."""
+        """Simple list model backed by a list of tag metadata."""
 
         def __init__(
-            self, items: Sequence[str] | None = None, parent: QObject | None = None
+            self,
+            items: Sequence[labels_util.TagMeta] | None = None,
+            parent: QObject | None = None,
         ) -> None:
             super().__init__(parent)
             self._items = list(items or [])
@@ -162,12 +164,17 @@ class TagsTab(QWidget):
                 return None
             if role in {Qt.ItemDataRole.DisplayRole, Qt.ItemDataRole.EditRole}:
                 try:
-                    return self._items[index.row()]
+                    return self._items[index.row()].name
+                except IndexError:
+                    return None
+            if role == Qt.ItemDataRole.UserRole:
+                try:
+                    return self._items[index.row()].count
                 except IndexError:
                     return None
             return None
 
-        def set_items(self, items: Sequence[str]) -> None:
+        def set_items(self, items: Sequence[labels_util.TagMeta]) -> None:
             self.beginResetModel()
             self._items = list(items)
             self.endResetModel()
@@ -190,8 +197,8 @@ class TagsTab(QWidget):
         self._autocomplete_timer.setInterval(150)
         self._autocomplete_timer.timeout.connect(self._refresh_completions)
         self._query_edit.textEdited.connect(self._on_query_text_edited)
-        self._all_tags: list[str] = []
-        self._completion_candidates: list[str] = []
+        self._all_tags: list[labels_util.TagMeta] = []
+        self._completion_candidates: list[labels_util.TagMeta] = []
         self._pending_completion_text = ""
         self._current_completion_range: tuple[int, int] = (0, 0)
         self._update_completion_candidates()
@@ -380,15 +387,15 @@ class TagsTab(QWidget):
             self._tag_model.set_items([])
             self._hide_completion_popup()
             return
-        matches: list[str] = []
+        matches: list[labels_util.TagMeta] = []
         lower_prefix = prefix
         for candidate in self._completion_candidates:
-            if candidate.lower().startswith(lower_prefix):
+            if candidate.name.lower().startswith(lower_prefix):
                 matches.append(candidate)
-            if len(matches) >= 50:
-                break
         if matches:
-            self._tag_model.set_items(matches)
+            ranked = labels_util.sort_by_popularity(matches)
+            limited = ranked[:50]
+            self._tag_model.set_items(limited)
             self._completer.complete()
         else:
             self._tag_model.set_items([])
@@ -412,52 +419,61 @@ class TagsTab(QWidget):
         self._hide_completion_popup()
 
     def _update_completion_candidates(self) -> None:
-        seen: set[str] = set()
-        candidates: list[str] = []
-        for value in [*_RESERVED_COMPLETIONS, *self._all_tags]:
+        seen: dict[str, labels_util.TagMeta] = {}
+        for value in _RESERVED_COMPLETIONS:
             name = value.strip()
             if not name:
                 continue
             key = name.lower()
-            if key in seen:
+            if key not in seen:
+                seen[key] = labels_util.TagMeta(name=name, category=0, count=0)
+        for tag in self._all_tags:
+            name = tag.name.strip()
+            if not name:
                 continue
-            seen.add(key)
-            candidates.append(name)
-        self._completion_candidates = candidates
-        if not candidates:
+            key = name.lower()
+            if key not in seen or int(tag.count or 0) > int(seen[key].count or 0):
+                seen[key] = tag
+        self._completion_candidates = list(seen.values())
+        if not self._completion_candidates:
             self._tag_model.set_items([])
             self._hide_completion_popup()
 
     def reload_autocomplete(self, settings: PipelineSettings) -> None:
-        csv_tags: list[str] = []
+        csv_tags: list[labels_util.TagMeta] = []
         csv_path = labels_util.discover_labels_csv(
             settings.tagger.model_path, settings.tagger.tags_csv
         )
         if csv_path:
             try:
-                csv_tags = [name for name, _ in labels_util.load_selected_tags(csv_path)]
+                csv_tags = labels_util.load_selected_tags(csv_path)
             except FileNotFoundError:
                 logger.warning("Selected tags CSV not found at %s", csv_path)
             except Exception as exc:  # pragma: no cover - defensive logging
                 logger.warning("Failed to parse selected tags CSV %s: %s", csv_path, exc)
+        tags: list[labels_util.TagMeta] = list(csv_tags)
+        seen_names = {tag.name.lower() for tag in tags}
         db_tags: list[str] = []
         try:
             db_tags = list_tag_names(self._conn)
         except Exception as exc:  # pragma: no cover - defensive logging
             logger.warning("Failed to load tag names from database: %s", exc)
-        combined: list[str] = []
-        seen: set[str] = set()
-        for name in csv_tags + db_tags:
+        for name in db_tags:
             cleaned = name.strip()
             if not cleaned:
                 continue
             key = cleaned.lower()
-            if key in seen:
+            if key in seen_names:
                 continue
-            seen.add(key)
-            combined.append(cleaned)
-        combined.sort(key=str.lower)
-        self._all_tags = combined
+            seen_names.add(key)
+            tags.append(labels_util.TagMeta(name=cleaned, category=0, count=0))
+        dedup: dict[str, labels_util.TagMeta] = {}
+        for tag in tags:
+            key = tag.name.lower()
+            existing = dedup.get(key)
+            if existing is None or int(tag.count or 0) > int(existing.count or 0):
+                dedup[key] = tag
+        self._all_tags = labels_util.sort_by_popularity(dedup.values())
         self._update_completion_candidates()
         self._refresh_completions()
 
