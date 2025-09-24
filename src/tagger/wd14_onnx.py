@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import csv
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
@@ -47,14 +48,24 @@ def _sigmoid(x: np.ndarray) -> np.ndarray:
     return 1.0 / (1.0 + np.exp(-x))
 
 
+logger = logging.getLogger(__name__)
+
+_DEFAULT_TAG_FILES = (
+    "selected_tags.csv",
+    "selected_tags_v3.csv",
+    "selected_tags_v3c.csv",
+)
+
+
 class WD14Tagger(ITagger):
     """WD14 tagger backed by ONNX Runtime with CUDA acceleration when available."""
 
     def __init__(
         self,
         model_path: str | Path,
-        labels_csv: str | Path,
+        labels_csv: str | Path | None = None,
         *,
+        tags_csv: str | Path | None = None,
         providers: Iterable[str] | None = None,
         input_size: int = 448,
         default_thresholds: ThresholdMap | None = None,
@@ -64,33 +75,87 @@ class WD14Tagger(ITagger):
             raise RuntimeError("onnxruntime is required to use WD14Tagger") from _IMPORT_ERROR
 
         self._model_path = Path(model_path)
-        self._labels = self._load_labels(labels_csv)
+        logger.info("WD14: using model %s", self._model_path)
+        labels_path = self._resolve_labels_path(tags_csv or labels_csv)
+        self._labels_path = labels_path
+        self._labels = self._load_labels(labels_path)
         self._input_size = int(input_size)
         self._default_thresholds = dict(default_thresholds or {})
         self._default_max_tags = dict(default_max_tags or {})
 
-        provider_list = (
-            list(providers)
-            if providers is not None
-            else [
-                "CUDAExecutionProvider",
-                "ROCMExecutionProvider",
-                "DirectMLExecutionProvider",
-                "CPUExecutionProvider",
-            ]
-        )
-
         session_options = ort.SessionOptions()
-        self._session = ort.InferenceSession(
-            str(self._model_path),
-            sess_options=session_options,
-            providers=provider_list,
+        provider_attempts = (
+            [list(providers)]
+            if providers is not None
+            else [["CUDAExecutionProvider"], ["CPUExecutionProvider"]]
         )
+        last_error: Exception | None = None
+        session = None
+        chosen_providers: list[str] | None = None
+        for provider_list in provider_attempts:
+            try:
+                session = ort.InferenceSession(
+                    str(self._model_path),
+                    sess_options=session_options,
+                    providers=provider_list,
+                )
+            except Exception as exc:  # pragma: no cover - handled in tests via mocks
+                last_error = exc
+                if providers is None and provider_list == ["CUDAExecutionProvider"]:
+                    logger.warning(
+                        "WD14: CUDAExecutionProvider unavailable, falling back to CPUExecutionProvider"
+                    )
+                    continue
+                raise
+            else:
+                chosen_providers = provider_list
+                break
+        if session is None or chosen_providers is None:
+            raise RuntimeError("WD14: failed to initialise ONNX Runtime session") from last_error
+        if providers is None and chosen_providers == ["CUDAExecutionProvider"]:
+            logger.info("WD14: using CUDAExecutionProvider")
+        elif providers is None and chosen_providers == ["CPUExecutionProvider"]:
+            logger.info("WD14: using CPUExecutionProvider")
+        else:
+            logger.info("WD14: using providers %s", chosen_providers)
+        self._session = session
         self._input_name = self._session.get_inputs()[0].name
         self._output_names = [output.name for output in self._session.get_outputs()]
 
         if len(self._output_names) != 1:
             raise RuntimeError("Expected a single output tensor from WD14 ONNX model, got " f"{self._output_names}")
+
+    def _resolve_labels_path(self, explicit: str | Path | None) -> Path:
+        if explicit is not None:
+            path = Path(str(explicit)).expanduser()
+            if path.is_file():
+                logger.info("WD14: using tags CSV %s", path)
+                return path
+            message = f"WD14: tags CSV not found at {path}"
+            logger.warning(message)
+            raise FileNotFoundError(message)
+
+        search_dir = self._model_path.parent
+        candidates: list[Path] = []
+
+        def add_candidate(candidate: Path) -> None:
+            if candidate not in candidates:
+                candidates.append(candidate)
+
+        for name in _DEFAULT_TAG_FILES:
+            add_candidate(search_dir / name)
+        add_candidate(self._model_path.with_suffix(".csv"))
+        for extra in sorted(search_dir.glob("selected_tags*.csv")):
+            add_candidate(extra)
+
+        for candidate in candidates:
+            if candidate.is_file():
+                logger.info("WD14: using tags CSV %s", candidate)
+                return candidate
+
+        message = "WD14: selected_tags.csv not found"
+        logger.warning(message)
+        raise FileNotFoundError(message)
 
     @staticmethod
     def _load_labels(labels_csv: str | Path) -> list[_Label]:

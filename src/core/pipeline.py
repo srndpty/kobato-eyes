@@ -399,86 +399,86 @@ def run_index_once(
             try:
                 tagger = _resolve_tagger(settings, tagger_override)
             except Exception as exc:  # pragma: no cover - defensive logging
-                logger.exception("Failed to instantiate tagger: %s", exc)
-            else:
-                thresholds = _build_threshold_map(settings.tagger.thresholds)
-                logger.info("Tagging %d image(s)", len(tag_records))
-                processed_tags = 0
-                last_logged = 0
-                idx = 0
-                current_batch = batch_size
-                while idx < len(tag_records):
-                    current_batch = max(1, current_batch)
-                    batch_slice = tag_records[idx : idx + current_batch]
-                    images: list[Image.Image] = []
-                    valid_records: list[_FileRecord] = []
-                    for record in batch_slice:
-                        if ensure_image_loaded(record) and record.image is not None:
-                            images.append(record.image)
-                            valid_records.append(record)
-                    if not images:
-                        idx += len(batch_slice)
-                        continue
-                    try:
-                        results = tagger.infer_batch(images, thresholds=thresholds)
-                    except Exception as exc:  # pragma: no cover - defensive logging
-                        if current_batch > 1:
-                            current_batch = max(1, current_batch // 2)
-                            logger.warning(
-                                "Tagger batch failed (%s); reducing batch size to %d",
-                                exc,
-                                current_batch,
-                            )
-                            continue
-                        logger.exception("Tagger failed for batch starting with %s", valid_records[0].path)
-                        idx += len(batch_slice)
-                        continue
-                    for record, image, result in zip(valid_records, images, results):
-                        merged: dict[str, float] = {}
-                        categories: dict[str, TagCategory] = {}
-                        for prediction in result.tags:
-                            name = prediction.name.strip()
-                            if not name:
-                                continue
-                            score = float(prediction.score)
-                            existing = merged.get(name)
-                            if existing is None or score > existing:
-                                merged[name] = score
-                                categories[name] = prediction.category
-                        if merged:
-                            tag_defs = [{"name": name, "category": int(categories[name])} for name in merged]
-                            tag_id_map = upsert_tags(conn, tag_defs)
-                            tag_scores = [
-                                (tag_id_map[name], merged[name])
-                                for name in sorted(merged, key=merged.get, reverse=True)
-                            ]
-                            replace_file_tags(conn, record.file_id, tag_scores)
-                            update_fts(conn, record.file_id, " ".join(merged.keys()))
-                        else:
-                            replace_file_tags(conn, record.file_id, [])
-                            update_fts(conn, record.file_id, None)
-                        upsert_file(
-                            conn,
-                            path=str(record.path),
-                            size=record.size,
-                            mtime=record.mtime,
-                            sha256=record.sha,
-                            width=image.width,
-                            height=image.height,
-                        )
-                        record.needs_tagging = False
-                        record.tag_exists = True
-                        processed_tags += 1
-                        last_logged = log_progress(
-                            "Tagging",
-                            processed_tags,
-                            len(tag_records),
-                            last_logged,
-                        )
+                logger.warning("Failed to instantiate tagger: %s", exc)
+                raise
+            thresholds = _build_threshold_map(settings.tagger.thresholds)
+            logger.info("Tagging %d image(s)", len(tag_records))
+            processed_tags = 0
+            last_logged = 0
+            idx = 0
+            current_batch = batch_size
+            while idx < len(tag_records):
+                current_batch = max(1, current_batch)
+                batch_slice = tag_records[idx : idx + current_batch]
+                images: list[Image.Image] = []
+                valid_records: list[_FileRecord] = []
+                for record in batch_slice:
+                    if ensure_image_loaded(record) and record.image is not None:
+                        images.append(record.image)
+                        valid_records.append(record)
+                if not images:
                     idx += len(batch_slice)
-                conn.commit()
-                stats["tagged"] = processed_tags
-                logger.info("Tagging complete: %d image(s) processed", processed_tags)
+                    continue
+                try:
+                    results = tagger.infer_batch(images, thresholds=thresholds)
+                except Exception as exc:  # pragma: no cover - defensive logging
+                    if current_batch > 1:
+                        current_batch = max(1, current_batch // 2)
+                        logger.warning(
+                            "Tagger batch failed (%s); reducing batch size to %d",
+                            exc,
+                            current_batch,
+                        )
+                        continue
+                    logger.exception("Tagger failed for batch starting with %s", valid_records[0].path)
+                    idx += len(batch_slice)
+                    continue
+                for record, image, result in zip(valid_records, images, results):
+                    merged: dict[str, float] = {}
+                    categories: dict[str, TagCategory] = {}
+                    for prediction in result.tags:
+                        name = prediction.name.strip()
+                        if not name:
+                            continue
+                        score = float(prediction.score)
+                        existing = merged.get(name)
+                        if existing is None or score > existing:
+                            merged[name] = score
+                            categories[name] = prediction.category
+                    if merged:
+                        tag_defs = [{"name": name, "category": int(categories[name])} for name in merged]
+                        tag_id_map = upsert_tags(conn, tag_defs)
+                        tag_scores = [
+                            (tag_id_map[name], merged[name])
+                            for name in sorted(merged, key=merged.get, reverse=True)
+                        ]
+                        replace_file_tags(conn, record.file_id, tag_scores)
+                        update_fts(conn, record.file_id, " ".join(merged.keys()))
+                    else:
+                        replace_file_tags(conn, record.file_id, [])
+                        update_fts(conn, record.file_id, None)
+                    upsert_file(
+                        conn,
+                        path=str(record.path),
+                        size=record.size,
+                        mtime=record.mtime,
+                        sha256=record.sha,
+                        width=image.width,
+                        height=image.height,
+                    )
+                    record.needs_tagging = False
+                    record.tag_exists = True
+                    processed_tags += 1
+                    last_logged = log_progress(
+                        "Tagging",
+                        processed_tags,
+                        len(tag_records),
+                        last_logged,
+                    )
+                idx += len(batch_slice)
+            conn.commit()
+            stats["tagged"] = processed_tags
+            logger.info("Tagging complete: %d image(s) processed", processed_tags)
 
         embed_records = [record for record in records if record.needs_embedding and not record.load_failed]
         if embed_records:
@@ -628,10 +628,9 @@ def _resolve_tagger(settings: PipelineSettings, override: ITagger | None) -> ITa
         from tagger.wd14_onnx import WD14Tagger
 
         if not settings.tagger.model_path:
-            raise ValueError("WD14 tagger requires a model_path setting")
+            raise ValueError("WD14: model_path is required")
         model_path = Path(settings.tagger.model_path)
-        labels_csv = model_path.with_suffix(".csv")
-        return WD14Tagger(model_path, labels_csv)
+        return WD14Tagger(model_path, tags_csv=settings.tagger.tags_csv)
     raise ValueError(f"Unknown tagger '{settings.tagger.name}'")
 
 

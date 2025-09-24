@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Sequence
+from typing import Any, Sequence
 
 import numpy as np
 import open_clip
@@ -28,7 +28,29 @@ class OpenClipEmbedder:
         batch_size: int = 8,
         use_fp16: bool = True,
     ) -> None:
-        self._device = torch.device(device or ("cuda" if torch.cuda.is_available() else "cpu"))
+        requested_device: str
+        if isinstance(device, torch.device):
+            requested_device = device.type
+        else:
+            requested_device = str(device).strip().lower() if device is not None else "auto"
+        if requested_device not in {"auto", "cuda", "cpu"}:
+            logger.warning(
+                "OpenCLIP: unknown device '%s', defaulting to auto detection", requested_device
+            )
+            requested_device = "auto"
+        if requested_device == "auto":
+            resolved_type = "cuda" if torch.cuda.is_available() else "cpu"
+        elif requested_device == "cuda":
+            if torch.cuda.is_available():
+                resolved_type = "cuda"
+            else:
+                logger.warning(
+                    "OpenCLIP: CUDA requested but not available; falling back to CPU"
+                )
+                resolved_type = "cpu"
+        else:
+            resolved_type = "cpu"
+        self._device = torch.device(resolved_type)
         self._batch_size = max(1, batch_size)
 
         available_pretrained = _available_pretrained_tags(model_name)
@@ -36,19 +58,19 @@ class OpenClipEmbedder:
         if did_fallback:
             logger.warning(
                 "Pretrained tag '%s' is not available for model '%s'; falling back to '%s'",
-                pretrained,
+                (pretrained or ""),
                 model_name,
                 resolved_pretrained,
             )
         logger.info(
-            "Loading OpenCLIP model '%s' with pretrained '%s' (available=%s)",
+            "Loading OpenCLIP model '%s' with pretrained '%s' on %s",
             model_name,
             resolved_pretrained,
-            available_pretrained or "none",
+            self._device.type,
         )
 
-        model, preprocess = open_clip.create_model_and_transforms(
-            model_name, pretrained=resolved_pretrained
+        model, preprocess = _create_model_and_preprocess(
+            model_name, resolved_pretrained, self._device
         )
         model.to(self._device)
         model.eval()
@@ -115,12 +137,35 @@ def _available_pretrained_tags(model_name: str) -> list[str]:
 
 def _select_pretrained_tag(requested: str, available: Sequence[str]) -> tuple[str, bool]:
     cleaned_requested = (requested or "").strip()
-    if cleaned_requested and cleaned_requested in available:
+    if cleaned_requested and (not available or cleaned_requested in available):
         return cleaned_requested, False
     for candidate in ("laion2b_s32b_b82k", "openai"):
         if candidate in available:
             return candidate, cleaned_requested != candidate
     if available:
-        return available[0], cleaned_requested != available[0]
+        chosen = available[0]
+        return chosen, cleaned_requested != chosen
     fallback = cleaned_requested or "openai"
-    return fallback, bool(cleaned_requested and cleaned_requested != fallback)
+    return fallback, cleaned_requested != fallback
+
+
+def _create_model_and_preprocess(
+    model_name: str, pretrained_tag: str, device: torch.device
+) -> tuple[torch.nn.Module, Any]:
+    result = open_clip.create_model_and_transforms(
+        model_name, pretrained=pretrained_tag, device=device
+    )
+    try:
+        length = len(result)
+    except TypeError as exc:  # pragma: no cover - defensive safeguard
+        raise RuntimeError("Unexpected return from open_clip.create_model_and_transforms") from exc
+    if length == 3:
+        model, preprocess_train, preprocess_val = result  # type: ignore[misc]
+        preprocess = preprocess_val or preprocess_train
+    elif length == 2:
+        model, preprocess = result  # type: ignore[misc]
+    else:
+        raise RuntimeError(
+            "open_clip.create_model_and_transforms returned unexpected tuple length"
+        )
+    return model, preprocess
