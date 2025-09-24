@@ -7,6 +7,34 @@ import re
 _LAST_TOKEN_RE = re.compile(r"([A-Za-z0-9_:+><=.]+)$")
 
 
+def abbreviate_count(value: object) -> str:
+    """Return a compact textual representation of a popularity count."""
+
+    try:
+        count = int(value) if value is not None else 0
+    except (TypeError, ValueError):
+        count = 0
+    if count <= 0:
+        return ""
+    thresholds = (
+        (1_000_000_000, "B"),
+        (1_000_000, "M"),
+        (1_000, "k"),
+    )
+    for threshold, suffix in thresholds:
+        if count >= threshold:
+            quotient = count / threshold
+            if quotient >= 100:
+                formatted = f"{quotient:.0f}"
+            elif quotient >= 10:
+                formatted = f"{quotient:.1f}"
+            else:
+                formatted = f"{quotient:.2f}"
+            formatted = formatted.rstrip("0").rstrip(".")
+            return f"{formatted}{suffix}"
+    return str(count)
+
+
 def extract_completion_token(
     text: str, cursor_position: int | None = None
 ) -> tuple[str, int, int]:
@@ -36,5 +64,5 @@ def replace_completion_token(
     return new_text, new_cursor
 
 
-__all__ = ["extract_completion_token", "replace_completion_token"]
+__all__ = ["abbreviate_count", "extract_completion_token", "replace_completion_token"]
 

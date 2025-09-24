@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import csv
 import logging
 from dataclasses import dataclass
 from pathlib import Path
@@ -13,6 +12,7 @@ import numpy as np
 from PIL import Image
 
 from tagger.base import ITagger, MaxTagsMap, TagCategory, TagPrediction, TagResult, ThresholdMap
+from tagger.labels_util import load_selected_tags
 
 try:  # pragma: no cover - import is environment dependent
     import onnxruntime as ort
@@ -32,22 +32,7 @@ _CPU_PROVIDER = "CPUExecutionProvider"
 class _Label:
     name: str
     category: TagCategory
-
-
-_CATEGORY_LOOKUP = {
-    "0": TagCategory.GENERAL,
-    "general": TagCategory.GENERAL,
-    "1": TagCategory.CHARACTER,
-    "character": TagCategory.CHARACTER,
-    "2": TagCategory.RATING,
-    "rating": TagCategory.RATING,
-    "3": TagCategory.COPYRIGHT,
-    "copyright": TagCategory.COPYRIGHT,
-    "4": TagCategory.ARTIST,
-    "artist": TagCategory.ARTIST,
-    "5": TagCategory.META,
-    "meta": TagCategory.META,
-}
+    count: int = 0
 
 
 def _sigmoid(x: np.ndarray) -> np.ndarray:
@@ -205,20 +190,16 @@ class WD14Tagger(ITagger):
     @staticmethod
     def _load_labels(labels_csv: str | Path) -> list[_Label]:
         labels: list[_Label] = []
-        with Path(labels_csv).open("r", encoding="utf-8") as handle:
-            reader = csv.reader(handle)
-            for row in reader:
-                if not row or row[0].startswith("#"):
-                    continue
-                if len(row) == 1:
-                    tag_name = row[0].strip()
-                    category = TagCategory.GENERAL
-                else:
-                    tag_name = row[0].strip()
-                    category_key = row[1].strip().lower()
-                    category = _CATEGORY_LOOKUP.get(category_key, TagCategory.GENERAL)
-                if tag_name:
-                    labels.append(_Label(name=tag_name, category=category))
+        for tag in load_selected_tags(labels_csv):
+            name = tag.name.strip()
+            if not name:
+                continue
+            try:
+                category = TagCategory(tag.category)
+            except ValueError:
+                category = TagCategory.GENERAL
+            count = int(tag.count or 0)
+            labels.append(_Label(name=name, category=category, count=count))
         if not labels:
             raise ValueError("No labels parsed from WD14 label CSV")
         return labels

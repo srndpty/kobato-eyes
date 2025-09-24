@@ -15,14 +15,16 @@ from PyQt6.QtCore import (
     QModelIndex,
     QObject,
     QRunnable,
+    QRect,
     QSize,
     Qt,
     QThreadPool,
     QTimer,
     pyqtSignal,
 )
-from PyQt6.QtGui import QPixmap, QStandardItem, QStandardItemModel
+from PyQt6.QtGui import QPalette, QPixmap, QStandardItem, QStandardItemModel
 from PyQt6.QtWidgets import (
+    QApplication,
     QAbstractItemView,
     QButtonGroup,
     QCompleter,
@@ -37,6 +39,9 @@ from PyQt6.QtWidgets import (
     QPushButton,
     QStackedWidget,
     QTableView,
+    QStyle,
+    QStyleOptionViewItem,
+    QStyledItemDelegate,
     QToolButton,
     QVBoxLayout,
     QWidget,
@@ -51,7 +56,11 @@ from db.repository import list_tag_names, search_files
 from tagger import labels_util
 from tagger.base import TagCategory
 from tagger.wd14_onnx import ONNXRUNTIME_MISSING_MESSAGE
-from ui.autocomplete import extract_completion_token, replace_completion_token
+from ui.autocomplete import (
+    abbreviate_count,
+    extract_completion_token,
+    replace_completion_token,
+)
 from utils.image_io import get_thumbnail
 from utils.paths import ensure_dirs, get_db_path
 
@@ -146,6 +155,9 @@ class TagsTab(QWidget):
     class TagListModel(QAbstractListModel):
         """Simple list model backed by a list of tag metadata."""
 
+        NAME_ROLE = Qt.ItemDataRole.UserRole + 1
+        COUNT_ROLE = Qt.ItemDataRole.UserRole + 2
+
         def __init__(
             self,
             items: Sequence[labels_util.TagMeta] | None = None,
@@ -167,17 +179,105 @@ class TagsTab(QWidget):
                     return self._items[index.row()].name
                 except IndexError:
                     return None
-            if role == Qt.ItemDataRole.UserRole:
+            if role == int(self.NAME_ROLE):
                 try:
-                    return self._items[index.row()].count
+                    return self._items[index.row()].name
                 except IndexError:
                     return None
+            if role == int(self.COUNT_ROLE):
+                try:
+                    value = self._items[index.row()].count
+                except IndexError:
+                    return 0
+                try:
+                    return int(value or 0)
+                except (TypeError, ValueError):
+                    return 0
             return None
 
-        def set_items(self, items: Sequence[labels_util.TagMeta]) -> None:
+        def roleNames(self) -> dict[int, bytes]:  # type: ignore[override]
+            roles = dict(super().roleNames())
+            roles[int(self.NAME_ROLE)] = b"name"
+            roles[int(self.COUNT_ROLE)] = b"count"
+            return roles
+
+        def reset_with(self, items: Sequence[labels_util.TagMeta]) -> None:
             self.beginResetModel()
             self._items = list(items)
             self.endResetModel()
+
+    class TagSuggestDelegate(QStyledItemDelegate):
+        """Render tag suggestions with the tag name and abbreviated count."""
+
+        _HORIZONTAL_PADDING = 8
+        _COUNT_SPACING = 12
+
+        @staticmethod
+        def format_count(value: object) -> str:
+            """Return a human readable abbreviated representation for ``value``."""
+
+            return abbreviate_count(value)
+
+        def paint(self, painter, option, index):  # type: ignore[override]
+            opt = QStyleOptionViewItem(option)
+            self.initStyleOption(opt, index)
+            widget = opt.widget or option.widget
+            style = widget.style() if widget else QApplication.style()
+            opt.text = ""
+            style.drawControl(QStyle.ControlElement.CE_ItemViewItem, opt, painter, widget)
+
+            text_rect = style.subElementRect(QStyle.SubElement.SE_ItemViewItemText, opt, widget)
+            text_rect = text_rect.adjusted(
+                self._HORIZONTAL_PADDING,
+                0,
+                -self._HORIZONTAL_PADDING,
+                0,
+            )
+            name = index.data(Qt.ItemDataRole.DisplayRole) or ""
+            count_value = index.data(TagsTab.TagListModel.COUNT_ROLE)
+            count_text = self.format_count(count_value)
+            metrics = opt.fontMetrics
+            available_width = text_rect.width()
+            count_rect = QRect(text_rect)
+
+            painter.save()
+            try:
+                if opt.state & QStyle.StateFlag.State_Selected:
+                    color = opt.palette.color(QPalette.ColorRole.HighlightedText)
+                else:
+                    color = opt.palette.color(QPalette.ColorRole.Text)
+                painter.setPen(color)
+                painter.setFont(opt.font)
+
+                if count_text:
+                    count_width = metrics.horizontalAdvance(count_text)
+                    available_width = max(
+                        0, available_width - count_width - self._COUNT_SPACING
+                    )
+                    count_rect.setWidth(min(count_width, text_rect.width()))
+                    count_rect.setLeft(
+                        max(text_rect.left(), text_rect.right() - count_rect.width() + 1)
+                    )
+                    painter.drawText(
+                        count_rect,
+                        Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignRight,
+                        count_text,
+                    )
+
+                name_rect = QRect(text_rect)
+                name_rect.setWidth(max(0, available_width))
+                elided = metrics.elidedText(
+                    str(name),
+                    Qt.TextElideMode.ElideRight,
+                    name_rect.width(),
+                )
+                painter.drawText(
+                    name_rect,
+                    Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
+                    elided,
+                )
+            finally:
+                painter.restore()
 
     _PAGE_SIZE = 200
     _THUMB_SIZE = 128
@@ -191,6 +291,12 @@ class TagsTab(QWidget):
         self._completer.setCompletionMode(QCompleter.CompletionMode.PopupCompletion)
         self._completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
         self._completer.activated[str].connect(self._on_completion_activated)
+        self._completer_delegate: TagsTab.TagSuggestDelegate | None = None
+        popup = self._completer.popup()
+        if isinstance(popup, QListView):
+            delegate = self.TagSuggestDelegate(popup)
+            popup.setItemDelegate(delegate)
+            self._completer_delegate = delegate
         self._query_edit.setCompleter(self._completer)
         self._autocomplete_timer = QTimer(self)
         self._autocomplete_timer.setSingleShot(True)
@@ -368,14 +474,14 @@ class TagsTab(QWidget):
     def _on_query_text_edited(self, text: str) -> None:
         self._pending_completion_text = text
         if not self._completion_candidates:
-            self._tag_model.set_items([])
+            self._tag_model.reset_with([])
             self._hide_completion_popup()
             return
         self._autocomplete_timer.start()
 
     def _refresh_completions(self) -> None:
         if not self._completion_candidates:
-            self._tag_model.set_items([])
+            self._tag_model.reset_with([])
             self._hide_completion_popup()
             return
         text = self._query_edit.text()
@@ -384,7 +490,7 @@ class TagsTab(QWidget):
         self._current_completion_range = (start, end)
         prefix = token.lower()
         if not prefix:
-            self._tag_model.set_items([])
+            self._tag_model.reset_with([])
             self._hide_completion_popup()
             return
         matches: list[labels_util.TagMeta] = []
@@ -395,10 +501,10 @@ class TagsTab(QWidget):
         if matches:
             ranked = labels_util.sort_by_popularity(matches)
             limited = ranked[:50]
-            self._tag_model.set_items(limited)
+            self._tag_model.reset_with(limited)
             self._completer.complete()
         else:
-            self._tag_model.set_items([])
+            self._tag_model.reset_with([])
             self._hide_completion_popup()
 
     def _hide_completion_popup(self) -> None:
@@ -436,7 +542,7 @@ class TagsTab(QWidget):
                 seen[key] = tag
         self._completion_candidates = list(seen.values())
         if not self._completion_candidates:
-            self._tag_model.set_items([])
+            self._tag_model.reset_with([])
             self._hide_completion_popup()
 
     def reload_autocomplete(self, settings: PipelineSettings) -> None:
