@@ -388,7 +388,7 @@ class TagsTab(QWidget):
         query = self._query_input.text().strip()
         self._set_busy(True)
         try:
-            fragment = translate_query(query)
+            fragment = translate_query(query, file_alias="f")
         except ValueError as exc:
             self._status_label.setText(str(exc))
             self._set_busy(False)

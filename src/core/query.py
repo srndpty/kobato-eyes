@@ -18,6 +18,12 @@ class QueryFragment:
     params: list[object]
 
 
+def file_pk(alias: str) -> str:
+    """Return the primary key reference for a given file table alias."""
+
+    return f"{alias}.id"
+
+
 class _TokenKind:
     LPAREN = "LPAREN"
     RPAREN = "RPAREN"
@@ -224,50 +230,53 @@ class _Parser:
         }
 
 
-def _build_sql(expr: _Expression) -> QueryFragment:
+def _build_sql(expr: _Expression | None, *, file_alias: str = "f") -> QueryFragment:
     if expr is None:
         return QueryFragment(where="1=1", params=[])
 
-    where, params = _compile_expression(expr)
+    where, params = _compile_expression(expr, file_alias=file_alias)
     return QueryFragment(where=where, params=params)
 
 
-def _compile_expression(expr: _Expression) -> tuple[str, list[object]]:
+def _compile_expression(expr: _Expression, *, file_alias: str) -> tuple[str, list[object]]:
     if isinstance(expr, _TagExpr):
         clause = (
             "EXISTS ("
             "SELECT 1 FROM file_tags ft JOIN tags t ON t.id = ft.tag_id "
-            "WHERE ft.file_id = files.id AND t.name = ?)"
+            f"WHERE ft.file_id = {file_pk(file_alias)} AND t.name = ?)"
         )
         return clause, [expr.name]
     if isinstance(expr, _CategoryExpr):
         clause = (
             "EXISTS ("
             "SELECT 1 FROM file_tags ft JOIN tags t ON t.id = ft.tag_id "
-            "WHERE ft.file_id = files.id AND t.category = ?)"
+            f"WHERE ft.file_id = {file_pk(file_alias)} AND t.category = ?)"
         )
         return clause, [int(expr.category)]
     if isinstance(expr, _ScoreExpr):
-        clause = "EXISTS (SELECT 1 FROM file_tags ft WHERE ft.file_id = files.id " f"AND ft.score {expr.operator} ? )"
+        clause = (
+            "EXISTS (SELECT 1 FROM file_tags ft "
+            f"WHERE ft.file_id = {file_pk(file_alias)} AND ft.score {expr.operator} ? )"
+        )
         return clause, [expr.threshold]
     if isinstance(expr, _UnaryExpr):
-        inner, params = _compile_expression(expr.operand)
+        inner, params = _compile_expression(expr.operand, file_alias=file_alias)
         return f"NOT ({inner})", params
     if isinstance(expr, _BinaryExpr):
-        left_sql, left_params = _compile_expression(expr.left)
-        right_sql, right_params = _compile_expression(expr.right)
+        left_sql, left_params = _compile_expression(expr.left, file_alias=file_alias)
+        right_sql, right_params = _compile_expression(expr.right, file_alias=file_alias)
         combined = f"({left_sql}) {expr.op} ({right_sql})"
         return combined, left_params + right_params
 
     raise TypeError(f"Unhandled expression type: {expr}")
 
 
-def translate_query(query: str) -> QueryFragment:
+def translate_query(query: str, *, file_alias: str = "f") -> QueryFragment:
     """Convert a simplified tag query string into an SQL WHERE fragment."""
     tokens = _tokenize(query)
     parser = _Parser(tokens)
     expr = parser.parse()
-    return _build_sql(expr)
+    return _build_sql(expr, file_alias=file_alias)
 
 
-__all__ = ["QueryFragment", "translate_query"]
+__all__ = ["QueryFragment", "file_pk", "translate_query"]
