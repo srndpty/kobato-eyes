@@ -12,6 +12,7 @@ from core.settings import PipelineSettings
 def test_defaults_are_applied() -> None:
     settings = PipelineSettings()
 
+    assert settings.auto_index is True
     assert settings.hamming_threshold == 10
     assert settings.cosine_threshold == pytest.approx(0.90)
     assert settings.ssim_threshold == pytest.approx(0.92)

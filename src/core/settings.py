@@ -74,6 +74,7 @@ class PipelineSettings:
     roots: list[str] = field(default_factory=list)
     excluded: list[str] = field(default_factory=_default_excluded)
     allow_exts: set[str] = field(default_factory=_default_allow_exts)
+    auto_index: bool = True
     batch_size: int = 8
     model_name_init: InitVar[str | None] = None
     hamming_threshold: int = 10
@@ -89,6 +90,7 @@ class PipelineSettings:
         if not self.excluded:
             self.excluded = _default_excluded()
         self.allow_exts = {self._normalise_ext(ext) for ext in (self.allow_exts or _default_allow_exts()) if ext}
+        self.auto_index = bool(self.auto_index)
         if self.batch_size <= 0:
             self.batch_size = 1
         if model_name_init:
@@ -133,6 +135,7 @@ class PipelineSettings:
         allow_exts = _normalise_exts(data.get("allow_exts"), defaults.allow_exts)
 
         batch_size = _coerce_int(data.get("batch_size"), defaults.batch_size)
+        auto_index = _coerce_bool(data.get("auto_index"), defaults.auto_index)
         hamming_threshold = _coerce_int(data.get("hamming_threshold"), defaults.hamming_threshold)
         cosine_threshold = _coerce_float(data.get("cosine_threshold"), defaults.cosine_threshold)
         ssim_threshold = _coerce_float(data.get("ssim_threshold"), defaults.ssim_threshold)
@@ -170,6 +173,7 @@ class PipelineSettings:
             roots=roots,
             excluded=excluded,
             allow_exts=allow_exts,
+            auto_index=auto_index,
             batch_size=batch_size,
             hamming_threshold=hamming_threshold,
             cosine_threshold=cosine_threshold,
@@ -194,6 +198,7 @@ class PipelineSettings:
             "roots": [str(path) for path in self.roots],
             "excluded": [str(path) for path in self.excluded],
             "allow_exts": sorted(self.allow_exts),
+            "auto_index": bool(self.auto_index),
             "batch_size": self.batch_size,
             "hamming_threshold": self.hamming_threshold,
             "cosine_threshold": self.cosine_threshold,
@@ -250,6 +255,20 @@ def _coerce_float(value: Any, default: float) -> float:
         return float(value)
     except (TypeError, ValueError):
         return default
+
+
+def _coerce_bool(value: Any, default: bool) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in {"1", "true", "yes", "on"}:
+            return True
+        if lowered in {"0", "false", "no", "off"}:
+            return False
+    return default
 
 
 __all__ = [
