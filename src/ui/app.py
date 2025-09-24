@@ -20,7 +20,7 @@ from db.connection import bootstrap_if_needed
 from ui.dup_tab import DupTab
 from ui.settings_tab import SettingsTab
 from ui.tags_tab import TagsTab
-from utils.paths import ensure_dirs, get_db_path
+from utils.paths import ensure_dirs, get_db_path, migrate_data_dir_if_needed
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +30,7 @@ class MainWindow(QMainWindow):
 
     def __init__(self) -> None:
         super().__init__()
+        migrate_data_dir_if_needed()
         ensure_dirs()
         db_path = get_db_path()
         logger.info("DB at %s", db_path)
