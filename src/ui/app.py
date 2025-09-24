@@ -90,6 +90,7 @@ else:
     QGuiApplication.setAttribute(Qt.ApplicationAttribute.AA_UseSoftwareOpenGL)
 
     from db.connection import bootstrap_if_needed
+    from core.settings import PipelineSettings
     from ui.dup_tab import DupTab
     from ui.settings_tab import SettingsTab
     from ui.tags_tab import TagsTab
@@ -106,9 +107,13 @@ else:
             bootstrap_if_needed(db_path)
             self.setWindowTitle("kobato-eyes")
             self._tabs = QTabWidget()
-            self._tabs.addTab(TagsTab(self), "Tags")
-            self._tabs.addTab(DupTab(self), "Duplicates")
-            self._tabs.addTab(SettingsTab(self), "Settings")
+            self._tags_tab = TagsTab(self)
+            self._dup_tab = DupTab(self)
+            self._settings_tab = SettingsTab(self)
+            self._settings_tab.settings_applied.connect(self._on_settings_applied)
+            self._tabs.addTab(self._tags_tab, "Tags")
+            self._tabs.addTab(self._dup_tab, "Duplicates")
+            self._tabs.addTab(self._settings_tab, "Settings")
             self.setCentralWidget(self._tabs)
             self._init_menus()
 
@@ -122,6 +127,9 @@ else:
             log_dir = get_log_dir()
             log_dir.mkdir(parents=True, exist_ok=True)
             QDesktopServices.openUrl(QUrl.fromLocalFile(str(log_dir)))
+
+        def _on_settings_applied(self, settings: PipelineSettings) -> None:
+            self._tags_tab.reload_autocomplete(settings)
 
 
     def run() -> None:

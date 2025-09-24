@@ -68,7 +68,7 @@ def test_index_now_async_flow(tags_tab: TagsTab, qapp: QApplication) -> None:
 
             assert not tags_tab._placeholder_button.isEnabled()  # type: ignore[attr-defined]
             assert not tags_tab._search_button.isEnabled()  # type: ignore[attr-defined]
-            assert not tags_tab._query_input.isEnabled()  # type: ignore[attr-defined]
+            assert not tags_tab._query_edit.isEnabled()  # type: ignore[attr-defined]
 
             allow_finish.set()
 

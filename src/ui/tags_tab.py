@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Callable, Iterable, List, Optional, Sequence
 
 from PyQt6.QtCore import (
+    QAbstractListModel,
     QModelIndex,
     QObject,
     QRunnable,
@@ -24,6 +25,7 @@ from PyQt6.QtGui import QPixmap, QStandardItem, QStandardItemModel
 from PyQt6.QtWidgets import (
     QAbstractItemView,
     QButtonGroup,
+    QCompleter,
     QGroupBox,
     QHBoxLayout,
     QLabel,
@@ -42,15 +44,26 @@ from PyQt6.QtWidgets import (
 
 from core.config import load_settings
 from core.pipeline import IndexProgress, retag_all, retag_query, run_index_once
-from core.settings import PipelineSettings
 from core.query import translate_query
+from core.settings import PipelineSettings
 from db.connection import get_conn
-from db.repository import search_files
+from db.repository import list_tag_names, search_files
+from tagger import labels_util
+from tagger.base import TagCategory
+from tagger.wd14_onnx import ONNXRUNTIME_MISSING_MESSAGE
+from ui.autocomplete import (
+    abbreviate_count,
+    extract_completion_token,
+    replace_completion_token,
+)
 from utils.image_io import get_thumbnail
 from utils.paths import ensure_dirs, get_db_path
-from tagger.wd14_onnx import ONNXRUNTIME_MISSING_MESSAGE
 
 logger = logging.getLogger(__name__)
+
+
+_CATEGORY_PREFIXES = [f"{category.name.lower()}:" for category in TagCategory]
+_RESERVED_COMPLETIONS = ["AND", "OR", "NOT", "category:", *_CATEGORY_PREFIXES]
 
 
 class _ThumbnailSignal(QObject):
@@ -134,13 +147,78 @@ class IndexRunnable(QRunnable):
 class TagsTab(QWidget):
     """Provide a search bar and tabular or grid results for tag queries."""
 
+    class TagListModel(QAbstractListModel):
+        """Simple list model backed by a list of tag metadata."""
+
+        NAME_ROLE = Qt.ItemDataRole.UserRole + 1
+        COUNT_ROLE = Qt.ItemDataRole.UserRole + 2
+
+        def __init__(
+            self,
+            items: Sequence[labels_util.TagMeta] | None = None,
+            parent: QObject | None = None,
+        ) -> None:
+            super().__init__(parent)
+            self._items = list(items or [])
+
+        def rowCount(self, parent: QModelIndex | None = None) -> int:  # type: ignore[override]
+            if parent and parent.isValid():
+                return 0
+            return len(self._items)
+
+        def data(self, index: QModelIndex, role: int = Qt.ItemDataRole.DisplayRole):  # type: ignore[override]
+            if not index.isValid():
+                return None
+            try:
+                item = self._items[index.row()]
+            except IndexError:
+                return None
+            if role in {Qt.ItemDataRole.DisplayRole, Qt.ItemDataRole.EditRole}:
+                count_text = abbreviate_count(item.count)
+                return f"{item.name} ({count_text})" if count_text else item.name
+            if role == int(self.NAME_ROLE):
+                return item.name
+            if role == int(self.COUNT_ROLE):
+                try:
+                    return int(item.count or 0)
+                except (TypeError, ValueError):
+                    return 0
+            return None
+
+        def roleNames(self) -> dict[int, bytes]:  # type: ignore[override]
+            roles = dict(super().roleNames())
+            roles[int(self.NAME_ROLE)] = b"name"
+            roles[int(self.COUNT_ROLE)] = b"count"
+            return roles
+
+        def reset_with(self, items: Sequence[labels_util.TagMeta]) -> None:
+            self.beginResetModel()
+            self._items = list(items)
+            self.endResetModel()
+
     _PAGE_SIZE = 200
     _THUMB_SIZE = 128
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self._query_input = QLineEdit(self)
-        self._query_input.setPlaceholderText("Search tags…")
+        self._query_edit = QLineEdit(self)
+        self._query_edit.setPlaceholderText("Search tags…")
+        self._tag_model = self.TagListModel(parent=self)
+        self._completer = QCompleter(self._tag_model, self)
+        self._completer.setCompletionMode(QCompleter.CompletionMode.PopupCompletion)
+        self._completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
+        self._completer.activated[QModelIndex].connect(self._on_completion_activated)
+        self._query_edit.setCompleter(self._completer)
+        self._autocomplete_timer = QTimer(self)
+        self._autocomplete_timer.setSingleShot(True)
+        self._autocomplete_timer.setInterval(150)
+        self._autocomplete_timer.timeout.connect(self._refresh_completions)
+        self._query_edit.textEdited.connect(self._on_query_text_edited)
+        self._all_tags: list[labels_util.TagMeta] = []
+        self._completion_candidates: list[labels_util.TagMeta] = []
+        self._pending_completion_text = ""
+        self._current_completion_range: tuple[int, int] = (0, 0)
+        self._update_completion_candidates()
         self._search_button = QPushButton("Search", self)
         self._retag_menu = QMenu("Retag with current model", self)
         self._retag_all_action = self._retag_menu.addAction("All library")
@@ -227,7 +305,7 @@ class TagsTab(QWidget):
         self._stack.addWidget(self._grid_view)
 
         search_layout = QHBoxLayout()
-        search_layout.addWidget(self._query_input)
+        search_layout.addWidget(self._query_edit)
         search_layout.addWidget(self._search_button)
         search_layout.addWidget(self._retag_button)
 
@@ -246,7 +324,7 @@ class TagsTab(QWidget):
 
         self._search_button.clicked.connect(self._on_search_clicked)
         self._load_more_button.clicked.connect(self._on_load_more_clicked)
-        self._query_input.returnPressed.connect(self._on_search_clicked)
+        self._query_edit.returnPressed.connect(self._on_search_clicked)
         self._retag_all_action.triggered.connect(self._on_retag_all)
         self._retag_results_action.triggered.connect(self._on_retag_results)
         self._table_button.toggled.connect(self._on_table_toggled)
@@ -298,6 +376,131 @@ class TagsTab(QWidget):
 
         self._show_placeholder(True)
         self._update_control_states()
+        QTimer.singleShot(0, self._initialise_autocomplete)
+
+    def _initialise_autocomplete(self) -> None:
+        settings = load_settings()
+        self.reload_autocomplete(settings)
+
+    def _on_query_text_edited(self, text: str) -> None:
+        self._pending_completion_text = text
+        if not self._completion_candidates:
+            self._tag_model.reset_with([])
+            self._hide_completion_popup()
+            return
+        self._autocomplete_timer.start()
+
+    def _refresh_completions(self) -> None:
+        if not self._completion_candidates:
+            self._tag_model.reset_with([])
+            self._hide_completion_popup()
+            return
+        text = self._query_edit.text()
+        cursor_position = self._query_edit.cursorPosition()
+        token, start, end = extract_completion_token(text, cursor_position)
+        self._current_completion_range = (start, end)
+        prefix = token.lower()
+        if not prefix:
+            self._tag_model.reset_with([])
+            self._hide_completion_popup()
+            return
+        matches: list[labels_util.TagMeta] = []
+        lower_prefix = prefix
+        for candidate in self._completion_candidates:
+            if candidate.name.lower().startswith(lower_prefix):
+                matches.append(candidate)
+        if matches:
+            ranked = labels_util.sort_by_popularity(matches)
+            limited = ranked[:50]
+            self._tag_model.reset_with(limited)
+            self._completer.complete()
+        else:
+            self._tag_model.reset_with([])
+            self._hide_completion_popup()
+
+    def _hide_completion_popup(self) -> None:
+        popup = self._completer.popup()
+        if popup is not None and popup.isVisible():
+            popup.hide()
+
+    def _on_completion_activated(self, index: QModelIndex) -> None:
+        if not index.isValid():
+            return
+        completion = index.data(int(self._tag_model.NAME_ROLE))
+        if not completion:
+            completion = index.data(Qt.ItemDataRole.DisplayRole)
+        if not completion:
+            return
+        completion_text = str(completion)
+        text = self._query_edit.text()
+        start, end = self._current_completion_range
+        new_text, cursor = replace_completion_token(text, start, end, completion_text)
+        block = self._query_edit.blockSignals(True)
+        self._query_edit.setText(new_text)
+        self._query_edit.blockSignals(block)
+        self._query_edit.setCursorPosition(cursor)
+        self._pending_completion_text = new_text
+        self._autocomplete_timer.stop()
+        self._hide_completion_popup()
+
+    def _update_completion_candidates(self) -> None:
+        seen: dict[str, labels_util.TagMeta] = {}
+        for value in _RESERVED_COMPLETIONS:
+            name = value.strip()
+            if not name:
+                continue
+            key = name.lower()
+            if key not in seen:
+                seen[key] = labels_util.TagMeta(name=name, category=0, count=0)
+        for tag in self._all_tags:
+            name = tag.name.strip()
+            if not name:
+                continue
+            key = name.lower()
+            if key not in seen or int(tag.count or 0) > int(seen[key].count or 0):
+                seen[key] = tag
+        self._completion_candidates = list(seen.values())
+        if not self._completion_candidates:
+            self._tag_model.reset_with([])
+            self._hide_completion_popup()
+
+    def reload_autocomplete(self, settings: PipelineSettings) -> None:
+        csv_tags: list[labels_util.TagMeta] = []
+        csv_path = labels_util.discover_labels_csv(
+            settings.tagger.model_path, settings.tagger.tags_csv
+        )
+        if csv_path:
+            try:
+                csv_tags = labels_util.load_selected_tags(csv_path)
+            except FileNotFoundError:
+                logger.warning("Selected tags CSV not found at %s", csv_path)
+            except Exception as exc:  # pragma: no cover - defensive logging
+                logger.warning("Failed to parse selected tags CSV %s: %s", csv_path, exc)
+        tags: list[labels_util.TagMeta] = list(csv_tags)
+        seen_names = {tag.name.lower() for tag in tags}
+        db_tags: list[str] = []
+        try:
+            db_tags = list_tag_names(self._conn)
+        except Exception as exc:  # pragma: no cover - defensive logging
+            logger.warning("Failed to load tag names from database: %s", exc)
+        for name in db_tags:
+            cleaned = name.strip()
+            if not cleaned:
+                continue
+            key = cleaned.lower()
+            if key in seen_names:
+                continue
+            seen_names.add(key)
+            tags.append(labels_util.TagMeta(name=cleaned, category=0, count=0))
+        dedup: dict[str, labels_util.TagMeta] = {}
+        for tag in tags:
+            key = tag.name.lower()
+            existing = dedup.get(key)
+            if existing is None or int(tag.count or 0) > int(existing.count or 0):
+                dedup[key] = tag
+        self._all_tags = labels_util.sort_by_popularity(dedup.values())
+        self._update_completion_candidates()
+        self._refresh_completions()
 
     def _show_placeholder(self, show: bool) -> None:
         if show:
@@ -442,7 +645,7 @@ class TagsTab(QWidget):
         self._update_control_states()
 
     def _on_search_clicked(self) -> None:
-        query = self._query_input.text().strip()
+        query = self._query_edit.text().strip()
         self._set_busy(True)
         try:
             fragment = translate_query(query, file_alias="f")
@@ -655,7 +858,7 @@ class TagsTab(QWidget):
         search_enabled = not self._search_busy and not self._indexing_active
         input_enabled = not self._indexing_active and not self._search_busy
         self._search_button.setEnabled(search_enabled)
-        self._query_input.setEnabled(input_enabled)
+        self._query_edit.setEnabled(input_enabled)
         self._load_more_button.setEnabled(
             self._can_load_more and not self._indexing_active and not self._search_busy
         )
@@ -752,4 +955,4 @@ class TagsTab(QWidget):
         self._toast_label.setVisible(True)
         self._toast_timer.start(timeout_ms)
 
-__all__ = ["TagsTab"]
+__all__ = ["TagsTab", "extract_completion_token", "replace_completion_token"]
