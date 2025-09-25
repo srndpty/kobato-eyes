@@ -52,3 +52,15 @@ def test_iter_images_handles_deep_paths(tmp_path: Path) -> None:
 
     results = list(iter_images([root], extensions=["png"]))
     assert results and results[0].name == "deep.png"
+
+
+def test_iter_images_handles_parentheses_in_path(tmp_path: Path) -> None:
+    root = tmp_path / "root (test)"
+    nested = root / "album (1)"
+    nested.mkdir(parents=True)
+    image_path = nested / "photo.JPG"
+    image_path.write_bytes(b"data")
+
+    results = list(iter_images([root], extensions=["jpg"]))
+
+    assert image_path in results
