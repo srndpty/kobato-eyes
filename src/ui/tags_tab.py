@@ -64,6 +64,20 @@ logger = logging.getLogger(__name__)
 
 _CATEGORY_PREFIXES = [f"{category.name.lower()}:" for category in TagCategory]
 _RESERVED_COMPLETIONS = ["AND", "OR", "NOT", "category:", *_CATEGORY_PREFIXES]
+_CATEGORY_KEY_LOOKUP = {
+    "0": TagCategory.GENERAL,
+    "general": TagCategory.GENERAL,
+    "1": TagCategory.CHARACTER,
+    "character": TagCategory.CHARACTER,
+    "2": TagCategory.RATING,
+    "rating": TagCategory.RATING,
+    "3": TagCategory.COPYRIGHT,
+    "copyright": TagCategory.COPYRIGHT,
+    "4": TagCategory.ARTIST,
+    "artist": TagCategory.ARTIST,
+    "5": TagCategory.META,
+    "meta": TagCategory.META,
+}
 
 
 class _ThumbnailSignal(QObject):
@@ -331,17 +345,19 @@ class TagsTab(QWidget):
         self._grid_button.toggled.connect(self._on_grid_toggled)
         self._placeholder_button.clicked.connect(self._on_index_now)
 
-        ensure_dirs()
-        self._db_display = str(get_db_path())
-        self._conn = get_conn(get_db_path())
-        self._db_path = self._resolve_db_path()
-        self.destroyed.connect(lambda: self._conn.close())
-
         self._current_query: Optional[str] = None
         self._current_where: Optional[str] = None
         self._current_params: List[object] = []
         self._offset = 0
         self._results_cache: list[dict[str, object]] = []
+        self._tag_thresholds: dict[TagCategory, float] = {}
+
+        ensure_dirs()
+        self._db_display = str(get_db_path())
+        self._conn = get_conn(get_db_path())
+        self._db_path = self._resolve_db_path()
+        self.destroyed.connect(lambda: self._conn.close())
+        self._update_thresholds(load_settings())
 
         self._thumb_pool = QThreadPool(self)
         self._thumb_pool.setMaxThreadCount(min(4, self._thumb_pool.maxThreadCount()))
@@ -465,6 +481,7 @@ class TagsTab(QWidget):
             self._hide_completion_popup()
 
     def reload_autocomplete(self, settings: PipelineSettings) -> None:
+        self._update_thresholds(settings)
         csv_tags: list[labels_util.TagMeta] = []
         csv_path = labels_util.discover_labels_csv(
             settings.tagger.model_path, settings.tagger.tags_csv
@@ -711,7 +728,8 @@ class TagsTab(QWidget):
             row_index = len(self._results_cache)
             self._results_cache.append(record)
             path_obj = Path(str(record.get("path", "")))
-            tags = list(record.get("tags") or record.get("top_tags") or [])
+            raw_tags = list(record.get("tags") or record.get("top_tags") or [])
+            tags = self._filter_display_tags(raw_tags)
             tags_text = self._format_tags(tags)
 
             table_items = [
@@ -812,9 +830,76 @@ class TagsTab(QWidget):
         except (OverflowError, OSError, ValueError):
             return "-"
 
+    def _filter_display_tags(
+        self, tags: Iterable[Sequence[object]]
+    ) -> list[tuple[str, float]]:
+        filtered: list[tuple[str, float]] = []
+        for entry in tags:
+            if not entry:
+                continue
+            name = str(entry[0])
+            score_value = entry[1] if len(entry) > 1 else None
+            try:
+                score = float(score_value)
+            except (TypeError, ValueError):
+                continue
+            category_value = entry[2] if len(entry) > 2 else None
+            category = self._normalise_category_value(category_value)
+            threshold = 0.0
+            if category is not None:
+                threshold = self._tag_thresholds.get(category, 0.0)
+            if score < threshold:
+                continue
+            filtered.append((name, score))
+        return filtered
+
+    def _update_thresholds(self, settings: PipelineSettings | None = None) -> None:
+        if settings is None:
+            settings = load_settings()
+        mapping: dict[TagCategory, float] = {}
+        threshold_source = getattr(settings.tagger, "thresholds", {}) if settings else {}
+        for key, value in (threshold_source or {}).items():
+            category = self._normalise_category_value(key)
+            if category is None:
+                continue
+            try:
+                mapping[category] = float(value)
+            except (TypeError, ValueError):
+                continue
+        self._tag_thresholds = mapping
+
+    @staticmethod
+    def _normalise_category_value(value: object) -> TagCategory | None:
+        if value is None:
+            return None
+        if isinstance(value, TagCategory):
+            return TagCategory(int(value))
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            try:
+                return TagCategory(int(value))
+            except (ValueError, TypeError):
+                return None
+        text = str(value).strip()
+        if not text:
+            return None
+        lowered = text.lower()
+        category = _CATEGORY_KEY_LOOKUP.get(lowered)
+        if category is not None:
+            return category
+        try:
+            return TagCategory(int(float(text)))
+        except (ValueError, TypeError):
+            return None
+
+    @staticmethod
+    def _format_score(score: float) -> str:
+        formatted = f"{score:.2f}"
+        trimmed = formatted.rstrip("0").rstrip(".")
+        return trimmed or "0"
+
     @staticmethod
     def _format_tags(tags: Iterable[tuple[str, float]]) -> str:
-        parts = [f"{name} ({score:.2f})" for name, score in tags]
+        parts = [f"{name} ({TagsTab._format_score(score)})" for name, score in tags]
         return ", ".join(parts)
 
     @staticmethod

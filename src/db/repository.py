@@ -276,8 +276,6 @@ def search_files(
     cursor = conn.execute(query, (*params, limit, offset))
     rows = cursor.fetchall()
 
-    thresholds = _load_tag_thresholds(conn)
-
     results: list[dict[str, object]] = []
     for row in rows:
         file_id = row["id"]
@@ -286,14 +284,11 @@ def search_files(
             "WHERE ft.file_id = ? ORDER BY ft.score DESC",
             (file_id,),
         ).fetchall()
-        tags: list[tuple[str, float]] = []
+        tags: list[tuple[str, float, int | None]] = []
         for tag_row in tag_rows:
             score = float(tag_row["score"])
             category = _normalise_category(tag_row["category"])
-            threshold = thresholds.get(category, 0.0) if category is not None else 0.0
-            if score < threshold:
-                continue
-            tags.append((tag_row["name"], score))
+            tags.append((tag_row["name"], score, category))
         results.append(
             {
                 "id": file_id,
