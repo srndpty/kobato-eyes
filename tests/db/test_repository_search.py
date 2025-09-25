@@ -39,6 +39,14 @@ def _insert_file(connection, *, path: str, size: int, mtime: float, sha: str) ->
     return cursor.lastrowid
 
 
+def _set_threshold(connection, category: str, threshold: float) -> None:
+    connection.execute(
+        "INSERT INTO tagger_thresholds (category, threshold) VALUES (?, ?) "
+        "ON CONFLICT(category) DO UPDATE SET threshold = excluded.threshold",
+        (category, threshold),
+    )
+
+
 def test_search_files_returns_expected_record(conn) -> None:
     file_a = _insert_file(conn, path="A.png", size=123, mtime=200.0, sha="a")
     file_b = _insert_file(conn, path="B.png", size=456, mtime=100.0, sha="b")
@@ -97,3 +105,28 @@ def test_translate_query_integrates_with_search(conn) -> None:
     results = search_files(conn, fragment.where, fragment.params)
 
     assert [row["id"] for row in results] == [file_id]
+
+
+def test_search_files_filters_tags_below_threshold(conn) -> None:
+    file_id = _insert_file(conn, path="F.png", size=222, mtime=20.0, sha="f")
+    _set_threshold(conn, "general", 0.8)
+
+    tags = [
+        ("1girl", 0.95),
+        ("smile", 0.81),
+        ("long_hair", 0.79),
+        ("outdoors", 0.4),
+    ]
+    for name, score in tags:
+        _insert_tag(conn, name, score, file_id)
+
+    where_sql = (
+        "EXISTS (SELECT 1 FROM file_tags ft JOIN tags t ON t.id = ft.tag_id "
+        "WHERE ft.file_id = f.id AND t.name = ?)"
+    )
+    results = search_files(conn, where_sql, ["1girl"])
+
+    assert len(results) == 1
+    record = results[0]
+    assert [name for name, _ in record["tags"]] == ["1girl", "smile"]
+    assert record["tags"] == record["top_tags"]
