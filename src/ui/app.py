@@ -111,6 +111,7 @@ else:
             self._dup_tab = DupTab(self)
             self._settings_tab = SettingsTab(self)
             self._settings_tab.settings_applied.connect(self._on_settings_applied)
+            self._settings_tab.set_tags_tab(self._tags_tab)
             self._tabs.addTab(self._tags_tab, "Tags")
             self._tabs.addTab(self._dup_tab, "Duplicates")
             self._tabs.addTab(self._settings_tab, "Settings")
