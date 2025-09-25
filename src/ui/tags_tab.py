@@ -684,25 +684,28 @@ class TagsTab(QWidget):
             self._progress_dialog.setLabelText("Cancelling…")
 
     def _handle_index_progress(self, done: int, total: int, label: str) -> None:
-        if self._progress_dialog is None:
+        dlg = self._progress_dialog
+        if dlg is None:
             return
 
-        if total < 0:
-            self._progress_dialog.setRange(0, 0)
-            self._progress_dialog.setLabelText(label)
-            return
+        try:
+            if total < 0:
+                dlg.setRange(0, 0)
+                dlg.setLabelText(label)
+                return
 
-        maximum = max(total, 0)
-        value = max(0, min(done, total))
-        self._progress_dialog.setRange(0, maximum)
-        self._progress_dialog.setValue(value)
+            maximum = max(total, 0)
+            # total==0 のとき min(done, total) が常に0になるので、UI的に自然な値にする
+            value = max(0, min(done, total if total > 0 else done))
 
-        if total > 0:
-            percent = min(100, (value * 100) // total)
-        else:
-            percent = 100 if value else 0
+            dlg.setRange(0, maximum)
+            dlg.setValue(value)
 
-        self._progress_dialog.setLabelText(f"{label}: {value}/{total} ({percent}%)")
+            percent = min(100, (value * 100) // total) if total > 0 else (100 if value else 0)
+            dlg.setLabelText(f"{label}: {value}/{total} ({percent}%)")
+        except RuntimeError:
+            # ダイアログが deleteLater 済み等で C++ 側が死んでいる場合は無視
+            pass
 
     def _close_progress_dialog(self) -> None:
         if self._progress_dialog is not None:
@@ -1021,6 +1024,13 @@ class TagsTab(QWidget):
         self._update_control_states()
 
     def _handle_index_finished(self, stats: dict[str, object]) -> None:
+        task = self._current_index_task
+        if task is not None:
+            try:
+                task.signals.progress.disconnect(self._handle_index_progress)
+            except TypeError:
+                pass
+
         self._close_progress_dialog()
         self._indexing_active = False
         elapsed = float(stats.get("elapsed_sec", 0.0) or 0.0)
@@ -1058,6 +1068,13 @@ class TagsTab(QWidget):
         QTimer.singleShot(0, self._on_search_clicked)
 
     def _handle_index_failed(self, message: str) -> None:
+        task = self._current_index_task
+        if task is not None:
+            try:
+                task.signals.progress.disconnect(self._handle_index_progress)
+            except TypeError:
+                pass
+
         self._close_progress_dialog()
         self._indexing_active = False
         if message == ONNXRUNTIME_MISSING_MESSAGE:
