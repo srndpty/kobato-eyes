@@ -10,17 +10,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Callable, Iterable, List, Optional, Sequence
 
-from PyQt6.QtCore import (
-    QAbstractListModel,
-    QModelIndex,
-    QObject,
-    QRunnable,
-    QSize,
-    Qt,
-    QThreadPool,
-    QTimer,
-    pyqtSignal,
-)
+from PyQt6.QtCore import QAbstractListModel, QModelIndex, QObject, QRunnable, QSize, Qt, QThreadPool, QTimer, pyqtSignal
 from PyQt6.QtGui import QPixmap, QStandardItem, QStandardItemModel
 from PyQt6.QtWidgets import (
     QAbstractItemView,
@@ -51,11 +41,7 @@ from db.repository import list_tag_names, search_files
 from tagger import labels_util
 from tagger.base import TagCategory
 from tagger.wd14_onnx import ONNXRUNTIME_MISSING_MESSAGE
-from ui.autocomplete import (
-    abbreviate_count,
-    extract_completion_token,
-    replace_completion_token,
-)
+from ui.autocomplete import abbreviate_count, extract_completion_token, replace_completion_token
 from utils.image_io import get_thumbnail
 from utils.paths import ensure_dirs, get_db_path
 
@@ -78,6 +64,54 @@ _CATEGORY_KEY_LOOKUP = {
     "5": TagCategory.META,
     "meta": TagCategory.META,
 }
+
+
+def _category_thresholds() -> dict[TagCategory, float]:
+    s = load_settings()
+    th = {k.lower(): float(v) for k, v in (s.tagger.thresholds or {}).items()}
+
+    def get(name, default=0.0):
+        return th.get(name, default)
+
+    return {
+        TagCategory.GENERAL: get("general"),
+        TagCategory.CHARACTER: get("character"),
+        TagCategory.COPYRIGHT: get("copyright"),
+        TagCategory.ARTIST: get("artist"),
+        TagCategory.META: get("meta"),
+        TagCategory.RATING: get("rating"),
+    }
+
+
+def _filter_tags_by_threshold(tag_rows):
+    """tag_rows は (name, score) か (name, score, category) を想定。"""
+    thr = _category_thresholds()
+    out = []
+    for row in tag_rows:
+        # 形状を吸収
+        if isinstance(row, dict):
+            name = row.get("name")
+            score = float(row.get("score", 0.0))
+            cat = row.get("category", 0)
+        else:
+            if len(row) == 3:
+                name, score, cat = row
+            elif len(row) == 2:
+                name, score = row
+                cat = 0
+            else:
+                # 予期しない形 → 表示しない
+                continue
+        # cat を int/Enum に正規化
+        try:
+            cat_enum = cat if isinstance(cat, TagCategory) else TagCategory(int(cat))
+        except Exception:
+            # 'general' 等の文字ならマップ
+            m = {"general": 0, "character": 1, "rating": 2, "copyright": 3, "artist": 4, "meta": 5}
+            cat_enum = TagCategory(m.get(str(cat).lower(), 0))
+        if float(score) >= thr.get(cat_enum, 0.0):
+            out.append((str(name), float(score)))
+    return out
 
 
 class _ThumbnailSignal(QObject):
@@ -259,9 +293,7 @@ class TagsTab(QWidget):
         self._placeholder = QWidget(self)
         placeholder_layout = QVBoxLayout(self._placeholder)
         placeholder_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._placeholder_label = QLabel(
-            "No results yet. Try indexing your library.", self._placeholder
-        )
+        self._placeholder_label = QLabel("No results yet. Try indexing your library.", self._placeholder)
         self._placeholder_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._placeholder_button = QPushButton("Index now", self._placeholder)
         placeholder_layout.addWidget(self._placeholder_label)
@@ -483,9 +515,7 @@ class TagsTab(QWidget):
     def reload_autocomplete(self, settings: PipelineSettings) -> None:
         self._update_thresholds(settings)
         csv_tags: list[labels_util.TagMeta] = []
-        csv_path = labels_util.discover_labels_csv(
-            settings.tagger.model_path, settings.tagger.tags_csv
-        )
+        csv_path = labels_util.discover_labels_csv(settings.tagger.model_path, settings.tagger.tags_csv)
         if csv_path:
             try:
                 csv_tags = labels_util.load_selected_tags(csv_path)
@@ -570,10 +600,7 @@ class TagsTab(QWidget):
         answer = QMessageBox.question(
             self,
             "Retag all files",
-            (
-                "Retagging the entire library may take a long time.\n"
-                "Do you want to continue?"
-            ),
+            ("Retagging the entire library may take a long time.\n" "Do you want to continue?"),
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,
         )
@@ -729,7 +756,8 @@ class TagsTab(QWidget):
             self._results_cache.append(record)
             path_obj = Path(str(record.get("path", "")))
             raw_tags = list(record.get("tags") or record.get("top_tags") or [])
-            tags = self._filter_display_tags(raw_tags)
+            # tags = self._filter_display_tags(raw_tags)
+            tags = _filter_tags_by_threshold(raw_tags)
             tags_text = self._format_tags(tags)
 
             table_items = [
@@ -741,9 +769,7 @@ class TagsTab(QWidget):
                 QStandardItem(self._format_mtime(record.get("mtime"))),
                 QStandardItem(tags_text),
             ]
-            table_items[0].setData(
-                Qt.AlignmentFlag.AlignCenter, Qt.ItemDataRole.TextAlignmentRole
-            )
+            table_items[0].setData(Qt.AlignmentFlag.AlignCenter, Qt.ItemDataRole.TextAlignmentRole)
             for item in table_items:
                 item.setEditable(False)
             table_items[-1].setToolTip(tags_text)
@@ -753,9 +779,7 @@ class TagsTab(QWidget):
             grid_item = QStandardItem(self._format_grid_text(path_obj.name, tags))
             grid_item.setEditable(False)
             grid_item.setData(row_index, Qt.ItemDataRole.UserRole)
-            grid_item.setData(
-                Qt.AlignmentFlag.AlignCenter, Qt.ItemDataRole.TextAlignmentRole
-            )
+            grid_item.setData(Qt.AlignmentFlag.AlignCenter, Qt.ItemDataRole.TextAlignmentRole)
             grid_item.setSizeHint(QSize(self._THUMB_SIZE + 48, self._THUMB_SIZE + 72))
             grid_item.setToolTip(tags_text)
             self._grid_model.appendRow(grid_item)
@@ -776,9 +800,7 @@ class TagsTab(QWidget):
             table_item = self._table_model.item(row, 0)
             if table_item is not None:
                 table_item.setData(pixmap, Qt.ItemDataRole.DecorationRole)
-                table_item.setData(
-                    Qt.AlignmentFlag.AlignCenter, Qt.ItemDataRole.TextAlignmentRole
-                )
+                table_item.setData(Qt.AlignmentFlag.AlignCenter, Qt.ItemDataRole.TextAlignmentRole)
                 self._table_view.setRowHeight(row, max(self._THUMB_SIZE + 16, pixmap.height() + 16))
         if row < self._grid_model.rowCount():
             grid_item = self._grid_model.item(row)
@@ -830,9 +852,7 @@ class TagsTab(QWidget):
         except (OverflowError, OSError, ValueError):
             return "-"
 
-    def _filter_display_tags(
-        self, tags: Iterable[Sequence[object]]
-    ) -> list[tuple[str, float]]:
+    def _filter_display_tags(self, tags: Iterable[Sequence[object]]) -> list[tuple[str, float]]:
         filtered: list[tuple[str, float]] = []
         for entry in tags:
             if not entry:
@@ -894,8 +914,8 @@ class TagsTab(QWidget):
     @staticmethod
     def _format_score(score: float) -> str:
         formatted = f"{score:.2f}"
-        trimmed = formatted.rstrip("0").rstrip(".")
-        return trimmed or "0"
+        # trimmed = formatted.rstrip("0").rstrip(".")
+        return formatted or "0.00"
 
     @staticmethod
     def _format_tags(tags: Iterable[tuple[str, float]]) -> str:
@@ -942,15 +962,12 @@ class TagsTab(QWidget):
             grid_item.setEditable(False)
             self._grid_model.appendRow(grid_item)
 
-
     def _update_control_states(self) -> None:
         search_enabled = not self._search_busy and not self._indexing_active
         input_enabled = not self._indexing_active and not self._search_busy
         self._search_button.setEnabled(search_enabled)
         self._query_edit.setEnabled(input_enabled)
-        self._load_more_button.setEnabled(
-            self._can_load_more and not self._indexing_active and not self._search_busy
-        )
+        self._load_more_button.setEnabled(self._can_load_more and not self._indexing_active and not self._search_busy)
         self._placeholder_button.setEnabled(not self._indexing_active)
         self._table_button.setEnabled(not self._indexing_active)
         self._grid_button.setEnabled(not self._indexing_active)
@@ -1043,5 +1060,6 @@ class TagsTab(QWidget):
         self._toast_label.move(x, y)
         self._toast_label.setVisible(True)
         self._toast_timer.start(timeout_ms)
+
 
 __all__ = ["TagsTab", "extract_completion_token", "replace_completion_token"]
