@@ -137,6 +137,19 @@ else:
 
         setup_logging()
         app = QApplication(sys.argv)
+
+        def _finalise_onnx_profiles() -> None:
+            try:
+                from tagger.wd14_onnx import end_all_profiles
+            except Exception:  # pragma: no cover - defensive logging
+                logger.exception("Failed to import wd14 profiler finaliser")
+                return
+            try:
+                end_all_profiles()
+            except Exception:  # pragma: no cover - defensive logging
+                logger.exception("Failed to flush WD14 ONNX profiles")
+
+        app.aboutToQuit.connect(_finalise_onnx_profiles)
         window = MainWindow()
         window.show()
         sys.exit(app.exec())
