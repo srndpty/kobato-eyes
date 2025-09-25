@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import sqlite3
 import subprocess
 import sys
 import threading
@@ -379,9 +380,10 @@ class TagsTab(QWidget):
 
         ensure_dirs()
         self._db_display = str(get_db_path())
-        self._conn = get_conn(get_db_path())
+        self._conn: sqlite3.Connection | None = None
+        self._open_connection()
         self._db_path = self._resolve_db_path()
-        self.destroyed.connect(lambda: self._conn.close())
+        self.destroyed.connect(self._close_connection)
         self._update_thresholds(load_settings())
 
         self._thumb_pool = QThreadPool(self)
@@ -422,6 +424,48 @@ class TagsTab(QWidget):
     def _initialise_autocomplete(self) -> None:
         settings = load_settings()
         self.reload_autocomplete(settings)
+
+    def _open_connection(self) -> None:
+        if self._conn is not None:
+            return
+        self._conn = get_conn(get_db_path())
+
+    def _close_connection(self) -> None:
+        if self._conn is None:
+            return
+        try:
+            self._conn.close()
+        finally:
+            self._conn = None
+
+    def prepare_for_database_reset(self) -> None:
+        self._close_connection()
+
+    def handle_database_reset(self) -> None:
+        self._open_connection()
+        self._db_path = self._resolve_db_path()
+        self._results_cache.clear()
+        self._table_model.removeRows(0, self._table_model.rowCount())
+        self._grid_model.removeRows(0, self._grid_model.rowCount())
+        self._offset = 0
+        self._current_query = ""
+        self._current_where = ""
+        self._current_params = []
+        self._pending_thumbs.clear()
+        self._status_label.setText("Database reset. Run indexing to populate results.")
+        self._show_placeholder(True)
+        self.reload_autocomplete(load_settings())
+
+    def restore_connection(self) -> None:
+        self._open_connection()
+        self._db_path = self._resolve_db_path()
+        self._update_control_states()
+
+    def is_indexing_active(self) -> bool:
+        return bool(self._indexing_active)
+
+    def start_indexing_now(self) -> None:
+        self._on_index_now()
 
     def _on_query_text_edited(self, text: str) -> None:
         self._pending_completion_text = text
@@ -519,10 +563,11 @@ class TagsTab(QWidget):
         tags: list[labels_util.TagMeta] = list(csv_tags)
         seen_names = {tag.name.lower() for tag in tags}
         db_tags: list[str] = []
-        try:
-            db_tags = list_tag_names(self._conn)
-        except Exception as exc:  # pragma: no cover - defensive logging
-            logger.warning("Failed to load tag names from database: %s", exc)
+        if self._conn is not None:
+            try:
+                db_tags = list_tag_names(self._conn)
+            except Exception as exc:  # pragma: no cover - defensive logging
+                logger.warning("Failed to load tag names from database: %s", exc)
         for name in db_tags:
             cleaned = name.strip()
             if not cleaned:
@@ -716,6 +761,10 @@ class TagsTab(QWidget):
             self._status_label.setText("Enter a query to search tags.")
             self._set_busy(False)
             self._show_placeholder(True)
+            return
+        if self._conn is None:
+            self._status_label.setText("Database connection unavailable.")
+            self._set_busy(False)
             return
         try:
             rows = search_files(
@@ -1021,6 +1070,10 @@ class TagsTab(QWidget):
         self._update_control_states()
 
     def _resolve_db_path(self) -> Path:
+        if self._conn is None:
+            fallback = Path(get_db_path()).expanduser()
+            self._db_display = str(fallback)
+            return fallback
         db_row = self._conn.execute("PRAGMA database_list").fetchone()
         literal = db_row[2] if db_row else None
         if literal and literal not in {":memory:", ""}:

@@ -4,18 +4,21 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Iterable
+from typing import Iterable, TYPE_CHECKING
 
 from PyQt6.QtCore import pyqtSignal
 from PyQt6.QtWidgets import (
     QCheckBox,
     QComboBox,
+    QDialog,
+    QDialogButtonBox,
     QFileDialog,
     QHBoxLayout,
     QDoubleSpinBox,
     QFormLayout,
     QLineEdit,
     QLabel,
+    QMessageBox,
     QPlainTextEdit,
     QPushButton,
     QSpinBox,
@@ -26,9 +29,116 @@ from PyQt6.QtWidgets import (
 
 from core.config import load_settings, save_settings
 from core.settings import EmbedModel, PipelineSettings, TaggerSettings
+from db.admin import reset_database
+from utils.paths import get_db_path
+
+if TYPE_CHECKING:
+    from core.pipeline import ProcessingPipeline
+    from ui.tags_tab import TagsTab
 
 
 logger = logging.getLogger(__name__)
+
+
+def _format_size(value: int) -> str:
+    units = ["B", "KB", "MB", "GB", "TB"]
+    size = float(value)
+    for unit in units:
+        if size < 1024 or unit == units[-1]:
+            if unit == "B":
+                return f"{int(size)} {unit}"
+            return f"{size:.1f} {unit}"
+        size /= 1024
+    return f"{size:.1f} TB"
+
+
+def _database_size(db_path: Path) -> int:
+    total = 0
+    for candidate in (
+        db_path,
+        db_path.with_name(f"{db_path.name}-wal"),
+        db_path.with_name(f"{db_path.name}-shm"),
+    ):
+        try:
+            total += candidate.stat().st_size
+        except OSError:
+            continue
+    return total
+
+
+class ResetDatabaseDialog(QDialog):
+    """Confirm destructive database resets with optional backups."""
+
+    def __init__(self, db_path: Path, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Reset database")
+        self.setModal(True)
+
+        description = QLabel(self)
+        description.setWordWrap(True)
+        size_text = _format_size(_database_size(db_path))
+        description.setText(
+            (
+                "This will delete the current database and recreate an empty schema.\n\n"
+                f"Path: {db_path}\n"
+                f"Current size (including WAL/SHM): {size_text}\n\n"
+                "Existing search results and tags will be lost."
+            )
+        )
+
+        self._backup_check = QCheckBox(
+            "Backup .db / -wal / -shm before deleting (recommended)", self
+        )
+        self._backup_check.setChecked(True)
+
+        self._purge_check = QCheckBox(
+            "Delete HNSW index file (hnsw_cosine.bin) as well", self
+        )
+        self._purge_check.setChecked(True)
+
+        self._rescan_check = QCheckBox("Start indexing immediately after reset", self)
+        self._rescan_check.setChecked(True)
+
+        confirm_label = QLabel("Type RESET to confirm:", self)
+        self._confirm_edit = QLineEdit(self)
+        self._confirm_edit.setPlaceholderText("RESET")
+        self._confirm_edit.textChanged.connect(self._update_button_state)
+
+        self._button_box = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Cancel | QDialogButtonBox.StandardButton.Ok,
+            self,
+        )
+        self._button_box.accepted.connect(self.accept)
+        self._button_box.rejected.connect(self.reject)
+        ok_button = self._button_box.button(QDialogButtonBox.StandardButton.Ok)
+        if ok_button is not None:
+            ok_button.setEnabled(False)
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(description)
+        layout.addWidget(self._backup_check)
+        layout.addWidget(self._purge_check)
+        layout.addWidget(self._rescan_check)
+        layout.addWidget(confirm_label)
+        layout.addWidget(self._confirm_edit)
+        layout.addWidget(self._button_box)
+
+    def _update_button_state(self, text: str) -> None:
+        ok_button = self._button_box.button(QDialogButtonBox.StandardButton.Ok)
+        if ok_button is not None:
+            ok_button.setEnabled(text.strip() == "RESET")
+
+    @property
+    def backup_enabled(self) -> bool:
+        return self._backup_check.isChecked()
+
+    @property
+    def purge_hnsw_enabled(self) -> bool:
+        return self._purge_check.isChecked()
+
+    @property
+    def start_index_enabled(self) -> bool:
+        return self._rescan_check.isChecked()
 
 
 class SettingsTab(QWidget):
@@ -97,6 +207,9 @@ class SettingsTab(QWidget):
         apply_button = QPushButton("Apply", self)
         apply_button.clicked.connect(self._emit_settings)
 
+        self._reset_button = QPushButton("Reset database…", self)
+        self._reset_button.clicked.connect(self._on_reset_database)
+
         form = QFormLayout()
         form.addRow(QLabel("Roots"), self._roots_edit)
         form.addRow(QLabel("Excluded"), self._excluded_edit)
@@ -114,9 +227,15 @@ class SettingsTab(QWidget):
         layout = QVBoxLayout(self)
         layout.addLayout(form)
         layout.addStretch()
-        layout.addWidget(apply_button)
+        buttons = QHBoxLayout()
+        buttons.addWidget(self._reset_button)
+        buttons.addStretch()
+        buttons.addWidget(apply_button)
+        layout.addLayout(buttons)
 
         self._current_settings: PipelineSettings = PipelineSettings()
+        self._pipeline: ProcessingPipeline | None = None
+        self._tags_tab: TagsTab | None = None
         self._load_initial_settings()
 
     def load_settings(self, settings: PipelineSettings) -> None:
@@ -188,6 +307,77 @@ class SettingsTab(QWidget):
         self._tagger_model_edit.setEnabled(is_wd14)
         self._tagger_model_button.setEnabled(is_wd14)
         self._tagger_env_button.setEnabled(is_wd14)
+
+    def set_pipeline(self, pipeline: ProcessingPipeline | None) -> None:
+        self._pipeline = pipeline
+
+    def set_tags_tab(self, tags_tab: TagsTab | None) -> None:
+        self._tags_tab = tags_tab
+
+    def _on_reset_database(self) -> None:
+        db_path = get_db_path()
+        dialog = ResetDatabaseDialog(db_path, self)
+        if dialog.exec() != int(QDialog.DialogCode.Accepted):
+            return
+
+        if self._tags_tab is not None and self._tags_tab.is_indexing_active():
+            QMessageBox.warning(
+                self,
+                "Reset database",
+                "Indexing is currently running. Please wait until it finishes before resetting.",
+            )
+            return
+
+        backup = dialog.backup_enabled
+        purge = dialog.purge_hnsw_enabled
+        start_index = dialog.start_index_enabled
+
+        if self._pipeline is not None:
+            try:
+                self._pipeline.stop()
+            except Exception:  # pragma: no cover - defensive logging
+                logger.exception("Failed to stop processing pipeline before reset")
+
+        if self._tags_tab is not None:
+            self._tags_tab.prepare_for_database_reset()
+
+        try:
+            result = reset_database(db_path, backup=backup, purge_hnsw=purge)
+        except Exception as exc:
+            logger.exception("Database reset failed for %s", db_path)
+            if self._tags_tab is not None:
+                self._tags_tab.restore_connection()
+            QMessageBox.critical(
+                self,
+                "Reset failed",
+                (
+                    "Database reset failed. Ensure no other process is accessing the database.\n"
+                    f"Details: {exc}"
+                ),
+            )
+            return
+
+        if self._tags_tab is not None:
+            self._tags_tab.handle_database_reset()
+
+        backup_paths = [Path(path) for path in result.get("backup_paths", [])]
+        hnsw_deleted = bool(result.get("hnsw_deleted", False))
+        message_lines = ["Database reset completed successfully."]
+        if backup_paths:
+            message_lines.append("Backups saved to:")
+            message_lines.extend(f"  • {path}" for path in backup_paths)
+        else:
+            message_lines.append("No backup files were created.")
+        if purge:
+            if hnsw_deleted:
+                message_lines.append("HNSW index file was deleted.")
+            else:
+                message_lines.append("HNSW index file was not found.")
+
+        QMessageBox.information(self, "Reset database", "\n".join(message_lines))
+
+        if start_index and self._tags_tab is not None:
+            self._tags_tab.start_indexing_now()
 
     def _on_browse_model(self) -> None:
         text_value = self._tagger_model_edit.text().strip()
