@@ -290,9 +290,7 @@ def _compile_expression(
             )
             return clause, [expr.name]
         else:
-            general_thr, character_thr, copyright_thr, default_thr = (
-                _threshold_tuple(thresholds)
-            )
+            general_thr, character_thr, copyright_thr, default_thr = _threshold_tuple(thresholds)
             clause = (
                 "EXISTS ("
                 "SELECT 1 FROM file_tags ft JOIN tags t ON t.id = ft.tag_id "
@@ -300,7 +298,7 @@ def _compile_expression(
                 "AND t.name = ? "
                 "AND ft.score >= CASE t.category "
                 "WHEN 0 THEN ? "
-                "WHEN 1 THEN ? "
+                "WHEN 4 THEN ? "
                 "WHEN 3 THEN ? "
                 "ELSE ? "
                 "END)"
