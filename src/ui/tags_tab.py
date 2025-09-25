@@ -631,6 +631,7 @@ class TagsTab(QWidget):
         self._show_placeholder(True)
         self._update_control_states()
         QTimer.singleShot(0, self._initialise_autocomplete)
+        QTimer.singleShot(0, self._bootstrap_results_if_any)
 
     def _initialise_autocomplete(self) -> None:
         settings = load_settings()
@@ -640,6 +641,35 @@ class TagsTab(QWidget):
         if self._conn is not None:
             return
         self._conn = get_conn(get_db_path())
+
+    def _db_has_files(self) -> bool:
+        if self._conn is None:
+            return False
+        try:
+            row = self._conn.execute("SELECT 1 FROM files LIMIT 1").fetchone()
+        except Exception:
+            return False
+        return bool(row)
+
+    def _bootstrap_results_if_any(self) -> None:
+        if self._db_has_files():
+            self._current_query = "*"
+            self._current_where = "1=1"
+            self._current_params = []
+            self._offset = 0
+            self._results_cache.clear()
+            self._pending_thumbs.clear()
+            self._table_model.removeRows(0, self._table_model.rowCount())
+            self._grid_model.removeRows(0, self._grid_model.rowCount())
+            self._highlight_terms = []
+            self._debug_where.setText("WHERE: 1=1")
+            self._debug_params.setText("Params: []")
+            self._debug_group.setVisible(False)
+            self._show_placeholder(False)
+            self._fetch_results(reset=True)
+        else:
+            self._show_placeholder(True)
+            self._status_label.setText("No results yet. Click 'Index now' to scan your library.")
 
     def _close_connection(self) -> None:
         if self._conn is None:
