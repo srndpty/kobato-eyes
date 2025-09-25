@@ -238,22 +238,17 @@ _FALLBACK_THRESHOLDS: dict[int, float] = {
 }
 
 
-def _normalize_thresholds(
-    thresholds: Mapping[int, float] | None,
-) -> dict[int, float]:
+def _normalize_thresholds(thresholds: Mapping[int, float]) -> dict[int, float]:
     mapping = dict(_FALLBACK_THRESHOLDS)
-    if thresholds:
-        for key, value in thresholds.items():
-            try:
-                mapping[int(key)] = float(value)
-            except (TypeError, ValueError):
-                continue
+    for key, value in thresholds.items():
+        try:
+            mapping[int(key)] = float(value)
+        except (TypeError, ValueError):
+            continue
     return mapping
 
 
-def _threshold_tuple(
-    thresholds: Mapping[int, float] | None,
-) -> tuple[float, float, float, float]:
+def _threshold_tuple(thresholds: Mapping[int, float]) -> tuple[float, float, float, float]:
     normalized = _normalize_thresholds(thresholds)
     return (
         normalized.get(0, 0.0),
@@ -287,43 +282,59 @@ def _compile_expression(
     thresholds: Mapping[int, float] | None,
 ) -> tuple[str, list[object]]:
     if isinstance(expr, _TagExpr):
-        general_thr, character_thr, copyright_thr, default_thr = _threshold_tuple(
-            thresholds
-        )
-        clause = (
-            "EXISTS ("
-            "SELECT 1 FROM file_tags ft JOIN tags t ON t.id = ft.tag_id "
-            f"WHERE ft.file_id = {file_pk(file_alias)} "
-            "AND t.name = ? "
-            "AND ft.score >= CASE t.category "
-            "WHEN 0 THEN ? "
-            "WHEN 1 THEN ? "
-            "WHEN 3 THEN ? "
-            "ELSE ? "
-            "END)"
-        )
-        return (
-            clause,
-            [
-                expr.name,
-                general_thr,
-                character_thr,
-                copyright_thr,
-                default_thr,
-            ],
-        )
+        if thresholds is None:
+            clause = (
+                "EXISTS ("
+                "SELECT 1 FROM file_tags ft JOIN tags t ON t.id = ft.tag_id "
+                f"WHERE ft.file_id = {file_pk(file_alias)} AND t.name = ?)"
+            )
+            return clause, [expr.name]
+        else:
+            general_thr, character_thr, copyright_thr, default_thr = (
+                _threshold_tuple(thresholds)
+            )
+            clause = (
+                "EXISTS ("
+                "SELECT 1 FROM file_tags ft JOIN tags t ON t.id = ft.tag_id "
+                f"WHERE ft.file_id = {file_pk(file_alias)} "
+                "AND t.name = ? "
+                "AND ft.score >= CASE t.category "
+                "WHEN 0 THEN ? "
+                "WHEN 1 THEN ? "
+                "WHEN 3 THEN ? "
+                "ELSE ? "
+                "END)"
+            )
+            return (
+                clause,
+                [
+                    expr.name,
+                    general_thr,
+                    character_thr,
+                    copyright_thr,
+                    default_thr,
+                ],
+            )
     if isinstance(expr, _CategoryExpr):
-        normalized = _normalize_thresholds(thresholds)
         category_key = int(expr.category)
-        threshold_value = float(normalized.get(category_key, 0.0))
-        clause = (
-            "EXISTS ("
-            "SELECT 1 FROM file_tags ft JOIN tags t ON t.id = ft.tag_id "
-            f"WHERE ft.file_id = {file_pk(file_alias)} "
-            "AND t.category = ? "
-            "AND ft.score >= ?)"
-        )
-        return clause, [category_key, threshold_value]
+        if thresholds is None:
+            clause = (
+                "EXISTS ("
+                "SELECT 1 FROM file_tags ft JOIN tags t ON t.id = ft.tag_id "
+                f"WHERE ft.file_id = {file_pk(file_alias)} AND t.category = ?)"
+            )
+            return clause, [category_key]
+        else:
+            normalized = _normalize_thresholds(thresholds)
+            threshold_value = float(normalized.get(category_key, 0.0))
+            clause = (
+                "EXISTS ("
+                "SELECT 1 FROM file_tags ft JOIN tags t ON t.id = ft.tag_id "
+                f"WHERE ft.file_id = {file_pk(file_alias)} "
+                "AND t.category = ? "
+                "AND ft.score >= ?)"
+            )
+            return clause, [category_key, threshold_value]
     if isinstance(expr, _ScoreExpr):
         clause = (
             "EXISTS (SELECT 1 FROM file_tags ft "
