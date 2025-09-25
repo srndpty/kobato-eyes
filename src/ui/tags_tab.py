@@ -25,7 +25,7 @@ from PyQt6.QtCore import (
     QTimer,
     pyqtSignal,
 )
-from PyQt6.QtGui import QPixmap, QStandardItem, QStandardItemModel, QTextDocument
+from PyQt6.QtGui import QColor, QPixmap, QStandardItem, QStandardItemModel, QTextDocument
 from PyQt6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -163,6 +163,38 @@ def _filter_tags_by_threshold(tag_rows):
     return out
 
 
+def _rel_luma(color: QColor) -> float:
+    """Return the relative luminance of an sRGB color."""
+
+    def _channel(value: int) -> float:
+        normalized = value / 255.0
+        if normalized <= 0.04045:
+            return normalized / 12.92
+        return ((normalized + 0.055) / 1.055) ** 2.4
+
+    return (
+        0.2126 * _channel(color.red())
+        + 0.7152 * _channel(color.green())
+        + 0.0722 * _channel(color.blue())
+    )
+
+
+def _pick_highlight_colors(palette) -> tuple[str, str]:
+    """Choose highlight background/foreground colors based on the palette."""
+
+    base = palette.window().color()
+    text = palette.text().color()
+    is_dark = (_rel_luma(base) < 0.5) or (_rel_luma(text) > 0.7)
+
+    if is_dark:
+        background = "#FFD54F"
+        foreground = "#000000"
+    else:
+        background = "#FFF59D"
+        foreground = "#000000"
+    return background, foreground
+
+
 class _HighlightDelegate(QStyledItemDelegate):
     """Render text with highlighted substrings supplied by a provider."""
 
@@ -175,7 +207,13 @@ class _HighlightDelegate(QStyledItemDelegate):
         self._terms_provider = terms_provider
 
     @staticmethod
-    def _to_html_with_highlight(text: str, terms: list[str]) -> str:
+    def _to_html_with_highlight(
+        text: str,
+        terms: list[str],
+        *,
+        bg: str,
+        fg: str,
+    ) -> str:
         if not text or not terms:
             return html.escape(text or "")
         src = text
@@ -211,9 +249,10 @@ class _HighlightDelegate(QStyledItemDelegate):
         for start, end in merged:
             if last < start:
                 output.append(html.escape(src[last:start]))
-            output.append('<span style="background-color:#fff3a3;">')
-            output.append(html.escape(src[start:end]))
-            output.append("</span>")
+            escaped = html.escape(src[start:end])
+            output.append(
+                f'<span style="background-color:{bg}; color:{fg};">{escaped}</span>'
+            )
             last = end
         if last < len(src):
             output.append(html.escape(src[last:]))
@@ -228,10 +267,18 @@ class _HighlightDelegate(QStyledItemDelegate):
 
         text = str(index.data() or "")
         terms = list(self._terms_provider() or [])
+        background, foreground = _pick_highlight_colors(option.palette)
         doc = QTextDocument()
         doc.setDocumentMargin(0)
         doc.setDefaultFont(opt.font)
-        doc.setHtml(self._to_html_with_highlight(text, terms))
+        doc.setHtml(
+            self._to_html_with_highlight(
+                text,
+                terms,
+                bg=background,
+                fg=foreground,
+            )
+        )
         rect = option.rect
         painter.save()
         painter.translate(rect.topLeft())
@@ -242,10 +289,18 @@ class _HighlightDelegate(QStyledItemDelegate):
     def sizeHint(self, option: QStyleOptionViewItem, index):  # noqa: D401 - Qt signature
         text = str(index.data() or "")
         terms = list(self._terms_provider() or [])
+        background, foreground = _pick_highlight_colors(option.palette)
         doc = QTextDocument()
         doc.setDocumentMargin(0)
         doc.setDefaultFont(option.font)
-        doc.setHtml(self._to_html_with_highlight(text, terms))
+        doc.setHtml(
+            self._to_html_with_highlight(
+                text,
+                terms,
+                bg=background,
+                fg=foreground,
+            )
+        )
         available_width = option.rect.width()
         if available_width <= 0 and option.widget is not None:
             available_width = option.widget.width()
