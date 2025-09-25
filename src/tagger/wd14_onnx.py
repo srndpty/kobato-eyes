@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import dataclass
 from pathlib import Path
+from time import perf_counter
 from typing import Iterable, Sequence
+import weakref
 
 import cv2
 import numpy as np
@@ -26,6 +29,9 @@ else:
 ONNXRUNTIME_MISSING_MESSAGE = "onnxruntime is required. Try: pip install onnxruntime-gpu  (or onnxruntime for CPU)"
 _CUDA_PROVIDER = "CUDAExecutionProvider"
 _CPU_PROVIDER = "CPUExecutionProvider"
+
+
+_ACTIVE_TAGGERS: "weakref.WeakSet[WD14Tagger]"  # type: ignore[name-defined]
 
 
 @dataclass(frozen=True)
@@ -93,6 +99,7 @@ class WD14Tagger(ITagger):
         self._default_max_tags = dict(default_max_tags or {})
 
         session_options = ort.SessionOptions()
+        _configure_session_options(session_options)
         available_providers = get_available_providers()
         if available_providers:
             logger.info("WD14: available ONNX providers: %s", ", ".join(available_providers))
@@ -151,6 +158,9 @@ class WD14Tagger(ITagger):
         self._session = session
         self._input_name = self._session.get_inputs()[0].name
         self._output_names = [output.name for output in self._session.get_outputs()]
+
+        _log_provider_details(self._session, chosen_providers)
+        _ACTIVE_TAGGERS.add(self)
 
         if len(self._output_names) != 1:
             raise RuntimeError("Expected a single output tensor from WD14 ONNX model, got " f"{self._output_names}")
@@ -285,8 +295,14 @@ class WD14Tagger(ITagger):
         if not image_list:
             return []
 
+        total_start = perf_counter()
+        preprocess_start = perf_counter()
         batch = np.vstack([self._preprocess(image) for image in image_list])
+        preprocess_ms = (perf_counter() - preprocess_start) * 1000.0
+
+        ort_start = perf_counter()
         outputs = self._session.run(self._output_names, {self._input_name: batch})
+        ort_ms = (perf_counter() - ort_start) * 1000.0
         logits = outputs[0]
 
         if logits.shape[1] != len(self._labels):
@@ -294,6 +310,7 @@ class WD14Tagger(ITagger):
                 f"Model output dimension {logits.shape[1]} does not match label count {len(self._labels)}"
             )
 
+        post_start = perf_counter()
         # probabilities = _sigmoid(logits)
         # Auto-detect: if the tensor already looks like probabilities in [0,1],
         # skip sigmoid; otherwise apply sigmoid to logits.
@@ -346,7 +363,99 @@ class WD14Tagger(ITagger):
 
             predictions.sort(key=lambda item: item.score, reverse=True)
             results.append(TagResult(tags=predictions))
+        post_ms = (perf_counter() - post_start) * 1000.0
+        total_ms = (perf_counter() - total_start) * 1000.0
+
+        batch_size = len(image_list)
+        imgs_per_second = batch_size / (total_ms / 1000.0) if total_ms > 0.0 else float("inf")
+        logger.info(
+            "WD14 batch=%d preprocess=%.2fms ort=%.2fms post=%.2fms total=%.2fms imgs/s=%.2f",
+            batch_size,
+            preprocess_ms,
+            ort_ms,
+            post_ms,
+            total_ms,
+            imgs_per_second,
+        )
         return results
 
+    def end_profile(self) -> str | None:
+        """Finish ONNX Runtime profiling for this tagger instance."""
 
-__all__ = ["WD14Tagger", "ensure_onnxruntime", "get_available_providers", "ONNXRUNTIME_MISSING_MESSAGE"]
+        session = getattr(self, "_session", None)
+        if session is None:
+            return None
+        if not hasattr(session, "end_profiling"):
+            return None
+        try:
+            profile_path = session.end_profiling()
+        except Exception as exc:  # pragma: no cover - defensive logging
+            logger.warning("WD14: failed to finalise profiling: %s", exc)
+            return None
+        if profile_path:
+            logger.info("WD14: profiling saved to %s", profile_path)
+        return profile_path
+
+
+def end_all_profiles() -> None:
+    """Invoke :meth:`WD14Tagger.end_profile` for all live tagger instances."""
+
+    for tagger in list(_ACTIVE_TAGGERS):
+        try:
+            tagger.end_profile()
+        except Exception:  # pragma: no cover - defensive logging
+            logger.exception("WD14: failed to end profiling for %s", tagger)
+
+
+def _configure_session_options(options: "ort.SessionOptions") -> None:
+    """Apply default optimisation, logging, and profiling settings."""
+
+    options.graph_optimization_level = getattr(ort.GraphOptimizationLevel, "ORT_ENABLE_ALL", 99)
+    options.enable_profiling = True
+    options.log_severity_level = 0
+    profile_dir = _resolve_profile_dir()
+    profile_dir.mkdir(parents=True, exist_ok=True)
+    options.profile_file_prefix = str(profile_dir / "wd14")
+    logger.info("WD14: profiling enabled (prefix=%s)", options.profile_file_prefix)
+
+
+def _log_provider_details(session: "ort.InferenceSession", chosen: Sequence[str]) -> None:
+    """Log provider details for diagnostics in a consistent format."""
+
+    try:
+        session_providers = list(session.get_providers())
+    except Exception as exc:  # pragma: no cover - defensive logging
+        logger.warning("WD14: failed to query session providers: %s", exc)
+        session_providers = []
+    try:
+        provider_options = session.get_provider_options()
+    except Exception as exc:  # pragma: no cover - defensive logging
+        logger.warning("WD14: failed to query provider options: %s", exc)
+        provider_options = {}
+    logger.info(
+        "WD14 providers=%s session_providers=%s options=%s",
+        list(chosen),
+        session_providers,
+        provider_options,
+    )
+
+
+def _resolve_profile_dir() -> Path:
+    """Resolve the directory used for ONNX Runtime profile output files."""
+
+    base = os.environ.get("APPDATA")
+    if base:
+        return Path(base) / "kobato-eyes" / "logs"
+    return Path.home() / "kobato-eyes" / "logs"
+
+
+_ACTIVE_TAGGERS = weakref.WeakSet()
+
+
+__all__ = [
+    "WD14Tagger",
+    "end_all_profiles",
+    "ensure_onnxruntime",
+    "get_available_providers",
+    "ONNXRUNTIME_MISSING_MESSAGE",
+]
