@@ -4,11 +4,11 @@ from __future__ import annotations
 
 import logging
 import os
+import weakref
 from dataclasses import dataclass
 from pathlib import Path
 from time import perf_counter
 from typing import Iterable, Sequence
-import weakref
 
 import cv2
 import numpy as np
@@ -150,11 +150,11 @@ class WD14Tagger(ITagger):
         if session is None or chosen_providers is None:
             raise RuntimeError("WD14: failed to initialise ONNX Runtime session") from last_error
         if requested_providers is None and chosen_providers == [_CUDA_PROVIDER]:
-            logger.info("WD14: using %s", _CUDA_PROVIDER)
+            print("WD14: using %s", _CUDA_PROVIDER)
         elif requested_providers is None and chosen_providers == [_CPU_PROVIDER]:
-            logger.info("WD14: using %s", _CPU_PROVIDER)
+            print("WD14: using %s", _CPU_PROVIDER)
         else:
-            logger.info("WD14: using providers %s", chosen_providers)
+            print("WD14: using providers %s", chosen_providers)
         self._session = session
         self._input_name = self._session.get_inputs()[0].name
         self._output_names = [output.name for output in self._session.get_outputs()]
@@ -213,15 +213,6 @@ class WD14Tagger(ITagger):
         if not labels:
             raise ValueError("No labels parsed from WD14 label CSV")
         return labels
-
-    # original
-    # def _preprocess(self, image: Image.Image) -> np.ndarray:
-    #     rgb = image.convert("RGB")
-    #     resample = getattr(Image, "Resampling", Image).BICUBIC  # type: ignore[attr-defined]
-    #     resized = rgb.resize((self._input_size, self._input_size), resample)
-    #     array = np.asarray(resized, dtype=np.float32) / 255.0  # 0..1
-    #     # ★ BGR反転もしない、転置もしない → NHWC のまま
-    #     return np.expand_dims(array, 0)  # (1, H, W, 3)
 
     def make_square(self, img, target_size):
         old_size = img.shape[:2]

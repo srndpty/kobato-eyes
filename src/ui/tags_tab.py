@@ -85,31 +85,24 @@ def _category_thresholds() -> dict[TagCategory, float]:
 
 def _filter_tags_by_threshold(tag_rows):
     """tag_rows は (name, score) か (name, score, category) を想定。"""
-    thr = _category_thresholds()
     out = []
     for row in tag_rows:
         # 形状を吸収
         if isinstance(row, dict):
             name = row.get("name")
             score = float(row.get("score", 0.0))
-            cat = row.get("category", 0)
+            # cat = row.get("category", 0)
         else:
             if len(row) == 3:
                 name, score, cat = row
             elif len(row) == 2:
                 name, score = row
-                cat = 0
+                # cat = 0
             else:
                 # 予期しない形 → 表示しない
                 continue
-        # cat を int/Enum に正規化
-        try:
-            cat_enum = cat if isinstance(cat, TagCategory) else TagCategory(int(cat))
-        except Exception:
-            # 'general' 等の文字ならマップ
-            m = {"general": 0, "character": 1, "rating": 2, "copyright": 3, "artist": 4, "meta": 5}
-            cat_enum = TagCategory(m.get(str(cat).lower(), 0))
-        if float(score) >= thr.get(cat_enum, 0.0):
+
+        if float(score) >= 0.1:  # 0.1以上で固定！ 細かいロングテールタグ問題が鬱陶しいので強制的に解決
             out.append((str(name), float(score)))
     return out
 
@@ -912,14 +905,8 @@ class TagsTab(QWidget):
             return None
 
     @staticmethod
-    def _format_score(score: float) -> str:
-        formatted = f"{score:.2f}"
-        # trimmed = formatted.rstrip("0").rstrip(".")
-        return formatted or "0.00"
-
-    @staticmethod
     def _format_tags(tags: Iterable[tuple[str, float]]) -> str:
-        parts = [f"{name} ({TagsTab._format_score(score)})" for name, score in tags]
+        parts = [f"{name} ({score:.2f})" for name, score in tags]
         return ", ".join(parts)
 
     @staticmethod
