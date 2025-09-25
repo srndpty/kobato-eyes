@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import html
 import logging
+import re
 import sqlite3
 import subprocess
 import sys
@@ -11,10 +13,22 @@ from datetime import datetime
 from pathlib import Path
 from typing import Callable, Iterable, List, Optional, Sequence
 
-from PyQt6.QtCore import QAbstractListModel, QModelIndex, QObject, QRunnable, QSize, Qt, QThreadPool, QTimer, pyqtSignal
-from PyQt6.QtGui import QPixmap, QStandardItem, QStandardItemModel
+from PyQt6.QtCore import (
+    QAbstractListModel,
+    QModelIndex,
+    QObject,
+    QRunnable,
+    QRectF,
+    QSize,
+    Qt,
+    QThreadPool,
+    QTimer,
+    pyqtSignal,
+)
+from PyQt6.QtGui import QColor, QPixmap, QStandardItem, QStandardItemModel, QTextDocument
 from PyQt6.QtWidgets import (
     QAbstractItemView,
+    QApplication,
     QButtonGroup,
     QCompleter,
     QGroupBox,
@@ -26,6 +40,9 @@ from PyQt6.QtWidgets import (
     QMessageBox,
     QProgressDialog,
     QPushButton,
+    QStyledItemDelegate,
+    QStyle,
+    QStyleOptionViewItem,
     QStackedWidget,
     QTableView,
     QToolButton,
@@ -51,6 +68,16 @@ logger = logging.getLogger(__name__)
 
 _CATEGORY_PREFIXES = [f"{category.name.lower()}:" for category in TagCategory]
 _RESERVED_COMPLETIONS = ["AND", "OR", "NOT", "category:", *_CATEGORY_PREFIXES]
+_RESERVED = {"and", "or", "not"}
+_PREFIXES = (
+    "category:",
+    "general:",
+    "character:",
+    "copyright:",
+    "artist:",
+    "meta:",
+    "rating:",
+)
 _CATEGORY_KEY_LOOKUP = {
     "0": TagCategory.GENERAL,
     "general": TagCategory.GENERAL,
@@ -65,6 +92,37 @@ _CATEGORY_KEY_LOOKUP = {
     "5": TagCategory.META,
     "meta": TagCategory.META,
 }
+
+
+def _extract_positive_terms(query: str) -> list[str]:
+    """Extract user-entered terms eligible for highlighting."""
+
+    q = (query or "").strip()
+    if not q:
+        return []
+    tokens: list[str] = []
+    for raw in re.split(r"\s+", q):
+        t = raw.strip().strip('\"\'')
+        if not t:
+            continue
+        low = t.lower()
+        if low in _RESERVED:
+            continue
+        if any(low.startswith(prefix) for prefix in _PREFIXES):
+            parts = low.split(":", 1)
+            rest = parts[1] if len(parts) == 2 else ""
+            if rest:
+                tokens.append(rest)
+            continue
+        tokens.append(t)
+    uniq: list[str] = []
+    seen: set[str] = set()
+    for token in sorted(tokens, key=lambda s: (-len(s), s.lower())):
+        key = token.lower()
+        if key not in seen:
+            seen.add(key)
+            uniq.append(token)
+    return uniq
 
 
 def _category_thresholds() -> dict[TagCategory, float]:
@@ -103,6 +161,154 @@ def _filter_tags_by_threshold(tag_rows):
             out.append((str(name), float(score)))
 
     return out
+
+
+def _rel_luma(color: QColor) -> float:
+    """Return the relative luminance of an sRGB color."""
+
+    def _channel(value: int) -> float:
+        normalized = value / 255.0
+        if normalized <= 0.04045:
+            return normalized / 12.92
+        return ((normalized + 0.055) / 1.055) ** 2.4
+
+    return (
+        0.2126 * _channel(color.red())
+        + 0.7152 * _channel(color.green())
+        + 0.0722 * _channel(color.blue())
+    )
+
+
+def _pick_highlight_colors(palette) -> tuple[str, str]:
+    """Choose highlight background/foreground colors based on the palette."""
+
+    base = palette.window().color()
+    text = palette.text().color()
+    is_dark = (_rel_luma(base) < 0.5) or (_rel_luma(text) > 0.7)
+
+    if is_dark:
+        background = "#FFD54F"
+        foreground = "#000000"
+    else:
+        background = "#FFF59D"
+        foreground = "#000000"
+    return background, foreground
+
+
+class _HighlightDelegate(QStyledItemDelegate):
+    """Render text with highlighted substrings supplied by a provider."""
+
+    def __init__(
+        self,
+        terms_provider: Callable[[], Iterable[str]],
+        parent: QWidget | None = None,
+    ) -> None:  # noqa: D401 - Qt signature
+        super().__init__(parent)
+        self._terms_provider = terms_provider
+
+    @staticmethod
+    def _to_html_with_highlight(
+        text: str,
+        terms: list[str],
+        *,
+        bg: str,
+        fg: str,
+    ) -> str:
+        if not text or not terms:
+            return html.escape(text or "")
+        src = text
+        spans: list[tuple[int, int]] = []
+        lower = src.lower()
+        for term in terms:
+            t = term.lower()
+            if not t:
+                continue
+            start = 0
+            while True:
+                index = lower.find(t, start)
+                if index < 0:
+                    break
+                spans.append((index, index + len(t)))
+                start = index + len(t)
+        if not spans:
+            return html.escape(src)
+
+        spans.sort()
+        merged: list[tuple[int, int]] = []
+        current_start, current_end = spans[0]
+        for start, end in spans[1:]:
+            if start <= current_end:
+                current_end = max(current_end, end)
+            else:
+                merged.append((current_start, current_end))
+                current_start, current_end = start, end
+        merged.append((current_start, current_end))
+
+        output: list[str] = []
+        last = 0
+        for start, end in merged:
+            if last < start:
+                output.append(html.escape(src[last:start]))
+            escaped = html.escape(src[start:end])
+            output.append(
+                f'<span style="background-color:{bg}; color:{fg};">{escaped}</span>'
+            )
+            last = end
+        if last < len(src):
+            output.append(html.escape(src[last:]))
+        return "".join(output)
+
+    def paint(self, painter, option: QStyleOptionViewItem, index):  # noqa: D401 - Qt signature
+        opt = QStyleOptionViewItem(option)
+        self.initStyleOption(opt, index)
+        opt.text = ""
+        style = opt.widget.style() if opt.widget else QApplication.style()
+        style.drawControl(QStyle.ControlElement.CE_ItemViewItem, opt, painter, opt.widget)
+
+        text = str(index.data() or "")
+        terms = list(self._terms_provider() or [])
+        background, foreground = _pick_highlight_colors(option.palette)
+        doc = QTextDocument()
+        doc.setDocumentMargin(0)
+        doc.setDefaultFont(opt.font)
+        doc.setHtml(
+            self._to_html_with_highlight(
+                text,
+                terms,
+                bg=background,
+                fg=foreground,
+            )
+        )
+        rect = option.rect
+        painter.save()
+        painter.translate(rect.topLeft())
+        doc.setTextWidth(rect.width())
+        doc.drawContents(painter, QRectF(0, 0, rect.width(), rect.height()))
+        painter.restore()
+
+    def sizeHint(self, option: QStyleOptionViewItem, index):  # noqa: D401 - Qt signature
+        text = str(index.data() or "")
+        terms = list(self._terms_provider() or [])
+        background, foreground = _pick_highlight_colors(option.palette)
+        doc = QTextDocument()
+        doc.setDocumentMargin(0)
+        doc.setDefaultFont(option.font)
+        doc.setHtml(
+            self._to_html_with_highlight(
+                text,
+                terms,
+                bg=background,
+                fg=foreground,
+            )
+        )
+        available_width = option.rect.width()
+        if available_width <= 0 and option.widget is not None:
+            available_width = option.widget.width()
+        if available_width > 0:
+            doc.setTextWidth(available_width)
+        size = doc.size().toSize()
+        size.setHeight(size.height() + 4)
+        return size
 
 
 class _ThumbnailSignal(QObject):
@@ -336,6 +542,14 @@ class TagsTab(QWidget):
         self._grid_view.setGridSize(QSize(self._THUMB_SIZE + 48, self._THUMB_SIZE + 72))
         self._grid_view.doubleClicked.connect(self._on_grid_double_clicked)
         self._grid_view.setModel(self._grid_model)
+
+        self._highlight_terms: list[str] = []
+        self._tags_delegate = _HighlightDelegate(lambda: self._highlight_terms, self._table_view)
+        tags_col = self._table_model.columnCount() - 1
+        if tags_col >= 0:
+            self._table_view.setItemDelegateForColumn(tags_col, self._tags_delegate)
+        self._grid_delegate = _HighlightDelegate(lambda: self._highlight_terms, self._grid_view)
+        self._grid_view.setItemDelegate(self._grid_delegate)
 
         self._stack.addWidget(self._placeholder)
         self._stack.addWidget(self._table_view)
@@ -732,12 +946,15 @@ class TagsTab(QWidget):
 
     def _on_search_clicked(self) -> None:
         query = self._query_edit.text().strip()
+        self._highlight_terms = _extract_positive_terms(query) if query else []
         self._set_busy(True)
         try:
             fragment = translate_query(query, file_alias="f")
         except ValueError as exc:
             self._status_label.setText(str(exc))
             self._set_busy(False)
+            self._table_view.viewport().update()
+            self._grid_view.viewport().update()
             return
 
         self._debug_where.setText(f"WHERE: {fragment.where}")
@@ -753,6 +970,8 @@ class TagsTab(QWidget):
         self._table_model.removeRows(0, self._table_model.rowCount())
         self._grid_model.removeRows(0, self._grid_model.rowCount())
         self._fetch_results(reset=True)
+        self._table_view.viewport().update()
+        self._grid_view.viewport().update()
 
     def _on_load_more_clicked(self) -> None:
         if not self._current_where:
@@ -1001,6 +1220,8 @@ class TagsTab(QWidget):
             grid_item = QStandardItem(where_stmt)
             grid_item.setEditable(False)
             self._grid_model.appendRow(grid_item)
+        self._table_view.viewport().update()
+        self._grid_view.viewport().update()
 
     def _update_control_states(self) -> None:
         search_enabled = not self._search_busy and not self._indexing_active
