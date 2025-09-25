@@ -978,8 +978,16 @@ class TagsTab(QWidget):
         query = self._query_edit.text().strip()
         self._highlight_terms = _extract_positive_terms(query) if query else []
         self._set_busy(True)
+        thresholds = {
+            int(category): float(value)
+            for category, value in (self._tag_thresholds or {}).items()
+        }
         try:
-            fragment = translate_query(query, file_alias="f")
+            fragment = translate_query(
+                query,
+                file_alias="f",
+                thresholds=thresholds,
+            )
         except ValueError as exc:
             self._status_label.setText(str(exc))
             self._set_busy(False)

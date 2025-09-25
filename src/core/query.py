@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 import shlex
 from dataclasses import dataclass
-from typing import Sequence
+from typing import Mapping, Sequence
 
 from tagger.base import TagCategory
 
@@ -230,29 +230,109 @@ class _Parser:
         }
 
 
-def _build_sql(expr: _Expression | None, *, file_alias: str = "f") -> QueryFragment:
+_FALLBACK_THRESHOLDS: dict[int, float] = {
+    0: 0.35,
+    1: 0.25,
+    3: 0.25,
+    -1: 0.0,
+}
+
+
+def _normalize_thresholds(thresholds: Mapping[int, float]) -> dict[int, float]:
+    mapping = dict(_FALLBACK_THRESHOLDS)
+    for key, value in thresholds.items():
+        try:
+            mapping[int(key)] = float(value)
+        except (TypeError, ValueError):
+            continue
+    return mapping
+
+
+def _threshold_tuple(thresholds: Mapping[int, float]) -> tuple[float, float, float, float]:
+    normalized = _normalize_thresholds(thresholds)
+    return (
+        normalized.get(0, 0.0),
+        normalized.get(1, 0.0),
+        normalized.get(3, 0.0),
+        normalized.get(-1, 0.0),
+    )
+
+
+def _build_sql(
+    expr: _Expression | None,
+    *,
+    file_alias: str = "f",
+    thresholds: Mapping[int, float] | None = None,
+) -> QueryFragment:
     if expr is None:
         return QueryFragment(where="1=1", params=[])
 
-    where, params = _compile_expression(expr, file_alias=file_alias)
+    where, params = _compile_expression(
+        expr,
+        file_alias=file_alias,
+        thresholds=thresholds,
+    )
     return QueryFragment(where=where, params=params)
 
 
-def _compile_expression(expr: _Expression, *, file_alias: str) -> tuple[str, list[object]]:
+def _compile_expression(
+    expr: _Expression,
+    *,
+    file_alias: str,
+    thresholds: Mapping[int, float] | None,
+) -> tuple[str, list[object]]:
     if isinstance(expr, _TagExpr):
-        clause = (
-            "EXISTS ("
-            "SELECT 1 FROM file_tags ft JOIN tags t ON t.id = ft.tag_id "
-            f"WHERE ft.file_id = {file_pk(file_alias)} AND t.name = ?)"
-        )
-        return clause, [expr.name]
+        if thresholds is None:
+            clause = (
+                "EXISTS ("
+                "SELECT 1 FROM file_tags ft JOIN tags t ON t.id = ft.tag_id "
+                f"WHERE ft.file_id = {file_pk(file_alias)} AND t.name = ?)"
+            )
+            return clause, [expr.name]
+        else:
+            general_thr, character_thr, copyright_thr, default_thr = _threshold_tuple(thresholds)
+            clause = (
+                "EXISTS ("
+                "SELECT 1 FROM file_tags ft JOIN tags t ON t.id = ft.tag_id "
+                f"WHERE ft.file_id = {file_pk(file_alias)} "
+                "AND t.name = ? "
+                "AND ft.score >= CASE t.category "
+                "WHEN 0 THEN ? "
+                "WHEN 4 THEN ? "
+                "WHEN 3 THEN ? "
+                "ELSE ? "
+                "END)"
+            )
+            return (
+                clause,
+                [
+                    expr.name,
+                    general_thr,
+                    character_thr,
+                    copyright_thr,
+                    default_thr,
+                ],
+            )
     if isinstance(expr, _CategoryExpr):
-        clause = (
-            "EXISTS ("
-            "SELECT 1 FROM file_tags ft JOIN tags t ON t.id = ft.tag_id "
-            f"WHERE ft.file_id = {file_pk(file_alias)} AND t.category = ?)"
-        )
-        return clause, [int(expr.category)]
+        category_key = int(expr.category)
+        if thresholds is None:
+            clause = (
+                "EXISTS ("
+                "SELECT 1 FROM file_tags ft JOIN tags t ON t.id = ft.tag_id "
+                f"WHERE ft.file_id = {file_pk(file_alias)} AND t.category = ?)"
+            )
+            return clause, [category_key]
+        else:
+            normalized = _normalize_thresholds(thresholds)
+            threshold_value = float(normalized.get(category_key, 0.0))
+            clause = (
+                "EXISTS ("
+                "SELECT 1 FROM file_tags ft JOIN tags t ON t.id = ft.tag_id "
+                f"WHERE ft.file_id = {file_pk(file_alias)} "
+                "AND t.category = ? "
+                "AND ft.score >= ?)"
+            )
+            return clause, [category_key, threshold_value]
     if isinstance(expr, _ScoreExpr):
         clause = (
             "EXISTS (SELECT 1 FROM file_tags ft "
@@ -260,23 +340,40 @@ def _compile_expression(expr: _Expression, *, file_alias: str) -> tuple[str, lis
         )
         return clause, [expr.threshold]
     if isinstance(expr, _UnaryExpr):
-        inner, params = _compile_expression(expr.operand, file_alias=file_alias)
+        inner, params = _compile_expression(
+            expr.operand,
+            file_alias=file_alias,
+            thresholds=thresholds,
+        )
         return f"NOT ({inner})", params
     if isinstance(expr, _BinaryExpr):
-        left_sql, left_params = _compile_expression(expr.left, file_alias=file_alias)
-        right_sql, right_params = _compile_expression(expr.right, file_alias=file_alias)
+        left_sql, left_params = _compile_expression(
+            expr.left,
+            file_alias=file_alias,
+            thresholds=thresholds,
+        )
+        right_sql, right_params = _compile_expression(
+            expr.right,
+            file_alias=file_alias,
+            thresholds=thresholds,
+        )
         combined = f"({left_sql}) {expr.op} ({right_sql})"
         return combined, left_params + right_params
 
     raise TypeError(f"Unhandled expression type: {expr}")
 
 
-def translate_query(query: str, *, file_alias: str = "f") -> QueryFragment:
+def translate_query(
+    query: str,
+    *,
+    file_alias: str = "f",
+    thresholds: Mapping[int, float] | None = None,
+) -> QueryFragment:
     """Convert a simplified tag query string into an SQL WHERE fragment."""
     tokens = _tokenize(query)
     parser = _Parser(tokens)
     expr = parser.parse()
-    return _build_sql(expr, file_alias=file_alias)
+    return _build_sql(expr, file_alias=file_alias, thresholds=thresholds)
 
 
 __all__ = ["QueryFragment", "file_pk", "translate_query"]
