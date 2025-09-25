@@ -6,6 +6,77 @@ import sqlite3
 from collections.abc import Iterable, Mapping, Sequence
 from typing import Any
 
+_CATEGORY_KEY_LOOKUP = {
+    "0": 0,
+    "general": 0,
+    "1": 1,
+    "character": 1,
+    "2": 2,
+    "rating": 2,
+    "3": 3,
+    "copyright": 3,
+    "4": 4,
+    "artist": 4,
+    "5": 5,
+    "meta": 5,
+}
+
+_DEFAULT_CATEGORY_THRESHOLDS = {
+    0: 0.35,
+    1: 0.25,
+    3: 0.25,
+}
+
+
+def _normalise_category(value: object) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, (int, float)):
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
+    text = str(value).strip()
+    if not text:
+        return None
+    lowered = text.lower()
+    if lowered in _CATEGORY_KEY_LOOKUP:
+        return _CATEGORY_KEY_LOOKUP[lowered]
+    try:
+        return int(float(text))
+    except (TypeError, ValueError):
+        return None
+
+
+def _load_tag_thresholds(conn: sqlite3.Connection) -> dict[int, float]:
+    thresholds: dict[int, float] = {}
+    try:
+        table_exists = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='tagger_thresholds'"
+        ).fetchone()
+    except sqlite3.Error:
+        table_exists = None
+    if table_exists is not None:
+        cursor = conn.execute("SELECT category, threshold FROM tagger_thresholds")
+        try:
+            for row in cursor.fetchall():
+                category = _normalise_category(row["category"])
+                if category is None:
+                    continue
+                try:
+                    thresholds[category] = float(row["threshold"])
+                except (TypeError, ValueError):
+                    continue
+        finally:
+            cursor.close()
+    if not thresholds:
+        return dict(_DEFAULT_CATEGORY_THRESHOLDS)
+    for category, default in _DEFAULT_CATEGORY_THRESHOLDS.items():
+        thresholds.setdefault(category, default)
+    return thresholds
+
 
 def _ensure_file_columns(conn: sqlite3.Connection) -> None:
     """Make sure optional columns exist on the files table."""
@@ -209,11 +280,15 @@ def search_files(
     for row in rows:
         file_id = row["id"]
         tag_rows = conn.execute(
-            "SELECT t.name, ft.score FROM file_tags ft JOIN tags t ON t.id = ft.tag_id "
-            "WHERE ft.file_id = ? ORDER BY ft.score DESC LIMIT 5",
+            "SELECT t.name, t.category, ft.score FROM file_tags ft JOIN tags t ON t.id = ft.tag_id "
+            "WHERE ft.file_id = ? ORDER BY ft.score DESC",
             (file_id,),
         ).fetchall()
-        top_tags = [(tag_row["name"], float(tag_row["score"])) for tag_row in tag_rows]
+        tags: list[tuple[str, float, int | None]] = []
+        for tag_row in tag_rows:
+            score = float(tag_row["score"])
+            category = _normalise_category(tag_row["category"])
+            tags.append((tag_row["name"], score, category))
         results.append(
             {
                 "id": file_id,
@@ -222,7 +297,8 @@ def search_files(
                 "height": row["height"],
                 "size": row["size"],
                 "mtime": row["mtime"],
-                "top_tags": top_tags,
+                "tags": tags,
+                "top_tags": tags,
             }
         )
     return results

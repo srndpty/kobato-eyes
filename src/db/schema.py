@@ -41,6 +41,12 @@ SCHEMA_STATEMENTS: tuple[str, ...] = (
     );
     """,
     """
+    CREATE TABLE IF NOT EXISTS tagger_thresholds (
+        category TEXT PRIMARY KEY,
+        threshold REAL NOT NULL
+    );
+    """,
+    """
     CREATE VIRTUAL TABLE IF NOT EXISTS fts_files USING fts5(
         file_id UNINDEXED,
         text,

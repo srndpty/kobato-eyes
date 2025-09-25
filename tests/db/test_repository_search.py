@@ -18,13 +18,16 @@ def conn():
     connection.close()
 
 
-def _insert_tag(connection, name: str, score: float, file_id: int) -> None:
-    row = connection.execute("SELECT id FROM tags WHERE name = ?", (name,)).fetchone()
-    if row is None:
-        cursor = connection.execute("INSERT INTO tags (name, category) VALUES (?, 0)", (name,))
-        tag_id = cursor.lastrowid
-    else:
-        tag_id = row["id"]
+def _insert_tag(
+    connection, name: str, score: float, file_id: int, *, category: int = 0
+) -> None:
+    cursor = connection.execute(
+        "INSERT INTO tags (name, category) VALUES (?, ?) "
+        "ON CONFLICT(name) DO UPDATE SET category = excluded.category "
+        "RETURNING id",
+        (name, category),
+    )
+    tag_id = cursor.fetchone()[0]
     connection.execute(
         "INSERT INTO file_tags (file_id, tag_id, score) VALUES (?, ?, ?)",
         (file_id, tag_id, score),
@@ -68,10 +71,14 @@ def test_search_files_returns_expected_record(conn) -> None:
     assert record["width"] is None and record["height"] is None
     assert record["size"] == 123
     assert record["mtime"] == pytest.approx(200.0)
-    assert len(record["top_tags"]) == 5
-    names = [name for name, _ in record["top_tags"]]
-    assert names[0] == "1girl"
-    assert "outdoors" not in names
+    assert "tags" in record
+    assert len(record["tags"]) == len(tags)
+    tag_names = [name for name, _, _ in record["tags"]]
+    assert tag_names == [name for name, _ in tags]
+    for _, score, category in record["tags"]:
+        assert isinstance(category, int) or category is None
+        assert isinstance(score, float)
+    assert record["top_tags"] == record["tags"]
 
 
 def test_search_files_order_limit_offset(conn) -> None:
@@ -96,3 +103,26 @@ def test_translate_query_integrates_with_search(conn) -> None:
     results = search_files(conn, fragment.where, fragment.params)
 
     assert [row["id"] for row in results] == [file_id]
+
+
+def test_search_files_includes_tag_categories(conn) -> None:
+    file_id = _insert_file(conn, path="F.png", size=222, mtime=20.0, sha="f")
+
+    _insert_tag(conn, "1girl", 0.95, file_id, category=0)
+    _insert_tag(conn, "original_character", 0.85, file_id, category=1)
+
+    where_sql = (
+        "EXISTS (SELECT 1 FROM file_tags ft JOIN tags t ON t.id = ft.tag_id "
+        "WHERE ft.file_id = f.id AND t.name = ?)"
+    )
+    results = search_files(conn, where_sql, ["1girl"])
+
+    assert len(results) == 1
+    record = results[0]
+    assert record["tags"] == record["top_tags"]
+    assert record["tags"][0][0] == "1girl"
+    assert record["tags"][0][1] == pytest.approx(0.95)
+    assert record["tags"][0][2] == 0
+    assert record["tags"][1][0] == "original_character"
+    assert record["tags"][1][1] == pytest.approx(0.85)
+    assert record["tags"][1][2] == 1
