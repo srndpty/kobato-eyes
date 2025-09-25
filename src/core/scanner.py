@@ -2,11 +2,8 @@
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 from typing import Iterable, Iterator, Sequence
-
-from utils.fs import from_system_path, is_hidden, to_system_path
 
 DEFAULT_EXTENSIONS = {
     ".jpg",
@@ -19,64 +16,80 @@ DEFAULT_EXTENSIONS = {
 }
 
 
-def _normalise_extensions(extensions: Iterable[str] | None) -> set[str] | None:
-    if extensions is None:
-        return None
-    normalised: set[str] = set()
-    for ext in extensions:
-        candidate = ext.lower()
-        if not candidate.startswith("."):
-            candidate = f".{candidate}"
-        normalised.add(candidate)
-    return normalised
+def _resolve(p: Path) -> Path:
+    p = Path(p).expanduser()
+    try:
+        return p.resolve(strict=False)
+    except OSError:
+        return p.absolute()
 
 
-def _is_excluded(path: Path, excluded_paths: Sequence[Path]) -> bool:
-    for excluded in excluded_paths:
-        try:
-            Path(path).resolve().relative_to(Path(excluded).resolve())
-            return True
-        except ValueError:
-            continue
-    return False
+def _normalise_exts(extensions: Iterable[str] | None) -> set[str]:
+    base = extensions or DEFAULT_EXTENSIONS
+    out: set[str] = set()
+    for e in base:
+        s = str(e).lower()
+        if not s.startswith("."):
+            s = "." + s
+        out.add(s)
+    return out
+
+
+def _is_under(path: Path, parent: Path) -> bool:
+    # Python 3.10 互換：relative_to で判定
+    try:
+        path.relative_to(parent)
+        return True
+    except ValueError:
+        return False
 
 
 def iter_images(
-    roots: Iterable[str | Path],
+    roots: Sequence[Path | str],
     *,
-    excluded: Iterable[str | Path] | None = None,
+    excluded: Sequence[Path | str] | None = None,
     extensions: Iterable[str] | None = None,
 ) -> Iterator[Path]:
-    """Yield image files located beneath `roots`, applying filters for exclusions."""
-    root_paths = [Path(root).resolve() for root in roots]
-    excluded_paths = [Path(path).resolve() for path in (excluded or [])]
-    allowed_extensions = _normalise_extensions(extensions) or DEFAULT_EXTENSIONS
+    """
+    画像ファイルを再帰列挙する：
+      - パス区切りは pathlib 基準
+      - 拡張子は大小無視 & 先頭ドットの有無どちらでもOK
+      - excluded 配下は除外
+      - 「.*」で始まるドット隠し（ファイル/ディレクトリ）は除外（Windowsの属性までは見ない）
+    """
+    exts = _normalise_exts(extensions)
+    exc = [_resolve(Path(p)) for p in (excluded or [])]
 
-    for root_path in root_paths:
-        if not root_path.exists() or not root_path.is_dir():
+    for r in roots:
+        root = _resolve(Path(r))
+        if not root.exists():
             continue
 
-        system_root = to_system_path(root_path)
-        for dirpath, dirnames, filenames in os.walk(system_root):
-            current_dir = from_system_path(dirpath)
-
-            if is_hidden(current_dir) or _is_excluded(current_dir, excluded_paths):
-                dirnames[:] = []
+        for p in root.rglob("*"):
+            # ファイルのみ
+            try:
+                if not p.is_file():
+                    continue
+            except OSError:
                 continue
 
-            dirnames[:] = [
-                name
-                for name in dirnames
-                if not is_hidden(current_dir / name) and not _is_excluded(current_dir / name, excluded_paths)
-            ]
+            # 拡張子フィルタ
+            if p.suffix.lower() not in exts:
+                continue
 
-            for filename in filenames:
-                file_path = current_dir / filename
-                if is_hidden(file_path) or _is_excluded(file_path, excluded_paths):
-                    continue
-                if allowed_extensions and file_path.suffix.lower() not in allowed_extensions:
-                    continue
-                yield file_path
+            # 除外パス配下の除外
+            if any(_is_under(p, e) for e in exc):
+                continue
+
+            # ドット隠し（root からの相対で判定）
+            try:
+                rel = p.relative_to(root)
+            except ValueError:
+                rel = p  # 念のため
+            if any(part.startswith(".") for part in rel.parts):
+                continue
+
+            yield p
 
 
 __all__ = ["iter_images"]

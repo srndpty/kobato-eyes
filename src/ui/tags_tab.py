@@ -88,23 +88,20 @@ def _filter_tags_by_threshold(tag_rows):
     """tag_rows は (name, score) か (name, score, category) を想定。"""
     out = []
     for row in tag_rows:
-        # 形状を吸収
         if isinstance(row, dict):
             name = row.get("name")
             score = float(row.get("score", 0.0))
-            # cat = row.get("category", 0)
         else:
             if len(row) == 3:
                 name, score, cat = row
             elif len(row) == 2:
                 name, score = row
-                # cat = 0
             else:
-                # 予期しない形 → 表示しない
                 continue
 
         if float(score) >= 0.1:  # 0.1以上で固定！ 細かいロングテールタグ問題が鬱陶しいので強制的に解決
             out.append((str(name), float(score)))
+
     return out
 
 
@@ -687,21 +684,28 @@ class TagsTab(QWidget):
             self._progress_dialog.setLabelText("Cancelling…")
 
     def _handle_index_progress(self, done: int, total: int, label: str) -> None:
-        if self._progress_dialog is None:
+        dlg = self._progress_dialog
+        if dlg is None:
             return
-        if total < 0:
-            self._progress_dialog.setRange(0, 0)
-            self._progress_dialog.setLabelText(label)
-            return
-        maximum = max(total, 0)
-        value = max(0, min(done, total))
-        self._progress_dialog.setRange(0, maximum)
-        self._progress_dialog.setValue(value)
-        if total > 0:
-            percent = min(100, (value * 100) // total)
-        else:
-            percent = 100 if value else 0
-        self._progress_dialog.setLabelText(f"{label}: {value}/{total} ({percent}%)")
+
+        try:
+            if total < 0:
+                dlg.setRange(0, 0)
+                dlg.setLabelText(label)
+                return
+
+            maximum = max(total, 0)
+            # total==0 のとき min(done, total) が常に0になるので、UI的に自然な値にする
+            value = max(0, min(done, total if total > 0 else done))
+
+            dlg.setRange(0, maximum)
+            dlg.setValue(value)
+
+            percent = min(100, (value * 100) // total) if total > 0 else (100 if value else 0)
+            dlg.setLabelText(f"{label}: {value}/{total} ({percent}%)")
+        except RuntimeError:
+            # ダイアログが deleteLater 済み等で C++ 側が死んでいる場合は無視
+            pass
 
     def _close_progress_dialog(self) -> None:
         if self._progress_dialog is not None:
@@ -1020,6 +1024,13 @@ class TagsTab(QWidget):
         self._update_control_states()
 
     def _handle_index_finished(self, stats: dict[str, object]) -> None:
+        task = self._current_index_task
+        if task is not None:
+            try:
+                task.signals.progress.disconnect(self._handle_index_progress)
+            except TypeError:
+                pass
+
         self._close_progress_dialog()
         self._indexing_active = False
         elapsed = float(stats.get("elapsed_sec", 0.0) or 0.0)
@@ -1057,6 +1068,13 @@ class TagsTab(QWidget):
         QTimer.singleShot(0, self._on_search_clicked)
 
     def _handle_index_failed(self, message: str) -> None:
+        task = self._current_index_task
+        if task is not None:
+            try:
+                task.signals.progress.disconnect(self._handle_index_progress)
+            except TypeError:
+                pass
+
         self._close_progress_dialog()
         self._indexing_active = False
         if message == ONNXRUNTIME_MISSING_MESSAGE:
