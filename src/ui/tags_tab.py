@@ -88,23 +88,20 @@ def _filter_tags_by_threshold(tag_rows):
     """tag_rows は (name, score) か (name, score, category) を想定。"""
     out = []
     for row in tag_rows:
-        # 形状を吸収
         if isinstance(row, dict):
             name = row.get("name")
             score = float(row.get("score", 0.0))
-            # cat = row.get("category", 0)
         else:
             if len(row) == 3:
                 name, score, cat = row
             elif len(row) == 2:
                 name, score = row
-                # cat = 0
             else:
-                # 予期しない形 → 表示しない
                 continue
 
         if float(score) >= 0.1:  # 0.1以上で固定！ 細かいロングテールタグ問題が鬱陶しいので強制的に解決
             out.append((str(name), float(score)))
+
     return out
 
 
@@ -689,18 +686,22 @@ class TagsTab(QWidget):
     def _handle_index_progress(self, done: int, total: int, label: str) -> None:
         if self._progress_dialog is None:
             return
+
         if total < 0:
             self._progress_dialog.setRange(0, 0)
             self._progress_dialog.setLabelText(label)
             return
+
         maximum = max(total, 0)
         value = max(0, min(done, total))
         self._progress_dialog.setRange(0, maximum)
         self._progress_dialog.setValue(value)
+
         if total > 0:
             percent = min(100, (value * 100) // total)
         else:
             percent = 100 if value else 0
+
         self._progress_dialog.setLabelText(f"{label}: {value}/{total} ({percent}%)")
 
     def _close_progress_dialog(self) -> None:
