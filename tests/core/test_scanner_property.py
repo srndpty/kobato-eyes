@@ -2,20 +2,21 @@
 
 from __future__ import annotations
 
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
 
 import pytest
-
-pytest.importorskip("hypothesis")
 from hypothesis import HealthCheck, assume, example, given, settings
 from hypothesis import strategies as st
 
 from core.scanner import DEFAULT_EXTENSIONS, iter_images
 
-WINDOWS_INVALID_CHARS = "<>:\"/\\|?*"
+WINDOWS_INVALID_CHARS = '<>:"/\\|?*'
 ALLOWED_EXTENSIONS = ["jpg", "jpeg", "png", "gif", "bmp", "webp", "tiff"]
+
+pytest.importorskip("hypothesis")
 
 
 @dataclass
@@ -99,7 +100,9 @@ file_entry_strategy = st.builds(
 
 
 extension_token_strategy = st.builds(
-    lambda ext, dotted, upper: (f".{ext.upper()}" if upper else f".{ext.lower()}") if dotted else (ext.upper() if upper else ext.lower()),
+    lambda ext, dotted, upper: (f".{ext.upper()}" if upper else f".{ext.lower()}")
+    if dotted
+    else (ext.upper() if upper else ext.lower()),
     ext=st.sampled_from(ALLOWED_EXTENSIONS),
     dotted=st.booleans(),
     upper=st.booleans(),
@@ -194,78 +197,77 @@ def _path_in(path: Path, bases: Iterable[Path]) -> bool:
     ],
     extensions=None,
 )
-def test_iter_images_property_based(entries: list[FileEntry], extensions: list[str] | None, tmp_path: Path) -> None:
+def test_iter_images_property_based(entries: list[FileEntry], extensions: list[str] | None) -> None:
     """Property test ensuring specification-compliant behaviour for ``iter_images``."""
 
-    created_files: list[Path] = []
-    excluded_arguments: list[str | Path] = []
+    with tempfile.TemporaryDirectory() as td:
+        tmp_path = Path(td)
 
-    for entry in entries:
-        directory = tmp_path
-        for segment, make_hidden in entry.segments:
-            name = segment
-            if make_hidden and not name.startswith("."):
-                name = f".{name}"
-            directory = directory / name
-        directory.mkdir(parents=True, exist_ok=True)
+        created_files: list[Path] = []
+        excluded_arguments: list[str | Path] = []
 
-        if entry.create_extra_file:
-            (directory / "notes.txt").write_text("note", encoding="utf-8")
+        for entry in entries:
+            directory = tmp_path
+            for segment, make_hidden in entry.segments:
+                name = segment
+                if make_hidden and not name.startswith("."):
+                    name = f".{name}"
+                directory = directory / name
+            directory.mkdir(parents=True, exist_ok=True)
 
-        name_body = entry.filename
-        if entry.extra_suffix:
-            name_body = f"{name_body}.{entry.extra_suffix}"
-        if entry.file_hidden and not name_body.startswith("."):
-            name_body = f".{name_body}"
+            if entry.create_extra_file:
+                (directory / "notes.txt").write_text("note", encoding="utf-8")
 
-        file_path = directory / f"{name_body}.{entry.extension}"
-        assume(len(str(file_path)) < 240)
-        file_path.write_bytes(b"data")
-        created_files.append(file_path)
+            name_body = entry.filename
+            if entry.extra_suffix:
+                name_body = f"{name_body}.{entry.extra_suffix}"
+            if entry.file_hidden and not name_body.startswith("."):
+                name_body = f".{name_body}"
 
-        if entry.exclude_dir:
-            excluded_arguments.append(directory)
-        if entry.exclude_file:
-            excluded_arguments.append(file_path)
+            file_path = directory / f"{name_body}.{entry.extension}"
+            assume(len(str(file_path)) < 240)  # Windows MAX_PATH をざっくり回避
+            file_path.write_bytes(b"data")
+            created_files.append(file_path)
 
-    # Always include a non-existent exclusion to confirm robustness.
-    excluded_arguments.append(tmp_path / "does-not-exist")
+            if entry.exclude_dir:
+                excluded_arguments.append(directory)
+            if entry.exclude_file:
+                excluded_arguments.append(file_path)
 
-    # Mix string and Path inputs for excluded paths.
-    excluded_mixed: list[str | Path] = []
-    for index, item in enumerate(excluded_arguments):
-        excluded_mixed.append(str(item) if index % 2 == 0 else item)
+        # Always include a non-existent exclusion to confirm robustness.
+        excluded_arguments.append(tmp_path / "does-not-exist")
 
-    roots = [tmp_path, tmp_path / "missing-root"]
+        # Mix string and Path inputs for excluded paths.
+        excluded_mixed: list[str | Path] = []
+        for index, item in enumerate(excluded_arguments):
+            excluded_mixed.append(str(item) if index % 2 == 0 else item)
 
-    if extensions is None:
-        extensions_arg = None
-        expected_exts = DEFAULT_EXTENSIONS
-    else:
-        extensions_arg = extensions
-        expected_exts = {
-            (ext.lower() if ext.startswith(".") else f".{ext.lower()}")
-            for ext in extensions
-        }
+        roots = [tmp_path, tmp_path / "missing-root"]
 
-    excluded_resolved = [_resolve(Path(item)) for item in excluded_mixed]
+        if extensions is None:
+            extensions_arg = None
+            expected_exts = DEFAULT_EXTENSIONS
+        else:
+            extensions_arg = extensions
+            expected_exts = {(ext.lower() if ext.startswith(".") else f".{ext.lower()}") for ext in extensions}
 
-    expected: set[Path] = set()
-    for file_path in created_files:
-        resolved = _resolve(file_path)
-        if _has_hidden_component(resolved):
-            continue
-        if _path_in(resolved, excluded_resolved):
-            continue
-        if resolved.suffix.lower() not in expected_exts:
-            continue
-        expected.add(resolved)
+        excluded_resolved = [_resolve(Path(item)) for item in excluded_mixed]
 
-    results = set(iter_images(roots, excluded=excluded_mixed, extensions=extensions_arg))
+        expected: set[Path] = set()
+        for file_path in created_files:
+            resolved = _resolve(file_path)
+            if _has_hidden_component(resolved):
+                continue
+            if _path_in(resolved, excluded_resolved):
+                continue
+            if resolved.suffix.lower() not in expected_exts:
+                continue
+            expected.add(resolved)
 
-    missing = expected - results
-    unexpected = results - expected
-    assert not missing and not unexpected, (
-        "Property mismatch. "
-        f"Missing: {sorted(missing)}; Unexpected: {sorted(unexpected)}"
-    )
+        results = set(iter_images(roots, excluded=excluded_mixed, extensions=extensions_arg))
+
+        missing = expected - results
+        unexpected = results - expected
+        assert not missing and not unexpected, (
+            "Property mismatch. " f"Missing: {sorted(missing)}; Unexpected: {sorted(unexpected)}"
+        )
