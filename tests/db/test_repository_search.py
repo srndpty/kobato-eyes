@@ -70,6 +70,7 @@ def test_search_files_returns_expected_record(conn) -> None:
     assert record["path"] == "A.png"
     assert record["width"] is None and record["height"] is None
     assert record["size"] == 123
+    assert record["relevance"] == pytest.approx(0.0)
     assert record["mtime"] == pytest.approx(200.0)
     assert "tags" in record
     assert len(record["tags"]) == len(tags)
