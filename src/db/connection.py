@@ -15,6 +15,23 @@ _BOOTSTRAP_LOCK = Lock()
 _BOOTSTRAPPED: set[str] = set()
 
 
+def _ensure_indexes(conn: sqlite3.Connection) -> None:
+    """本番DB/メモリDBともに必要な索引を作成する（存在すれば何もしない）"""
+    conn.executescript("""
+    -- 検索・集計高速化用
+    CREATE INDEX IF NOT EXISTS idx_file_tags_tag           ON file_tags(tag_id);
+    CREATE INDEX IF NOT EXISTS idx_file_tags_tag_score     ON file_tags(tag_id, score);
+    CREATE INDEX IF NOT EXISTS idx_file_tags_tag_file      ON file_tags(tag_id, file_id);
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_tags_name         ON tags(name);
+    CREATE INDEX IF NOT EXISTS idx_tags_category           ON tags(category);
+    """)
+    # 初回だけで十分だが、呼ばれても副作用は小さい
+    try:
+        conn.execute("ANALYZE")
+    except sqlite3.DatabaseError:
+        pass
+
+
 def _resolve_db_target(db_path: str | Path) -> tuple[str, bool, bool, str, Path | None]:
     """Normalize database paths and derive connection options."""
 
@@ -33,11 +50,7 @@ def _resolve_db_target(db_path: str | Path) -> tuple[str, bool, bool, str, Path 
     if text_path == ":memory:":
         return text_path, True, False, text_path, None
     if text_path.startswith("file:"):
-        is_memory = (
-            "mode=memory" in text_path
-            or text_path == "file::memory:"
-            or text_path.startswith("file::memory:")
-        )
+        is_memory = "mode=memory" in text_path or text_path == "file::memory:" or text_path.startswith("file::memory:")
         return text_path, is_memory, True, text_path, None
 
     candidate = Path(text_path).expanduser()
@@ -87,6 +100,7 @@ def bootstrap_if_needed(db_path: str | Path, *, timeout: float = 30.0) -> None:
         try:
             logger.info("Bootstrapping schema at: %s", display_path)
             ensure_schema(conn)
+            _ensure_indexes(conn)  # ★ ここで索引を作る
         finally:
             conn.close()
         _BOOTSTRAPPED.add(target)
@@ -104,6 +118,7 @@ def get_conn(
     conn = _connect_to_target(target, timeout=timeout, uri=uri, is_memory=is_memory)
     if is_memory:
         ensure_schema(conn)
+        _ensure_indexes(conn)  # ★ ここで索引を作る
     return conn
 
 

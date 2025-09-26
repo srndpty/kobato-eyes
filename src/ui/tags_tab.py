@@ -74,6 +74,7 @@ from tagger import labels_util
 from tagger.base import TagCategory
 from tagger.wd14_onnx import ONNXRUNTIME_MISSING_MESSAGE
 from ui.autocomplete import abbreviate_count, extract_completion_token, replace_completion_token
+from ui.tag_stats import TagStatsDialog
 from utils.image_io import get_thumbnail
 from utils.paths import ensure_dirs, get_db_path
 
@@ -686,6 +687,9 @@ class TagsTab(QWidget):
         toggle_layout = QHBoxLayout()
         toggle_layout.addWidget(self._table_button)
         toggle_layout.addWidget(self._grid_button)
+        self._stats_button = QPushButton("Stats", self)
+        self._stats_button.setToolTip("Show tag statistics")
+        toggle_layout.addWidget(self._stats_button)
         toggle_layout.addStretch()
 
         layout = QVBoxLayout(self)
@@ -703,6 +707,7 @@ class TagsTab(QWidget):
         self._retag_results_action.triggered.connect(self._on_retag_results)
         self._table_button.toggled.connect(self._on_table_toggled)
         self._grid_button.toggled.connect(self._on_grid_toggled)
+        self._stats_button.clicked.connect(self._open_stats)
         self._placeholder_button.clicked.connect(self._on_index_now)
 
         self._current_query: Optional[str] = None
@@ -1210,6 +1215,16 @@ class TagsTab(QWidget):
         if checked:
             self._stack.setCurrentWidget(self._grid_view)
             self._table_button.setChecked(False)
+
+    def _open_stats(self) -> None:
+        db_path = self._db_path if self._db_path is not None else Path(get_db_path())
+
+        def _conn_factory() -> sqlite3.Connection:
+            return get_conn(db_path)
+
+        dialog = TagStatsDialog(_conn_factory, parent=self)
+        dialog.setModal(True)
+        dialog.exec()
 
     def _set_busy(self, busy: bool) -> None:
         self._search_busy = busy
