@@ -644,7 +644,7 @@ class TagsTab(QWidget):
         self._table_view.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self._table_view.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self._table_view.doubleClicked.connect(self._on_table_double_clicked)
-        self._table_view.activated.connect(self._on_table_double_clicked)
+        # self._table_view.activated.connect(self._on_table_double_clicked)
         self._table_view.setModel(self._table_model)
         self._table_view.horizontalHeader().setStretchLastSection(True)
         self._table_view.setIconSize(QSize(self._THUMB_SIZE, self._THUMB_SIZE))
@@ -1391,7 +1391,11 @@ class TagsTab(QWidget):
     def _open_row(self, row: int) -> None:
         if 0 <= row < len(self._results_cache):
             path = Path(str(self._results_cache[row].get("path", "")))
-            self._open_file_with_default_app(path)
+            mods = QApplication.keyboardModifiers()
+            if mods & Qt.KeyboardModifier.ControlModifier:  # Ctrlでフォルダ、なしでファイルを開く
+                self._open_in_explorer(path)
+            else:
+                self._open_file_with_default_app(path)
 
     @staticmethod
     def _format_size(value: object) -> str:
@@ -1494,6 +1498,17 @@ class TagsTab(QWidget):
         tag_names = [tag for tag, _ in tags][:2]
         subtitle = ", ".join(tag_names)
         return f"{name}\n{subtitle}" if subtitle else name
+
+    def _open_in_explorer(self, path: Path) -> None:
+        try:
+            if sys.platform.startswith("win"):
+                subprocess.Popen(["explorer", f"/select,{path}"])
+            elif sys.platform == "darwin":
+                subprocess.Popen(["open", "-R", str(path)])
+            else:
+                subprocess.Popen(["xdg-open", str(path.parent)])
+        except Exception as exc:  # pragma: no cover
+            self._status_label.setText(f"Failed to open file: {exc}")
 
     def _open_file_with_default_app(self, path: Path) -> None:
         """Open *path* with the OS default application."""
