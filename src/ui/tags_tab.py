@@ -575,17 +575,34 @@ class TagsTab(QWidget):
 
         self._debug_group = QGroupBox("Debug SQL", self)
         self._debug_group.setCheckable(True)
-        self._debug_group.setChecked(False)
-        self._debug_group.setVisible(False)
+        self._debug_group.setChecked(False)  # 既定は折りたたみ
+        self._debug_group.setVisible(False)  # クエリがない間は非表示のまま
+
         debug_layout = QVBoxLayout(self._debug_group)
-        self._debug_where = QLabel("WHERE: 1=1", self._debug_group)
-        self._debug_params = QLabel("Params: []", self._debug_group)
+        debug_layout.setContentsMargins(8, 4, 8, 8)
+
+        # ← 中身を直に group に入れず “コンテナ”に入れる
+        self._debug_container = QWidget(self._debug_group)
+        self._debug_container.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum)
+        inner = QVBoxLayout(self._debug_container)
+        inner.setContentsMargins(0, 0, 0, 0)
+        inner.setSpacing(4)
+
+        self._debug_where = QLabel("WHERE: 1=1", self._debug_container)
         self._debug_where.setWordWrap(True)
+        self._debug_params = QLabel("Params: []", self._debug_container)
         self._debug_params.setWordWrap(True)
-        self._debug_where.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum)
-        self._debug_params.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum)
-        debug_layout.addWidget(self._debug_where)
-        debug_layout.addWidget(self._debug_params)
+        # （任意）等幅にしたい場合
+        # mono = QFontDatabase.systemFont(QFontDatabase.SystemFont.FixedFont)
+        # self._debug_where.setFont(mono); self._debug_params.setFont(mono)
+
+        inner.addWidget(self._debug_where)
+        inner.addWidget(self._debug_params)
+
+        debug_layout.addWidget(self._debug_container)
+
+        # 折りたたみ切り替えハンドラ
+        self._debug_group.toggled.connect(self._on_debug_toggled)
 
         self._placeholder = QWidget(self)
         placeholder_layout = QVBoxLayout(self._placeholder)
@@ -734,10 +751,26 @@ class TagsTab(QWidget):
         self._query_edit.installEventFilter(self)
         self._suppress_return_once = False  # Enter誤発火抑止フラグ
 
+        self._on_debug_toggled(False)
         self._show_placeholder(True)
         self._update_control_states()
         QTimer.singleShot(0, self._initialise_autocomplete)
         QTimer.singleShot(0, self._bootstrap_results_if_any)
+
+    def _on_debug_toggled(self, checked: bool) -> None:
+        # 中身の表示・非表示
+        self._debug_container.setVisible(checked)
+
+        # 折りたたみ時はヘッダーぶん程度の高さに制限
+        if checked:
+            self._debug_group.setMaximumHeight(16777215)  # 制限解除
+        else:
+            header_h = self._debug_group.fontMetrics().height() + 12  # だいたいのヘッダー高さ
+            self._debug_group.setMaximumHeight(header_h)
+
+        # レイアウト再計算
+        self._debug_group.updateGeometry()
+        self.layout().activate()  # ルートレイアウトを再評価
 
     def _on_return_shortcut(self) -> None:
         if self._completer.popup().isVisible():
