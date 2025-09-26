@@ -65,11 +65,21 @@ from PyQt6.QtWidgets import (
 )
 
 from core.config import load_settings
-from core.pipeline import IndexProgress, retag_all, retag_query, run_index_once
+from core.jobs import JobManager
+from core.pipeline import (
+    IndexProgress,
+    ProcessingPipeline,
+    _resolve_embedder,
+    _resolve_tagger,
+    retag_all,
+    retag_query,
+    run_index_once,
+)
 from core.query import extract_positive_tag_terms, translate_query
 from core.settings import PipelineSettings
 from db.connection import get_conn
 from db.repository import _load_tag_thresholds, list_tag_names, search_files
+from index.hnsw import HNSWIndex
 from tagger import labels_util
 from tagger.base import TagCategory
 from tagger.wd14_onnx import ONNXRUNTIME_MISSING_MESSAGE
@@ -510,6 +520,7 @@ class TagsTab(QWidget):
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
+        self._pipeline: ProcessingPipeline | None = None
         self._query_edit = QLineEdit(self)
         self._query_edit.setPlaceholderText("Search tags…")
         self._tag_model = self.TagListModel(parent=self)
@@ -718,12 +729,34 @@ class TagsTab(QWidget):
         self._tag_thresholds: dict[TagCategory, float] = {}
 
         ensure_dirs()
-        self._db_display = str(get_db_path())
+        self._settings = load_settings()
+        self._db_path = Path(self._settings.db_path).expanduser()
+        self._db_display = str(self._db_path)
+
+        self._job_mgr = JobManager()
+        embedder = _resolve_embedder(self._settings)
+        dim = getattr(embedder, "dim", None)
+        if dim is None:
+            raise RuntimeError("embedder.dim を取得できません")
+
+        hnsw = HNSWIndex(dim=dim, space="cosine")
+        tagger = _resolve_tagger(self._settings, override=None)
+
+        self._pipeline = ProcessingPipeline(
+            db_path=self._db_path,
+            tagger=tagger,
+            embedder=embedder,
+            hnsw_index=hnsw,
+            job_manager=self._job_mgr,
+            settings=self._settings,
+        )
+        self._pipeline.start()
+
         self._conn: sqlite3.Connection | None = None
         self._open_connection()
         self._db_path = self._resolve_db_path()
         self.destroyed.connect(self._close_connection)
-        self._update_thresholds(load_settings())
+        self._update_thresholds(self._settings)
 
         self._thumb_pool = QThreadPool(self)
         self._thumb_pool.setMaxThreadCount(min(4, self._thumb_pool.maxThreadCount()))
@@ -875,7 +908,7 @@ class TagsTab(QWidget):
     def _open_connection(self) -> None:
         if self._conn is not None:
             return
-        self._conn = get_conn(get_db_path())
+        self._conn = get_conn(self._db_path)
 
     def _db_has_files(self) -> bool:
         if self._conn is None:
@@ -1038,7 +1071,13 @@ class TagsTab(QWidget):
             self._tag_model.reset_with([])
             self._hide_completion_popup()
 
+    def _on_settings_saved(self, new_settings: PipelineSettings) -> None:
+        self._settings = new_settings
+        if hasattr(self, "_pipeline") and self._pipeline is not None:
+            self._pipeline.update_settings(new_settings)
+
     def reload_autocomplete(self, settings: PipelineSettings) -> None:
+        self._on_settings_saved(settings)
         self._update_thresholds(settings)
         csv_tags: list[labels_util.TagMeta] = []
         csv_path = labels_util.discover_labels_csv(settings.tagger.model_path, settings.tagger.tags_csv)
@@ -1103,7 +1142,7 @@ class TagsTab(QWidget):
         if self._indexing_active:
             return
         self._db_path = self._resolve_db_path()
-        settings = load_settings()
+        settings = getattr(self, "_settings", load_settings())
         params_list = list(params or [])
 
         def _pre_run() -> dict[str, object]:
@@ -1452,7 +1491,7 @@ class TagsTab(QWidget):
 
     def _update_thresholds(self, settings: PipelineSettings | None = None) -> None:
         if settings is None:
-            settings = load_settings()
+            settings = getattr(self, "_settings", load_settings())
         mapping: dict[TagCategory, float] = {}
         threshold_source = getattr(settings.tagger, "thresholds", {}) if settings else {}
         for key, value in (threshold_source or {}).items():
@@ -1667,6 +1706,13 @@ class TagsTab(QWidget):
         self._toast_label.move(x, y)
         self._toast_label.setVisible(True)
         self._toast_timer.start(timeout_ms)
+
+    def closeEvent(self, e) -> None:  # noqa: D401 - Qt signature
+        try:
+            if hasattr(self, "_pipeline") and self._pipeline is not None:
+                self._pipeline.shutdown()
+        finally:
+            super().closeEvent(e)
 
 
 __all__ = ["TagsTab", "extract_completion_token", "replace_completion_token"]
