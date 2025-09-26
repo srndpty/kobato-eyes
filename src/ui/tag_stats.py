@@ -5,12 +5,7 @@ from __future__ import annotations
 import sqlite3
 from typing import Callable
 
-from PyQt6.QtCore import (
-    QAbstractTableModel,
-    QModelIndex,
-    Qt,
-    QSortFilterProxyModel,
-)
+from PyQt6.QtCore import QAbstractTableModel, QModelIndex, QSortFilterProxyModel, Qt
 from PyQt6.QtGui import QKeyEvent
 from PyQt6.QtWidgets import (
     QAbstractItemView,
@@ -27,14 +22,14 @@ from PyQt6.QtWidgets import (
 
 _CATEGORY_NAMES: dict[int, str] = {
     0: "general",
-    1: "character",
+    1: "artist",
     2: "rating",
     3: "copyright",
-    4: "artist",
+    4: "character",
     5: "meta",
 }
 
-_FALLBACK_THRESHOLDS: dict[int, float] = {0: 0.35, 1: 0.25, 3: 0.25}
+_FALLBACK_THRESHOLDS: dict[int, float] = {0: 0.35, 4: 0.25, 3: 0.25}
 
 
 def _load_thresholds(conn: sqlite3.Connection) -> dict[int, float]:
@@ -93,11 +88,7 @@ class _TagStatsModel(QAbstractTableModel):
             for cat_id in sorted(thresholds):
                 cases.append("WHEN ? THEN ?")
                 case_params.extend([cat_id, thresholds[cat_id]])
-            score_guard = (
-                "AND ft.score >= CASE t.category "
-                + " ".join(cases)
-                + " ELSE 0.0 END "
-            )
+            score_guard = "AND ft.score >= CASE t.category " + " ".join(cases) + " ELSE 0.0 END "
             params.extend(case_params)
 
         where_sql = "WHERE " + " AND ".join(where_clauses) if where_clauses else ""
@@ -280,4 +271,3 @@ class TagStatsDialog(QDialog):
 
 
 __all__ = ["TagStatsDialog"]
-
