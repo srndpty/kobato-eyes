@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-import re
-
-_LAST_TOKEN_RE = re.compile(r"([A-Za-z0-9_:+><=.]+)$")
+_DELIMITERS = " \t\r\n,;()"
 
 
 def abbreviate_count(value: object) -> str:
@@ -38,18 +36,23 @@ def abbreviate_count(value: object) -> str:
 def extract_completion_token(
     text: str, cursor_position: int | None = None
 ) -> tuple[str, int, int]:
-    """Return the trailing token within ``text`` and its range."""
+    """Return the token under the cursor and its range."""
 
     if cursor_position is None:
         cursor_position = len(text)
     cursor_position = max(0, min(cursor_position, len(text)))
-    prefix = text[:cursor_position]
-    match = _LAST_TOKEN_RE.search(prefix)
-    if not match:
+    if not text:
         return "", cursor_position, cursor_position
-    start = match.start(1)
-    end = match.end(1)
-    return match.group(1), start, end
+
+    start = cursor_position
+    while start > 0 and text[start - 1] not in _DELIMITERS:
+        start -= 1
+
+    end = cursor_position
+    while end < len(text) and text[end] not in _DELIMITERS:
+        end += 1
+
+    return text[start:end], start, end
 
 
 def replace_completion_token(
@@ -59,8 +62,16 @@ def replace_completion_token(
 
     start = max(0, min(start, len(text)))
     end = max(start, min(end, len(text)))
-    new_text = f"{text[:start]}{replacement}{text[end:]}"
-    new_cursor = start + len(replacement)
+
+    suffix = text[end:]
+    insertion = replacement
+    if replacement:
+        needs_space = (not suffix) or (suffix[0] not in _DELIMITERS)
+        if needs_space and (not replacement.endswith(" ")):
+            insertion = f"{replacement} "
+
+    new_text = f"{text[:start]}{insertion}{suffix}"
+    new_cursor = start + len(insertion)
     return new_text, new_cursor
 
 

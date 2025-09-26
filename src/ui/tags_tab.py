@@ -15,17 +15,27 @@ from typing import Callable, Iterable, List, Optional, Sequence
 
 from PyQt6.QtCore import (
     QAbstractListModel,
+    QEvent,
     QModelIndex,
     QObject,
-    QRunnable,
     QRectF,
+    QRunnable,
     QSize,
     Qt,
     QThreadPool,
     QTimer,
     pyqtSignal,
 )
-from PyQt6.QtGui import QColor, QPixmap, QStandardItem, QStandardItemModel, QTextDocument
+from PyQt6.QtGui import (
+    QColor,
+    QKeyEvent,
+    QKeySequence,
+    QPixmap,
+    QShortcut,
+    QStandardItem,
+    QStandardItemModel,
+    QTextDocument,
+)
 from PyQt6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -40,10 +50,11 @@ from PyQt6.QtWidgets import (
     QMessageBox,
     QProgressDialog,
     QPushButton,
-    QStyledItemDelegate,
-    QStyle,
-    QStyleOptionViewItem,
+    QSizePolicy,
     QStackedWidget,
+    QStyle,
+    QStyledItemDelegate,
+    QStyleOptionViewItem,
     QTableView,
     QToolButton,
     QVBoxLayout,
@@ -102,7 +113,7 @@ def _extract_positive_terms(query: str) -> list[str]:
         return []
     tokens: list[str] = []
     for raw in re.split(r"\s+", q):
-        t = raw.strip().strip('\"\'')
+        t = raw.strip().strip("\"'")
         if not t:
             continue
         low = t.lower()
@@ -172,11 +183,7 @@ def _rel_luma(color: QColor) -> float:
             return normalized / 12.92
         return ((normalized + 0.055) / 1.055) ** 2.4
 
-    return (
-        0.2126 * _channel(color.red())
-        + 0.7152 * _channel(color.green())
-        + 0.0722 * _channel(color.blue())
-    )
+    return 0.2126 * _channel(color.red()) + 0.7152 * _channel(color.green()) + 0.0722 * _channel(color.blue())
 
 
 def _pick_highlight_colors(palette) -> tuple[str, str]:
@@ -250,9 +257,7 @@ class _HighlightDelegate(QStyledItemDelegate):
             if last < start:
                 output.append(html.escape(src[last:start]))
             escaped = html.escape(src[start:end])
-            output.append(
-                f'<span style="background-color:{bg}; color:{fg};">{escaped}</span>'
-            )
+            output.append(f'<span style="background-color:{bg}; color:{fg};">{escaped}</span>')
             last = end
         if last < len(src):
             output.append(html.escape(src[last:]))
@@ -452,8 +457,42 @@ class TagsTab(QWidget):
         self._completer = QCompleter(self._tag_model, self)
         self._completer.setCompletionMode(QCompleter.CompletionMode.PopupCompletion)
         self._completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
+        self._completer.setCompletionRole(int(self._tag_model.NAME_ROLE))
         self._completer.activated[QModelIndex].connect(self._on_completion_activated)
-        self._query_edit.setCompleter(self._completer)
+        # self._query_edit.setCompleter(self._completer)
+        self._completer.setWidget(self._query_edit)  # 自前でやる場合はこちらに置き換え
+
+        # completer 作成直後あたり
+        self._query_edit.setObjectName("queryEdit")
+        self._completer.setWidget(self._query_edit)  # ← これ大事
+        self._query_edit.setCompleter(None)  # ← QLineEdit のデフォ補完は無効化
+
+        # event filter を “全部” に入れる（行・popup・viewport・アプリ全体）
+        self._query_edit.installEventFilter(self)
+        self._completer.popup().installEventFilter(self)
+        self._completer.popup().viewport().installEventFilter(self)
+
+        QApplication.instance().installEventFilter(self)
+
+        self._suppress_return_once = False  # 直後の Enter を1回だけ無効化したい時用
+
+        # Tab で補完確定（未選択なら第1候補）
+        self._shortcut_tab = QShortcut(QKeySequence(Qt.Key.Key_Tab), self)
+        self._shortcut_tab.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        self._shortcut_tab.activated.connect(
+            lambda: (self._accept_completion(default_if_none=True) if self._completer.popup().isVisible() else None)
+        )
+
+        # Enter / Return は「候補が出ていれば補完、出ていなければ検索」に振り分け
+        self._shortcut_return = QShortcut(QKeySequence(Qt.Key.Key_Return), self)
+        self._shortcut_return.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        self._shortcut_return.activated.connect(self._on_return_shortcut)
+
+        self._shortcut_enter = QShortcut(QKeySequence(Qt.Key.Key_Enter), self)
+        self._shortcut_enter.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        self._shortcut_enter.activated.connect(self._on_return_shortcut)
+
+        # =============================================
         self._autocomplete_timer = QTimer(self)
         self._autocomplete_timer.setSingleShot(True)
         self._autocomplete_timer.setInterval(150)
@@ -484,6 +523,10 @@ class TagsTab(QWidget):
         debug_layout = QVBoxLayout(self._debug_group)
         self._debug_where = QLabel("WHERE: 1=1", self._debug_group)
         self._debug_params = QLabel("Params: []", self._debug_group)
+        self._debug_where.setWordWrap(True)
+        self._debug_params.setWordWrap(True)
+        self._debug_where.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum)
+        self._debug_params.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum)
         debug_layout.addWidget(self._debug_where)
         debug_layout.addWidget(self._debug_params)
 
@@ -628,10 +671,101 @@ class TagsTab(QWidget):
         self._toast_timer.setSingleShot(True)
         self._toast_timer.timeout.connect(lambda: self._toast_label.setVisible(False))
 
+        self._query_edit.installEventFilter(self)
+        self._suppress_return_once = False  # Enter誤発火抑止フラグ
+
         self._show_placeholder(True)
         self._update_control_states()
         QTimer.singleShot(0, self._initialise_autocomplete)
         QTimer.singleShot(0, self._bootstrap_results_if_any)
+
+    def _on_return_shortcut(self) -> None:
+        if self._completer.popup().isVisible():
+            self._accept_completion(default_if_none=True)
+            self._suppress_return_once = True
+            return
+        # 候補が無いときは通常の検索へ（既存の returnPressed を使っているなら何もしない）
+        self._on_search_clicked()
+
+    def eventFilter(self, obj, event):
+        if obj is self._query_edit and event.type() == QEvent.Type.KeyPress:
+            e: QKeyEvent = event  # type: ignore[assignment]
+            # try:
+            #     name = obj.objectName()
+            # except Exception:
+            #     name = obj.__class__.__name__
+            # print(f"[filter] obj={name} key={e.key()} popupVisible={self._completer.popup().isVisible()}")
+
+            key = e.key()
+            popup = self._completer.popup()
+            popup_visible = bool(popup and popup.isVisible())
+            # print(f"event:{event}, key:{key}")
+
+            # ↓↑ は completer に任せる（表示している時）。非表示なら通常動作
+            if key in (Qt.Key.Key_Down, Qt.Key.Key_Up):
+                return False
+
+            # Tab: 候補が見えている時は補完確定（未選択なら第1候補）
+            if key == Qt.Key.Key_Tab and popup_visible:
+                self._accept_completion(default_if_none=True)
+                e.accept()
+                return True
+
+            # Enter/Return
+            if key in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+                if popup_visible:
+                    # 補完だけ確定して検索は抑止
+                    self._accept_completion(default_if_none=True)
+                    self._suppress_return_once = True
+                    e.accept()
+                    return True
+                # 直前に補完確定した直後の Enter は無視（検索を抑止）
+                if self._suppress_return_once:
+                    self._suppress_return_once = False
+                    e.accept()
+                    return True
+                # 候補が無い=確定済みの文字列 → 通常の検索へ
+                return False
+        return super().eventFilter(obj, event)
+
+    def _accept_completion(self, default_if_none: bool = False) -> None:
+        popup = self._completer.popup()
+        index = popup.currentIndex() if popup is not None else None
+        if (index is None or not index.isValid()) and not default_if_none:
+            return
+        if (index is None or not index.isValid()) and default_if_none:
+            # 第1候補を採用
+            index = self._completer.completionModel().index(0, 0)
+            if not index.isValid():
+                return
+
+        # モデルから「表示名（件数なし）」を取得
+        completion = index.data(int(self._tag_model.NAME_ROLE)) or index.data(Qt.ItemDataRole.DisplayRole)
+        if not completion:
+            return
+        text_clean = str(completion)
+        text_clean = re.sub(r"\s* \([^)]*\)\s*$", "", text_clean)  # 念のため
+
+        base_text = self._pending_completion_text or self._query_edit.text()
+        start, end = self._current_completion_range
+        if start > len(base_text) or end > len(base_text):
+            token, start, end = extract_completion_token(base_text, len(base_text))
+
+        new_text, cursor = replace_completion_token(base_text, start, end, text_clean)
+
+        def apply():
+            block = self._query_edit.blockSignals(True)
+            try:
+                self._query_edit.setText(new_text)
+            finally:
+                self._query_edit.blockSignals(block)
+            self._query_edit.setCursorPosition(cursor)
+            self._pending_completion_text = new_text
+            self._hide_completion_popup()
+            self._query_edit.setFocus()
+
+        # QLineEditの内部処理が終わった直後に上書き
+        QTimer.singleShot(0, apply)
 
     def _initialise_autocomplete(self) -> None:
         settings = load_settings()
@@ -739,6 +873,8 @@ class TagsTab(QWidget):
             ranked = labels_util.sort_by_popularity(matches)
             limited = ranked[:50]
             self._tag_model.reset_with(limited)
+            # ★ ここが肝心：QCompleter にも “このトークン” を prefix として教える
+            self._completer.setCompletionPrefix(token)
             self._completer.complete()
         else:
             self._tag_model.reset_with([])
@@ -755,12 +891,20 @@ class TagsTab(QWidget):
         completion = index.data(int(self._tag_model.NAME_ROLE))
         if not completion:
             completion = index.data(Qt.ItemDataRole.DisplayRole)
+            if isinstance(completion, str):
+                completion = re.sub(r"\s*\([^)]*\)\s*$", "", completion)
         if not completion:
             return
         completion_text = str(completion)
-        text = self._query_edit.text()
+        # ★ ここがポイント：QCompleter が行全体を置換する前のテキストを使う
+        base_text = self._pending_completion_text or self._query_edit.text()
         start, end = self._current_completion_range
-        new_text, cursor = replace_completion_token(text, start, end, completion_text)
+        # インデックスがベース文字列からはみ出す場合の保険
+        if start > len(base_text) or end > len(base_text):
+            token, start, end = replace_completion_token.extract_completion_token(base_text, len(base_text))
+
+        new_text, cursor = replace_completion_token(base_text, start, end, completion_text)
+        print(f"base_text:{base_text}, new_text:{new_text}, cursor:{cursor}")
         block = self._query_edit.blockSignals(True)
         self._query_edit.setText(new_text)
         self._query_edit.blockSignals(block)
@@ -978,10 +1122,7 @@ class TagsTab(QWidget):
         query = self._query_edit.text().strip()
         self._highlight_terms = _extract_positive_terms(query) if query else []
         self._set_busy(True)
-        thresholds = {
-            int(category): float(value)
-            for category, value in (self._tag_thresholds or {}).items()
-        }
+        thresholds = {int(category): float(value) for category, value in (self._tag_thresholds or {}).items()}
         try:
             fragment = translate_query(
                 query,
