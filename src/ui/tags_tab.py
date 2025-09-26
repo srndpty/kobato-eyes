@@ -690,11 +690,11 @@ class TagsTab(QWidget):
     def eventFilter(self, obj, event):
         if obj is self._query_edit and event.type() == QEvent.Type.KeyPress:
             e: QKeyEvent = event  # type: ignore[assignment]
-            try:
-                name = obj.objectName()
-            except Exception:
-                name = obj.__class__.__name__
-            print(f"[filter] obj={name} key={e.key()} popupVisible={self._completer.popup().isVisible()}")
+            # try:
+            #     name = obj.objectName()
+            # except Exception:
+            #     name = obj.__class__.__name__
+            # print(f"[filter] obj={name} key={e.key()} popupVisible={self._completer.popup().isVisible()}")
 
             key = e.key()
             popup = self._completer.popup()
@@ -744,7 +744,7 @@ class TagsTab(QWidget):
         if not completion:
             return
         text_clean = str(completion)
-        text_clean = re.sub(r"\s*\([^)]*\)\s*$", "", text_clean)  # 念のため
+        text_clean = re.sub(r"\s* \([^)]*\)\s*$", "", text_clean)  # 念のため
 
         base_text = self._pending_completion_text or self._query_edit.text()
         start, end = self._current_completion_range
