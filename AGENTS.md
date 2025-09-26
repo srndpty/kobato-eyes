@@ -21,3 +21,6 @@
 - `PyQt6.QtConcurrent` は存在しません。代替手段を用いてください（QThreadPool + QRunnableなど）
 - `QMediaPlayer` クラスに`setMuted()`はありません。PyQt6ではマルチメディア関連のアーキテクチャが変更されました。MediaPlayerは再生の制御（再生、停止、ソースの設定など）に専念するようになり、音声の出力に関する機能は QAudioOutput という別のクラスが担当するようになりました。
 - QMimeDataはPyQt6.QtCore、QActionはPyQt6.QtGuiの中です
+
+## 開発環境に関する注意
+- `PYTHONPATH=src` を前提にしています
