@@ -66,6 +66,7 @@ class _TagStatsModel(QAbstractTableModel):
         conn: sqlite3.Connection,
         category: int | None,
         respect_thresholds: bool,
+        # limit: int,
     ) -> None:
         """Populate the model using the provided filters."""
 
@@ -100,8 +101,12 @@ class _TagStatsModel(QAbstractTableModel):
             f"{where_sql} "
             f"{'AND ' if where_sql else 'WHERE '}1 = 1 {score_guard}"
             "GROUP BY t.id "
-            "ORDER BY files DESC, t.name ASC"
+            # "HAVING COUNT(DISTINCT ft.file_id) >= 10 "
+            "ORDER BY files DESC, t.name ASC "
+            "LIMIT 1000"
         )
+
+        # params.append(int(max(1, limit)))
 
         for row in conn.execute(sql, params):
             category_id = int(row[0])
