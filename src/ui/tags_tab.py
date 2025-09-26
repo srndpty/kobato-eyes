@@ -18,6 +18,7 @@ from PyQt6.QtCore import (
     QEvent,
     QModelIndex,
     QObject,
+    QRect,
     QRectF,
     QRunnable,
     QSize,
@@ -30,6 +31,7 @@ from PyQt6.QtGui import (
     QColor,
     QKeyEvent,
     QKeySequence,
+    QPalette,
     QPixmap,
     QShortcut,
     QStandardItem,
@@ -316,6 +318,111 @@ class _HighlightDelegate(QStyledItemDelegate):
         return size
 
 
+class GridThumbDelegate(QStyledItemDelegate):
+    """Render thumbnails with captions in the grid view."""
+
+    def __init__(self, thumb_size: int, parent: QWidget | None = None) -> None:  # noqa: D401 - Qt signature
+        super().__init__(parent)
+        self._thumb = thumb_size
+
+    def sizeHint(self, option: QStyleOptionViewItem, index: QModelIndex) -> QSize:  # noqa: D401 - Qt signature
+        fm = option.fontMetrics
+        text_height = fm.lineSpacing() * 2 + 10
+        return QSize(self._thumb + 48, self._thumb + text_height)
+
+    def paint(
+        self,
+        painter,
+        option: QStyleOptionViewItem,
+        index: QModelIndex,
+    ) -> None:  # noqa: D401 - Qt signature
+        opt = QStyleOptionViewItem(option)
+        self.initStyleOption(opt, index)
+
+        style = opt.widget.style() if opt.widget else QApplication.style()
+        painter.save()
+        style.drawPrimitive(
+            QStyle.PrimitiveElement.PE_PanelItemViewItem,
+            opt,
+            painter,
+            opt.widget,
+        )
+        painter.restore()
+
+        rect = opt.rect
+        pix = index.data(Qt.ItemDataRole.DecorationRole)
+        icon_bottom = rect.y() + self._thumb
+        if isinstance(pix, QPixmap) and not pix.isNull():
+            thumb = pix.scaled(
+                self._thumb,
+                self._thumb,
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+            x = rect.x() + (rect.width() - thumb.width()) // 2
+            y = rect.y()
+            painter.drawPixmap(x, y, thumb)
+            icon_bottom = y + thumb.height()
+
+        available_height = max(0, rect.y() + rect.height() - icon_bottom - 4)
+        text_rect = QRect(
+            rect.x() + 6,
+            icon_bottom + 2,
+            max(0, rect.width() - 12),
+            available_height,
+        )
+        if text_rect.width() <= 0 or text_rect.height() <= 0:
+            return
+
+        palette = opt.palette
+        color_group = palette.currentColorGroup()
+        is_selected = bool(opt.state & QStyle.StateFlag.State_Selected)
+        text_role = QPalette.ColorRole.HighlightedText if is_selected else QPalette.ColorRole.Text
+        text_color = palette.color(color_group, text_role)
+
+        base_role = QPalette.ColorRole.Highlight if is_selected else QPalette.ColorRole.Base
+        base_color = palette.color(color_group, base_role)
+        luminance = 0.299 * base_color.red() + 0.587 * base_color.green() + 0.114 * base_color.blue()
+        is_dark_theme = luminance < 128
+
+        if is_dark_theme:
+            painter.save()
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(base_color)
+            painter.drawRoundedRect(text_rect, 4, 4)
+            painter.restore()
+
+        fm = opt.fontMetrics
+        raw_lines = str(index.data(Qt.ItemDataRole.DisplayRole) or "").splitlines()
+        if not raw_lines:
+            raw_lines = [""]
+        if len(raw_lines) >= 2:
+            lines = [raw_lines[0], " ".join(raw_lines[1:])]
+        else:
+            lines = [raw_lines[0]]
+        lines = [fm.elidedText(line, Qt.TextElideMode.ElideRight, text_rect.width()) for line in lines]
+        lines = [line for line in lines if line] or [""]
+
+        total_height = fm.lineSpacing() * len(lines)
+        y_start = text_rect.y() + max(0, text_rect.height() - total_height)
+
+        painter.save()
+        painter.setPen(text_color)
+        for i, line in enumerate(lines):
+            line_rect = QRect(
+                text_rect.x(),
+                y_start + i * fm.lineSpacing(),
+                text_rect.width(),
+                fm.lineSpacing(),
+            )
+            painter.drawText(
+                line_rect,
+                Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter,
+                line,
+            )
+        painter.restore()
+
+
 class _ThumbnailSignal(QObject):
     finished = pyqtSignal(int, QPixmap)
 
@@ -591,7 +698,7 @@ class TagsTab(QWidget):
         tags_col = self._table_model.columnCount() - 1
         if tags_col >= 0:
             self._table_view.setItemDelegateForColumn(tags_col, self._tags_delegate)
-        self._grid_delegate = _HighlightDelegate(lambda: self._highlight_terms, self._grid_view)
+        self._grid_delegate = GridThumbDelegate(self._THUMB_SIZE, self._grid_view)
         self._grid_view.setItemDelegate(self._grid_delegate)
 
         self._stack.addWidget(self._placeholder)
@@ -1223,7 +1330,6 @@ class TagsTab(QWidget):
             grid_item = QStandardItem(self._format_grid_text(path_obj.name, tags))
             grid_item.setEditable(False)
             grid_item.setData(row_index, Qt.ItemDataRole.UserRole)
-            grid_item.setData(Qt.AlignmentFlag.AlignCenter, Qt.ItemDataRole.TextAlignmentRole)
             grid_item.setSizeHint(QSize(self._THUMB_SIZE + 48, self._THUMB_SIZE + 72))
             grid_item.setToolTip(tags_text)
             self._grid_model.appendRow(grid_item)
