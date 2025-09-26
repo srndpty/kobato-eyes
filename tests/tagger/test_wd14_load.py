@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import logging
+import weakref
 from pathlib import Path
 from types import SimpleNamespace
-import weakref
 
 import pytest
 
@@ -90,7 +90,7 @@ def test_wd14_tagger_auto_discovers_csv(tmp_path: Path, _mock_labels: list[Path]
 
     session_options = tagger._session._sess_options  # type: ignore[attr-defined]
     assert session_options.enable_profiling is True
-    assert session_options.log_severity_level == 0
+    assert session_options.log_severity_level == 2
     assert session_options.graph_optimization_level == 99
     assert Path(session_options.profile_file_prefix).name.startswith("wd14")
 

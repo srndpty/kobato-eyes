@@ -7,7 +7,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Iterator
 
-
 _DEFAULT_TAG_FILENAMES: tuple[str, ...] = (
     "selected_tags.csv",
     "selected_tags_v3.csv",
@@ -89,7 +88,8 @@ def _iter_csv_rows(csv_path: Path) -> Iterator[list[str]]:
             lower_first = cells[0].lower()
             if lower_first in {"tag_id", "tagid", "id", "name", "tag"}:
                 continue
-            if len(cells) > 1 and cells[1].lower() in {"name", "tag"}:
+            # tagという名前のタグがあるので、ここでtagで除外してはいけない
+            if len(cells) > 1 and cells[1].lower() in {"name"}:
                 continue
             if len(cells) > 2 and cells[2].lower() in {"category"}:
                 continue
@@ -153,9 +153,7 @@ def load_selected_tags(csv_path: str | Path) -> list[TagMeta]:
     return labels
 
 
-def discover_labels_csv(
-    model_path: str | Path | None, tags_csv: str | Path | None
-) -> Path | None:
+def discover_labels_csv(model_path: str | Path | None, tags_csv: str | Path | None) -> Path | None:
     """Return the path to a WD14 labels CSV if one can be located."""
 
     if tags_csv:
@@ -189,4 +187,3 @@ def sort_by_popularity(tags: Iterable[TagMeta]) -> list[TagMeta]:
 
 
 __all__ = ["TagMeta", "discover_labels_csv", "load_selected_tags", "sort_by_popularity"]
-
