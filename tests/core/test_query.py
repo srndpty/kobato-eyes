@@ -73,6 +73,20 @@ def test_invalid_category_raises() -> None:
         translate_query("category:unknown", file_alias=ALIAS)
 
 
+def test_tag_with_parentheses_is_single_token() -> None:
+    clause = expected_tag_exists()
+    fragment = translate_query("mallow_(pokemon)", file_alias=ALIAS)
+    assert fragment.where == clause
+    assert fragment.params == ["mallow_(pokemon)"]
+
+
+def test_tag_with_colons_is_treated_as_tag() -> None:
+    clause = expected_tag_exists()
+    fragment = translate_query("artist:name:with:colon", file_alias=ALIAS)
+    assert fragment.where == clause
+    assert fragment.params == ["artist:name:with:colon"]
+
+
 def test_invalid_trailing_token_raises() -> None:
     with pytest.raises(ValueError):
         translate_query("kobato AND", file_alias=ALIAS)

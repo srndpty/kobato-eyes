@@ -87,27 +87,41 @@ _CATEGORY_ALIASES = {
 _SCORE_RE = re.compile(r"score\s*(>=|<=|=|>|<)\s*([0-9]*\.?[0-9]+)", re.IGNORECASE)
 
 
-def _split_parentheses(token: str) -> list[str]:
-    parts: list[str] = []
-    buffer = []
-    for char in token:
+def _split_parens_safely(raw: str) -> list[str]:
+    """Split parentheses tokens while keeping tag-like strings intact."""
+
+    if "(" in raw and ")" in raw and not any(char.isspace() for char in raw):
+        return [raw]
+
+    tokens: list[str] = []
+    buffer: list[str] = []
+    i = 0
+    while i < len(raw):
+        char = raw[i]
+        if char == "\\" and i + 1 < len(raw) and raw[i + 1] in "()":
+            buffer.append(char)
+            buffer.append(raw[i + 1])
+            i += 2
+            continue
         if char in "()":
             if buffer:
-                parts.append("".join(buffer))
+                tokens.append("".join(buffer))
                 buffer = []
-            parts.append(char)
-        else:
-            buffer.append(char)
+            tokens.append(char)
+            i += 1
+            continue
+        buffer.append(char)
+        i += 1
     if buffer:
-        parts.append("".join(buffer))
-    return [part for part in parts if part]
+        tokens.append("".join(buffer))
+    return [token for token in tokens if token]
 
 
 def _tokenize(query: str) -> list[_Token]:
     raw_tokens = shlex.split(query, posix=True) if query else []
     tokens: list[_Token] = []
     for raw_token in raw_tokens:
-        for raw in _split_parentheses(raw_token):
+        for raw in _split_parens_safely(raw_token):
             upper = raw.upper()
             if raw == "(":
                 tokens.append(_Token(_TokenKind.LPAREN, raw))
@@ -127,7 +141,8 @@ def _tokenize(query: str) -> list[_Token]:
             elif _SCORE_RE.fullmatch(raw):
                 tokens.append(_Token(_TokenKind.SCORE, raw))
             else:
-                tokens.append(_Token(_TokenKind.TAG, raw))
+                tag = raw.replace(r"\(", "(").replace(r"\)", ")")
+                tokens.append(_Token(_TokenKind.TAG, tag))
     return tokens
 
 
