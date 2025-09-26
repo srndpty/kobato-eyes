@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-_DELIMITERS = " \t\r\n,;()"
+_DELIMITERS = " \t\r\n,;:"
 
 
 def abbreviate_count(value: object) -> str:
