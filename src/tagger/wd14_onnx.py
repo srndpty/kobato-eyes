@@ -403,7 +403,7 @@ def _configure_session_options(options: "ort.SessionOptions") -> None:
 
     options.graph_optimization_level = getattr(ort.GraphOptimizationLevel, "ORT_ENABLE_ALL", 99)
     options.enable_profiling = True
-    options.log_severity_level = 0
+    options.log_severity_level = 2
     profile_dir = _resolve_profile_dir()
     profile_dir.mkdir(parents=True, exist_ok=True)
     options.profile_file_prefix = str(profile_dir / "wd14")
