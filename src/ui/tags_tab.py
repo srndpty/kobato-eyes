@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import html
 import logging
+import os
 import re
 import sqlite3
 import subprocess
@@ -642,6 +643,7 @@ class TagsTab(QWidget):
         self._table_view.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self._table_view.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self._table_view.doubleClicked.connect(self._on_table_double_clicked)
+        self._table_view.activated.connect(self._on_table_double_clicked)
         self._table_view.setModel(self._table_model)
         self._table_view.horizontalHeader().setStretchLastSection(True)
         self._table_view.setIconSize(QSize(self._THUMB_SIZE, self._THUMB_SIZE))
@@ -658,6 +660,7 @@ class TagsTab(QWidget):
         self._grid_view.setIconSize(QSize(self._THUMB_SIZE, self._THUMB_SIZE))
         self._grid_view.setGridSize(QSize(self._THUMB_SIZE + 48, self._THUMB_SIZE + 72))
         self._grid_view.doubleClicked.connect(self._on_grid_double_clicked)
+        self._grid_view.activated.connect(self._on_grid_double_clicked)
         self._grid_view.setModel(self._grid_model)
 
         self._highlight_terms: list[str] = []
@@ -1373,7 +1376,7 @@ class TagsTab(QWidget):
     def _open_row(self, row: int) -> None:
         if 0 <= row < len(self._results_cache):
             path = Path(str(self._results_cache[row].get("path", "")))
-            self._open_in_explorer(path)
+            self._open_file_with_default_app(path)
 
     @staticmethod
     def _format_size(value: object) -> str:
@@ -1477,14 +1480,19 @@ class TagsTab(QWidget):
         subtitle = ", ".join(tag_names)
         return f"{name}\n{subtitle}" if subtitle else name
 
-    def _open_in_explorer(self, path: Path) -> None:
+    def _open_file_with_default_app(self, path: Path) -> None:
+        """Open *path* with the OS default application."""
+
         try:
+            if not path.exists():
+                self._status_label.setText(f"File not found: {path}")
+                return
             if sys.platform.startswith("win"):
-                subprocess.Popen(["explorer", f"/select,{path}"])
+                os.startfile(str(path))  # type: ignore[attr-defined]
             elif sys.platform == "darwin":
-                subprocess.Popen(["open", "-R", str(path)])
+                subprocess.Popen(["open", str(path)])
             else:
-                subprocess.Popen(["xdg-open", str(path.parent)])
+                subprocess.Popen(["xdg-open", str(path)])
         except Exception as exc:  # pragma: no cover
             self._status_label.setText(f"Failed to open file: {exc}")
 
