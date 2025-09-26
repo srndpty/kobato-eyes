@@ -325,9 +325,7 @@ class GridThumbDelegate(QStyledItemDelegate):
         super().__init__(parent)
         self._thumb = thumb_size
 
-    def sizeHint(
-        self, option: QStyleOptionViewItem, index: QModelIndex
-    ) -> QSize:  # noqa: D401 - Qt signature
+    def sizeHint(self, option: QStyleOptionViewItem, index: QModelIndex) -> QSize:  # noqa: D401 - Qt signature
         fm = option.fontMetrics
         text_height = fm.lineSpacing() * 2 + 10
         return QSize(self._thumb + 48, self._thumb + text_height)
@@ -379,26 +377,18 @@ class GridThumbDelegate(QStyledItemDelegate):
         palette = opt.palette
         color_group = palette.currentColorGroup()
         is_selected = bool(opt.state & QStyle.StateFlag.State_Selected)
-        text_role = (
-            QPalette.ColorRole.HighlightedText
-            if is_selected
-            else QPalette.ColorRole.Text
-        )
+        text_role = QPalette.ColorRole.HighlightedText if is_selected else QPalette.ColorRole.Text
         text_color = palette.color(color_group, text_role)
 
         base_role = QPalette.ColorRole.Highlight if is_selected else QPalette.ColorRole.Base
         base_color = palette.color(color_group, base_role)
-        luminance = (
-            0.299 * base_color.red()
-            + 0.587 * base_color.green()
-            + 0.114 * base_color.blue()
-        )
+        luminance = 0.299 * base_color.red() + 0.587 * base_color.green() + 0.114 * base_color.blue()
         is_dark_theme = luminance < 128
 
         if is_dark_theme:
             painter.save()
             painter.setPen(Qt.PenStyle.NoPen)
-            painter.setBrush(QColor(0, 0, 0, 160))
+            painter.setBrush(base_color)
             painter.drawRoundedRect(text_rect, 4, 4)
             painter.restore()
 
@@ -410,10 +400,7 @@ class GridThumbDelegate(QStyledItemDelegate):
             lines = [raw_lines[0], " ".join(raw_lines[1:])]
         else:
             lines = [raw_lines[0]]
-        lines = [
-            fm.elidedText(line, Qt.TextElideMode.ElideRight, text_rect.width())
-            for line in lines
-        ]
+        lines = [fm.elidedText(line, Qt.TextElideMode.ElideRight, text_rect.width()) for line in lines]
         lines = [line for line in lines if line] or [""]
 
         total_height = fm.lineSpacing() * len(lines)
