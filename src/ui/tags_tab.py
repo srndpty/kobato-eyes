@@ -452,6 +452,7 @@ class TagsTab(QWidget):
         self._completer = QCompleter(self._tag_model, self)
         self._completer.setCompletionMode(QCompleter.CompletionMode.PopupCompletion)
         self._completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
+        self._completer.setCompletionRole(int(self._tag_model.NAME_ROLE))
         self._completer.activated[QModelIndex].connect(self._on_completion_activated)
         self._query_edit.setCompleter(self._completer)
         self._autocomplete_timer = QTimer(self)
@@ -755,6 +756,8 @@ class TagsTab(QWidget):
         completion = index.data(int(self._tag_model.NAME_ROLE))
         if not completion:
             completion = index.data(Qt.ItemDataRole.DisplayRole)
+            if isinstance(completion, str):
+                completion = re.sub(r"\s*\([^)]*\)\s*$", "", completion)
         if not completion:
             return
         completion_text = str(completion)

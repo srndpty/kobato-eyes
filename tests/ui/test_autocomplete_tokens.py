@@ -22,5 +22,5 @@ def test_replace_completion_token() -> None:
     token, start, end = extract_completion_token(text)
     assert token == "ch"
     new_text, cursor = replace_completion_token(text, start, end, "character:")
-    assert new_text == "solo AND character:"
+    assert new_text == "solo AND character: "
     assert cursor == len(new_text)
