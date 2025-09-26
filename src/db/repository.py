@@ -252,12 +252,35 @@ def upsert_embedding(
         conn.execute(query, (file_id, model, int(dim), payload))
 
 
+def _resolve_relevance_thresholds(
+    thresholds: Mapping[int, float] | None,
+) -> tuple[float, float, float, float]:
+    values: dict[int, float] = dict(_DEFAULT_CATEGORY_THRESHOLDS)
+    if thresholds:
+        for key, value in thresholds.items():
+            category = _normalise_category(key)
+            if category is None:
+                continue
+            try:
+                values[category] = float(value)
+            except (TypeError, ValueError):
+                continue
+    general = float(values.get(0, 0.0))
+    character = float(values.get(1, 0.0))
+    copyright = float(values.get(3, 0.0))
+    default = float(values.get(-1, 0.0))
+    return general, character, copyright, default
+
+
 def search_files(
     conn: sqlite3.Connection,
     where_sql: str,
     params: list[object] | tuple[object, ...],
     *,
-    order_by: str = "f.mtime DESC",
+    tags_for_relevance: Sequence[str] | None = None,
+    thresholds: Mapping[int, float] | None = None,
+    order: str = "mtime",
+    order_by: str | None = None,
     limit: int = 200,
     offset: int = 0,
 ) -> list[dict[str, object]]:
@@ -267,13 +290,63 @@ def search_files(
     limit = max(0, int(limit))
     offset = max(0, int(offset))
 
+    tag_terms = [str(tag) for tag in (tags_for_relevance or []) if str(tag)]
+    order_mode = (order or "").lower()
+    use_relevance = bool(tag_terms) and order_mode == "relevance" and not order_by
+
+    base_params: list[object] = []
+    if use_relevance:
+        placeholders = ", ".join("?" for _ in tag_terms)
+        general_thr, character_thr, copyright_thr, default_thr = _resolve_relevance_thresholds(
+            thresholds
+        )
+        cte = (
+            "WITH q AS ("
+            "SELECT ft.file_id AS fid, SUM(ft.score) AS rel "
+            "FROM file_tags ft "
+            "JOIN tags t ON t.id = ft.tag_id "
+            f"WHERE t.name IN ({placeholders}) "
+            "AND ft.score >= CASE t.category "
+            "WHEN 0 THEN ? "
+            "WHEN 1 THEN ? "
+            "WHEN 3 THEN ? "
+            "ELSE ? "
+            "END "
+            "GROUP BY ft.file_id) "
+        )
+        query_prefix = cte
+        base_params.extend(tag_terms)
+        base_params.extend([general_thr, character_thr, copyright_thr, default_thr])
+        relevance_select = "COALESCE(q.rel, 0.0) AS relevance"
+        join_clause = "LEFT JOIN q ON q.fid = f.id "
+    else:
+        query_prefix = ""
+        relevance_select = "0.0 AS relevance"
+        join_clause = ""
+
+    if order_by:
+        order_clause = order_by
+    elif use_relevance:
+        order_clause = "relevance DESC, f.mtime DESC"
+    else:
+        order_clause = "f.mtime DESC"
+
     query = (
-        "SELECT f.id, f.path, f.size, f.mtime, f.width, f.height "
-        "FROM files f WHERE "
-        f"{where_sql} ORDER BY {order_by} LIMIT ? OFFSET ?"
+        f"{query_prefix}"
+        "SELECT "
+        "f.id, f.path, f.size, f.mtime, f.width, f.height, "
+        f"{relevance_select} "
+        "FROM files f "
+        f"{join_clause}"
+        "WHERE "
+        f"{where_sql} "
+        f"ORDER BY {order_clause} "
+        "LIMIT ? OFFSET ?"
     )
 
-    cursor = conn.execute(query, (*params, limit, offset))
+    where_params = tuple(params or [])
+    execute_params = (*base_params, *where_params, limit, offset)
+    cursor = conn.execute(query, execute_params)
     rows = cursor.fetchall()
 
     results: list[dict[str, object]] = []
@@ -297,6 +370,7 @@ def search_files(
                 "height": row["height"],
                 "size": row["size"],
                 "mtime": row["mtime"],
+                "relevance": float(row["relevance"] or 0.0),
                 "tags": tags,
                 "top_tags": tags,
             }

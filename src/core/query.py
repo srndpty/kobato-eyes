@@ -363,6 +363,43 @@ def _compile_expression(
     raise TypeError(f"Unhandled expression type: {expr}")
 
 
+def extract_positive_tag_terms(query: str) -> list[str]:
+    """Return tag names present in ``query`` that are not negated."""
+
+    tokens = _tokenize(query)
+    parser = _Parser(tokens)
+    expr = parser.parse()
+    if expr is None:
+        return []
+
+    seen: set[str] = set()
+    ordered: list[str] = []
+
+    def walk(node: _Expression, negated: bool = False) -> None:
+        if isinstance(node, _TagExpr):
+            if not negated:
+                name = node.name.strip()
+                if not name or name.endswith(":"):
+                    return
+                lowered = name.lower()
+                if lowered not in seen:
+                    seen.add(lowered)
+                    ordered.append(lowered)
+            return
+        if isinstance(node, _UnaryExpr) and node.op == "NOT":
+            walk(node.operand, not negated)
+            return
+        if isinstance(node, _BinaryExpr):
+            walk(node.left, negated)
+            walk(node.right, negated)
+            return
+        if isinstance(node, (_CategoryExpr, _ScoreExpr)):
+            return
+
+    walk(expr, False)
+    return ordered
+
+
 def translate_query(
     query: str,
     *,
@@ -376,4 +413,9 @@ def translate_query(
     return _build_sql(expr, file_alias=file_alias, thresholds=thresholds)
 
 
-__all__ = ["QueryFragment", "file_pk", "translate_query"]
+__all__ = [
+    "QueryFragment",
+    "extract_positive_tag_terms",
+    "file_pk",
+    "translate_query",
+]

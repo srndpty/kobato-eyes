@@ -65,10 +65,10 @@ from PyQt6.QtWidgets import (
 
 from core.config import load_settings
 from core.pipeline import IndexProgress, retag_all, retag_query, run_index_once
-from core.query import translate_query
+from core.query import extract_positive_tag_terms, translate_query
 from core.settings import PipelineSettings
 from db.connection import get_conn
-from db.repository import list_tag_names, search_files
+from db.repository import _load_tag_thresholds, list_tag_names, search_files
 from tagger import labels_util
 from tagger.base import TagCategory
 from tagger.wd14_onnx import ONNXRUNTIME_MISSING_MESSAGE
@@ -105,37 +105,6 @@ _CATEGORY_KEY_LOOKUP = {
     "5": TagCategory.META,
     "meta": TagCategory.META,
 }
-
-
-def _extract_positive_terms(query: str) -> list[str]:
-    """Extract user-entered terms eligible for highlighting."""
-
-    q = (query or "").strip()
-    if not q:
-        return []
-    tokens: list[str] = []
-    for raw in re.split(r"\s+", q):
-        t = raw.strip().strip("\"'")
-        if not t:
-            continue
-        low = t.lower()
-        if low in _RESERVED:
-            continue
-        if any(low.startswith(prefix) for prefix in _PREFIXES):
-            parts = low.split(":", 1)
-            rest = parts[1] if len(parts) == 2 else ""
-            if rest:
-                tokens.append(rest)
-            continue
-        tokens.append(t)
-    uniq: list[str] = []
-    seen: set[str] = set()
-    for token in sorted(tokens, key=lambda s: (-len(s), s.lower())):
-        key = token.lower()
-        if key not in seen:
-            seen.add(key)
-            uniq.append(token)
-    return uniq
 
 
 def _category_thresholds() -> dict[TagCategory, float]:
@@ -204,6 +173,9 @@ def _pick_highlight_colors(palette) -> tuple[str, str]:
     return background, foreground
 
 
+_TAG_LIST_ROLE = Qt.ItemDataRole.UserRole + 128
+
+
 class _HighlightDelegate(QStyledItemDelegate):
     """Render text with highlighted substrings supplied by a provider."""
 
@@ -219,51 +191,23 @@ class _HighlightDelegate(QStyledItemDelegate):
     def _to_html_with_highlight(
         text: str,
         terms: list[str],
+        tags: Iterable[tuple[str, float]] | None,
         *,
         bg: str,
         fg: str,
     ) -> str:
-        if not text or not terms:
-            return html.escape(text or "")
-        src = text
-        spans: list[tuple[int, int]] = []
-        lower = src.lower()
-        for term in terms:
-            t = term.lower()
-            if not t:
-                continue
-            start = 0
-            while True:
-                index = lower.find(t, start)
-                if index < 0:
-                    break
-                spans.append((index, index + len(t)))
-                start = index + len(t)
-        if not spans:
-            return html.escape(src)
-
-        spans.sort()
-        merged: list[tuple[int, int]] = []
-        current_start, current_end = spans[0]
-        for start, end in spans[1:]:
-            if start <= current_end:
-                current_end = max(current_end, end)
-            else:
-                merged.append((current_start, current_end))
-                current_start, current_end = start, end
-        merged.append((current_start, current_end))
-
-        output: list[str] = []
-        last = 0
-        for start, end in merged:
-            if last < start:
-                output.append(html.escape(src[last:start]))
-            escaped = html.escape(src[start:end])
-            output.append(f'<span style="background-color:{bg}; color:{fg};">{escaped}</span>')
-            last = end
-        if last < len(src):
-            output.append(html.escape(src[last:]))
-        return "".join(output)
+        term_set = {term.lower() for term in terms if term}
+        if tags and term_set:
+            parts: list[str] = []
+            for name, score in tags:
+                label = f"{name} ({float(score):.2f})"
+                escaped = html.escape(label)
+                if name.lower() in term_set:
+                    parts.append(f'<span style="background-color:{bg}; color:{fg};">{escaped}</span>')
+                else:
+                    parts.append(escaped)
+            return ", ".join(parts)
+        return html.escape(text or "")
 
     def paint(self, painter, option: QStyleOptionViewItem, index):  # noqa: D401 - Qt signature
         opt = QStyleOptionViewItem(option)
@@ -273,6 +217,8 @@ class _HighlightDelegate(QStyledItemDelegate):
         style.drawControl(QStyle.ControlElement.CE_ItemViewItem, opt, painter, opt.widget)
 
         text = str(index.data() or "")
+        raw_tags = index.data(int(_TAG_LIST_ROLE))
+        tags = list(raw_tags) if raw_tags else []
         terms = list(self._terms_provider() or [])
         background, foreground = _pick_highlight_colors(option.palette)
         doc = QTextDocument()
@@ -282,6 +228,7 @@ class _HighlightDelegate(QStyledItemDelegate):
             self._to_html_with_highlight(
                 text,
                 terms,
+                tags,
                 bg=background,
                 fg=foreground,
             )
@@ -295,6 +242,8 @@ class _HighlightDelegate(QStyledItemDelegate):
 
     def sizeHint(self, option: QStyleOptionViewItem, index):  # noqa: D401 - Qt signature
         text = str(index.data() or "")
+        raw_tags = index.data(int(_TAG_LIST_ROLE))
+        tags = list(raw_tags) if raw_tags else []
         terms = list(self._terms_provider() or [])
         background, foreground = _pick_highlight_colors(option.palette)
         doc = QTextDocument()
@@ -304,6 +253,7 @@ class _HighlightDelegate(QStyledItemDelegate):
             self._to_html_with_highlight(
                 text,
                 terms,
+                tags,
                 bg=background,
                 fg=foreground,
             )
@@ -694,6 +644,9 @@ class TagsTab(QWidget):
         self._grid_view.setModel(self._grid_model)
 
         self._highlight_terms: list[str] = []
+        self._positive_terms: list[str] = []
+        self._relevance_thresholds: dict[int, float] = {}
+        self._use_relevance = False
         self._tags_delegate = _HighlightDelegate(lambda: self._highlight_terms, self._table_view)
         tags_col = self._table_model.columnCount() - 1
         if tags_col >= 0:
@@ -903,6 +856,9 @@ class TagsTab(QWidget):
             self._table_model.removeRows(0, self._table_model.rowCount())
             self._grid_model.removeRows(0, self._grid_model.rowCount())
             self._highlight_terms = []
+            self._positive_terms = []
+            self._relevance_thresholds = {}
+            self._use_relevance = False
             self._debug_where.setText("WHERE: 1=1")
             self._debug_params.setText("Params: []")
             self._debug_group.setVisible(False)
@@ -1227,7 +1183,17 @@ class TagsTab(QWidget):
 
     def _on_search_clicked(self) -> None:
         query = self._query_edit.text().strip()
-        self._highlight_terms = _extract_positive_terms(query) if query else []
+        positive_terms = extract_positive_tag_terms(query) if query else []
+        self._highlight_terms = list(positive_terms)
+        self._positive_terms = positive_terms
+        self._use_relevance = bool(positive_terms)
+        if self._conn is not None:
+            try:
+                self._relevance_thresholds = _load_tag_thresholds(self._conn)
+            except sqlite3.Error:
+                self._relevance_thresholds = {}
+        else:
+            self._relevance_thresholds = {}
         self._set_busy(True)
         thresholds = {int(category): float(value) for category, value in (self._tag_thresholds or {}).items()}
         try:
@@ -1243,8 +1209,10 @@ class TagsTab(QWidget):
             self._grid_view.viewport().update()
             return
 
-        self._debug_where.setText(f"WHERE: {fragment.where}")
-        self._debug_params.setText(f"Params: {fragment.params}")
+        order_clause = "relevance DESC, f.mtime DESC" if self._use_relevance else "f.mtime DESC"
+        terms_text = ", ".join(self._positive_terms)
+        self._debug_where.setText(f"WHERE: {fragment.where}\nORDER: {order_clause}")
+        self._debug_params.setText(f"Params: {fragment.params}\nRelevance terms: [{terms_text}]")
         self._debug_group.setVisible(bool(fragment.where.strip() and fragment.where.strip() != "1=1"))
 
         self._current_query = query
@@ -1280,6 +1248,9 @@ class TagsTab(QWidget):
                 self._conn,
                 self._current_where,
                 self._current_params,
+                tags_for_relevance=self._positive_terms,
+                thresholds=self._relevance_thresholds,
+                order="relevance" if self._use_relevance else "mtime",
                 limit=self._PAGE_SIZE,
                 offset=self._offset,
             )
@@ -1324,6 +1295,7 @@ class TagsTab(QWidget):
             for item in table_items:
                 item.setEditable(False)
             table_items[-1].setToolTip(tags_text)
+            table_items[-1].setData(tags, int(_TAG_LIST_ROLE))
             self._table_model.appendRow(table_items)
             self._table_view.setRowHeight(row_index, self._THUMB_SIZE + 16)
 
