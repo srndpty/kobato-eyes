@@ -75,7 +75,6 @@ if HEADLESS:
         def __init__(self, *args, **kwargs) -> None:  # noqa: D401 - Qt-compatible signature
             raise RuntimeError("kobato-eyes UI is unavailable in headless mode")
 
-
     def run() -> None:
         """Headless environments cannot launch the GUI."""
 
@@ -89,8 +88,8 @@ else:
 
     QGuiApplication.setAttribute(Qt.ApplicationAttribute.AA_UseSoftwareOpenGL)
 
-    from db.connection import bootstrap_if_needed
     from core.settings import PipelineSettings
+    from db.connection import bootstrap_if_needed
     from ui.dup_tab import DupTab
     from ui.settings_tab import SettingsTab
     from ui.tags_tab import TagsTab
@@ -132,9 +131,15 @@ else:
         def _on_settings_applied(self, settings: PipelineSettings) -> None:
             self._tags_tab.reload_autocomplete(settings)
 
-
     def run() -> None:
         """Launch the kobato-eyes GUI application."""
+        import faulthandler
+
+        faulthandler.enable(all_threads=True)
+        import os
+
+        os.environ.setdefault("KOBATO_PIPELINE_SKIP_HNSW", "1")
+        os.environ.setdefault("OMP_NUM_THREADS", "1")  # OpenMP の並列を無効化しておくと吉
 
         setup_logging()
         app = QApplication(sys.argv)

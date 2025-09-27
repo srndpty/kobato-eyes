@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from pathlib import Path
 from typing import Any, Sequence
 
@@ -34,19 +35,17 @@ class OpenClipEmbedder:
         else:
             requested_device = str(device).strip().lower() if device is not None else "auto"
         if requested_device not in {"auto", "cuda", "cpu"}:
-            logger.warning(
-                "OpenCLIP: unknown device '%s', defaulting to auto detection", requested_device
-            )
+            logger.warning("OpenCLIP: unknown device '%s', defaulting to auto detection", requested_device)
             requested_device = "auto"
+
+        requested_device = str(os.getenv("KOBATO_EMBED_DEVICE", device or "auto")).strip().lower()
         if requested_device == "auto":
             resolved_type = "cuda" if torch.cuda.is_available() else "cpu"
         elif requested_device == "cuda":
             if torch.cuda.is_available():
                 resolved_type = "cuda"
             else:
-                logger.warning(
-                    "OpenCLIP: CUDA requested but not available; falling back to CPU"
-                )
+                logger.warning("OpenCLIP: CUDA requested but not available; falling back to CPU")
                 resolved_type = "cpu"
         else:
             resolved_type = "cpu"
@@ -69,9 +68,7 @@ class OpenClipEmbedder:
             self._device.type,
         )
 
-        model, preprocess = _create_model_and_preprocess(
-            model_name, resolved_pretrained, self._device
-        )
+        model, preprocess = _create_model_and_preprocess(model_name, resolved_pretrained, self._device)
         model.to(self._device)
         model.eval()
 
@@ -81,11 +78,36 @@ class OpenClipEmbedder:
 
         self._model = model
         self._preprocess = preprocess
-        self._embedding_dim = int(getattr(model.visual, "output_dim"))
+        # まずは素直に visual.output_dim を試す
+        emb_dim = getattr(model.visual, "output_dim", None)
+        if isinstance(emb_dim, (int,)):
+            self._embedding_dim = int(emb_dim)
+        else:
+            # 次に text_projection（CLIP の線形射）から列数を拾う
+            self._embedding_dim = None
+            proj = getattr(model, "text_projection", None)
+            try:
+                if proj is not None and hasattr(proj, "shape"):
+                    self._embedding_dim = int(proj.shape[1])
+            except Exception:
+                pass
+            # それでも取れなければ、必要時に ensure_dim() で決める（遅延確定）
 
     @property
     def embedding_dim(self) -> int:
         """Return the dimensionality of produced embeddings."""
+        return self._embedding_dim
+
+    @property
+    def dim(self) -> int | None:
+        return self._embedding_dim
+
+    # ★ 追加：どうしても不明なとき 1 回だけ軽い推論で次元を確定する
+    def ensure_dim(self) -> int:
+        if self._embedding_dim is None:
+            dummy = Image.new("RGB", (224, 224), (0, 0, 0))
+            vec = self.embed_images([dummy])
+            self._embedding_dim = int(vec.shape[1])
         return self._embedding_dim
 
     def _encode_tensor_batch(self, tensor_batch: torch.Tensor) -> torch.Tensor:
@@ -100,7 +122,10 @@ class OpenClipEmbedder:
     def embed_images(self, images: Sequence[Image.Image]) -> np.ndarray:
         """Encode a sequence of PIL images into normalized embedding vectors."""
         if not images:
-            return np.empty((0, self.embedding_dim), dtype=np.float32)
+            # ★ 次元未確定でもエラーにならないように（任意）
+            if self._embedding_dim is None:
+                return np.empty((0, 0), dtype=np.float32)
+            return np.empty((0, self._embedding_dim), dtype=np.float32)
 
         tensors = [self._preprocess(image) for image in images]
         embeddings: list[np.ndarray] = []
@@ -152,9 +177,7 @@ def _select_pretrained_tag(requested: str, available: Sequence[str]) -> tuple[st
 def _create_model_and_preprocess(
     model_name: str, pretrained_tag: str, device: torch.device
 ) -> tuple[torch.nn.Module, Any]:
-    result = open_clip.create_model_and_transforms(
-        model_name, pretrained=pretrained_tag, device=device
-    )
+    result = open_clip.create_model_and_transforms(model_name, pretrained=pretrained_tag, device=device)
     try:
         length = len(result)
     except TypeError as exc:  # pragma: no cover - defensive safeguard
@@ -165,7 +188,5 @@ def _create_model_and_preprocess(
     elif length == 2:
         model, preprocess = result  # type: ignore[misc]
     else:
-        raise RuntimeError(
-            "open_clip.create_model_and_transforms returned unexpected tuple length"
-        )
+        raise RuntimeError("open_clip.create_model_and_transforms returned unexpected tuple length")
     return model, preprocess

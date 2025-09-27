@@ -5,7 +5,11 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 from threading import Lock
-from typing import Callable, Iterable, Literal
+from typing import TYPE_CHECKING, Callable, Iterable, Literal
+
+if TYPE_CHECKING:
+    from core.watcher import DirectoryWatcher  # or 同一モジュールなら相対 import 不要
+    # from watchdog.observers import Observer
 
 from watchdog.events import FileSystemEvent, FileSystemEventHandler
 from watchdog.observers import Observer
@@ -14,12 +18,12 @@ from utils.env import is_headless
 from utils.fs import from_system_path, is_hidden, to_system_path
 
 if is_headless():
+
     class QObject:  # type: ignore[too-many-ancestors]
         """Simple QObject replacement when Qt is unavailable."""
 
         def __init__(self, *args, **kwargs) -> None:  # noqa: D401 - Qt-compatible signature
             pass
-
 
     class _Signal:
         def __init__(self) -> None:
@@ -37,7 +41,6 @@ if is_headless():
                 self._callbacks.remove(callback)
             except ValueError:
                 pass
-
 
     class QTimer:
         """Stub timer that mimics the Qt API shape."""
@@ -67,7 +70,7 @@ logger = logging.getLogger(__name__)
 class _ImageEventHandler(FileSystemEventHandler):
     """Dispatch file system events to the owning watcher."""
 
-    def __init__(self, watcher: DirectoryWatcher) -> None:  # type: ignore[name-defined]
+    def __init__(self, watcher: "DirectoryWatcher") -> None:  # type: ignore[name-defined]
         super().__init__()
         self._watcher = watcher
 

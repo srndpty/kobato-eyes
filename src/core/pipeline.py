@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import os
 import time
 from dataclasses import dataclass
 from enum import Enum
@@ -859,33 +860,35 @@ def run_index_once(
         ),
         force=True,
     )
-
-    if hnsw_additions and not cancelled:
-        dim = hnsw_additions[0][1].shape[0]
-        ensure_dirs()
-        if settings.index_dir:
-            index_dir = Path(settings.index_dir).expanduser()
-        else:
-            index_dir = get_index_dir()
-        index_dir.mkdir(parents=True, exist_ok=True)
-        index_path = index_dir / "hnsw_cosine.bin"
-        try:
-            index = load_hnsw_index(index_path, dim=dim)
-            added = add_embeddings_to_hnsw(index, hnsw_additions, dim=dim)
-            if added:
-                save_hnsw_index(index, index_path)
-            stats["hnsw_added"] = added
-            logger.info("HNSW index updated with %d new vector(s)", added)
-            _emit(
-                IndexProgress(
-                    phase=IndexPhase.HNSW,
-                    done=added,
-                    total=len(hnsw_additions),
-                ),
-                force=True,
-            )
-        except Exception as exc:  # pragma: no cover - defensive logging
-            logger.exception("Failed to update HNSW index: %s", exc)
+    if os.getenv("KOBATO_PIPELINE_SKIP_HNSW") == "1":
+        logger.info("HNSW update skipped by KOBATO_PIPELINE_SKIP_HNSW=1")
+    else:
+        if hnsw_additions and not cancelled:
+            dim = hnsw_additions[0][1].shape[0]
+            ensure_dirs()
+            if settings.index_dir:
+                index_dir = Path(settings.index_dir).expanduser()
+            else:
+                index_dir = get_index_dir()
+            index_dir.mkdir(parents=True, exist_ok=True)
+            index_path = index_dir / "hnsw_cosine.bin"
+            try:
+                index = load_hnsw_index(index_path, dim=dim)
+                added = add_embeddings_to_hnsw(index, hnsw_additions, dim=dim)
+                if added:
+                    save_hnsw_index(index, index_path)
+                stats["hnsw_added"] = added
+                logger.info("HNSW index updated with %d new vector(s)", added)
+                _emit(
+                    IndexProgress(
+                        phase=IndexPhase.HNSW,
+                        done=added,
+                        total=len(hnsw_additions),
+                    ),
+                    force=True,
+                )
+            except Exception as exc:  # pragma: no cover - defensive logging
+                logger.exception("Failed to update HNSW index: %s", exc)
 
     stats["elapsed_sec"] = time.perf_counter() - start_time
     stats["cancelled"] = cancelled
