@@ -74,39 +74,41 @@ class _TagStatsModel(QAbstractTableModel):
         self._rows.clear()
 
         params: list[object] = []
-        where_clauses: list[str] = []
+        where_conditions: list[str] = []
         thresholds: dict[int, float] | None = None
         if category is not None:
-            where_clauses.append("t.category = ?")
+            where_conditions.append("t.category = ?")
             params.append(int(category))
         if respect_thresholds:
             thresholds = _load_thresholds(conn)
 
-        score_guard = ""
+        score_condition = ""
         if thresholds is not None:
             cases = []
             case_params: list[object] = []
             for cat_id in sorted(thresholds):
                 cases.append("WHEN ? THEN ?")
                 case_params.extend([cat_id, thresholds[cat_id]])
-            score_guard = "AND ft.score >= CASE t.category " + " ".join(cases) + " ELSE 0.0 END "
+            score_condition = "ft.score >= CASE t.category " + " ".join(cases) + " ELSE 0.0 END"
             params.extend(case_params)
 
-        where_sql = "WHERE " + " AND ".join(where_clauses) if where_clauses else ""
+        where_conditions.append("f.is_present = 1")
+        if score_condition:
+            where_conditions.append(score_condition)
+
+        where_sql = "WHERE " + " AND ".join(where_conditions)
         sql = (
             "SELECT t.category, t.name, COUNT(DISTINCT ft.file_id) AS files, "
             "AVG(ft.score) AS avg_score, MAX(ft.score) AS max_score "
             "FROM tags t "
             "JOIN file_tags ft ON ft.tag_id = t.id "
+            "JOIN files f ON f.id = ft.file_id "
             f"{where_sql} "
-            f"{'AND ' if where_sql else 'WHERE '}1 = 1 {score_guard}"
             "GROUP BY t.id "
             # "HAVING COUNT(DISTINCT ft.file_id) >= 10 "
             "ORDER BY files DESC, t.name ASC "
             "LIMIT 1000"
         )
-
-        # params.append(int(max(1, limit)))
 
         for row in conn.execute(sql, params):
             category_id = int(row[0])

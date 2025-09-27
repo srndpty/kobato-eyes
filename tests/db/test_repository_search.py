@@ -4,6 +4,23 @@ from __future__ import annotations
 
 import pytest
 
+import sys
+from pathlib import Path
+
+SRC_DIR = Path(__file__).resolve().parents[2] / "src"
+if str(SRC_DIR) not in sys.path:
+    sys.path.insert(0, str(SRC_DIR))
+
+for module_name in (
+    "core",
+    "core.query",
+    "db",
+    "db.connection",
+    "db.repository",
+    "db.schema",
+):
+    sys.modules.pop(module_name, None)
+
 from core.query import translate_query
 from db.connection import get_conn
 from db.repository import search_files
@@ -127,3 +144,13 @@ def test_search_files_includes_tag_categories(conn) -> None:
     assert record["tags"][1][0] == "original_character"
     assert record["tags"][1][1] == pytest.approx(0.85)
     assert record["tags"][1][2] == 1
+
+
+def test_search_files_excludes_missing_records(conn) -> None:
+    file_id = _insert_file(conn, path="G.png", size=300, mtime=30.0, sha="g")
+    _insert_tag(conn, "1girl", 0.95, file_id)
+    conn.execute("UPDATE files SET is_present = 0, deleted_at = CURRENT_TIMESTAMP WHERE id = ?", (file_id,))
+
+    results = search_files(conn, "1=1", [])
+
+    assert results == []
