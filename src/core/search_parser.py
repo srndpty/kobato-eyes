@@ -3,27 +3,28 @@
 from __future__ import annotations
 
 import re
-import shlex
 from dataclasses import dataclass
-from typing import Mapping
+from typing import Sequence
 
-from tagger.base import TagCategory
+_TAG_BODY = r"[A-Za-z0-9:_\-!?><.@()^+]+"
+_BOUNDARY = r"(?:^|(?<=\s))"
+_NEGATIVE_RE = re.compile(rf"{_BOUNDARY}-(?:\"(?P<neg_q>[^\"]+)\"|(?P<neg>{_TAG_BODY}))")
+_POSITIVE_RE = re.compile(rf"{_BOUNDARY}(?:\"(?P<pos_q>[^\"]+)\"|(?P<pos>{_TAG_BODY}))")
+_VALID_TAG = re.compile(rf"^{_TAG_BODY}$")
 
-_TAG_PATTERN = re.compile(r"^[A-Za-z0-9:_\-!?><.@()^+]+$")
-
-_CATEGORY_ALIASES: Mapping[str, TagCategory] = {
-    "0": TagCategory.GENERAL,
-    "general": TagCategory.GENERAL,
-    "1": TagCategory.CHARACTER,
-    "character": TagCategory.CHARACTER,
-    "2": TagCategory.RATING,
-    "rating": TagCategory.RATING,
-    "3": TagCategory.COPYRIGHT,
-    "copyright": TagCategory.COPYRIGHT,
-    "4": TagCategory.ARTIST,
-    "artist": TagCategory.ARTIST,
-    "5": TagCategory.META,
-    "meta": TagCategory.META,
+_CATEGORY_ALIASES: dict[str, str] = {
+    "0": "general",
+    "general": "general",
+    "1": "character",
+    "character": "character",
+    "2": "rating",
+    "rating": "rating",
+    "3": "copyright",
+    "copyright": "copyright",
+    "4": "artist",
+    "artist": "artist",
+    "5": "meta",
+    "meta": "meta",
 }
 
 
@@ -31,109 +32,198 @@ _CATEGORY_ALIASES: Mapping[str, TagCategory] = {
 class TagSpec:
     """Single tag term extracted from a user query."""
 
+    raw: str
+    category: str | None
     name: str
-    category: TagCategory | None = None
 
 
 @dataclass(frozen=True)
-class SearchToken:
-    """Token produced from a search expression for testing/debugging."""
-
+class _Candidate:
+    start: int
+    end: int
     raw: str
-    spec: TagSpec | None
-    is_negative: bool
-    is_free: bool
+    quoted: bool
 
 
-def _parse_tag(text: str) -> TagSpec | None:
-    if not text or text == "-":
+def _mark_used(flags: list[bool], start: int, end: int) -> None:
+    for index in range(start, min(end, len(flags))):
+        flags[index] = True
+
+
+def _split_category(tag: str) -> tuple[str | None, str]:
+    if ":" not in tag:
+        return None, tag
+    prefix, remainder = tag.split(":", 1)
+    if not remainder:
+        return None, tag
+    alias = _CATEGORY_ALIASES.get(prefix.lower())
+    if alias is None:
+        return None, tag
+    return alias, remainder
+
+
+def _create_spec(raw: str) -> TagSpec | None:
+    if not raw or raw == "-":
         return None
-    if not _TAG_PATTERN.fullmatch(text):
+    if raw.upper() == "NOT":
         return None
-    category: TagCategory | None = None
-    if ":" in text:
-        prefix, rest = text.split(":", 1)
-        if rest:
-            alias = prefix.lower()
-            category = _CATEGORY_ALIASES.get(alias)
-    return TagSpec(name=text, category=category)
+    if not _VALID_TAG.fullmatch(raw):
+        return None
+    category, name = _split_category(raw)
+    return TagSpec(raw=raw, category=category, name=name)
 
 
-def tokenize_search(expr: str) -> list[SearchToken]:
-    """Tokenize ``expr`` highlighting tag/free segments and negation."""
+def _invalid_negative_spans(expr: str) -> set[tuple[int, int]]:
+    spans: set[tuple[int, int]] = set()
+    length = len(expr)
+    index = 0
+    while index < length:
+        if expr[index] == "-" and (index + 1 >= length or expr[index + 1].isspace()):
+            follower = index + 1
+            while follower < length and expr[follower].isspace():
+                follower += 1
+            if follower < length:
+                end = follower
+                while end < length and not expr[end].isspace():
+                    end += 1
+                spans.add((follower, end))
+        index += 1
+    return spans
 
-    tokens = shlex.split(expr, posix=True) if expr else []
-    results: list[SearchToken] = []
 
-    skip_next = False
-    pending_negation = False
-    pending_token: str | None = None
-
-    for raw in tokens:
-        if not raw:
+def _collect_free(expr: str, used: Sequence[bool]) -> list[str]:
+    free: list[str] = []
+    length = len(expr)
+    index = 0
+    while index < length:
+        if expr[index].isspace():
+            index += 1
             continue
-        if skip_next:
-            results.append(SearchToken(raw=raw, spec=None, is_negative=False, is_free=True))
-            skip_next = False
-            continue
-        if raw == "-":
-            results.append(SearchToken(raw=raw, spec=None, is_negative=False, is_free=True))
-            skip_next = True
-            pending_negation = False
-            pending_token = None
-            continue
-
-        if raw.upper() == "NOT":
-            pending_negation = True
-            pending_token = raw
-            continue
-
-        negative = False
-        candidate = raw
-        if raw.startswith("-") and len(raw) > 1:
-            negative = True
-            candidate = raw[1:]
-
-        spec = _parse_tag(candidate)
-        if spec is None:
-            if pending_negation and pending_token:
-                results.append(SearchToken(raw=pending_token, spec=None, is_negative=False, is_free=True))
-            results.append(SearchToken(raw=raw, spec=None, is_negative=False, is_free=True))
-            pending_negation = False
-            pending_token = None
-            continue
-
-        is_negative = negative or pending_negation
-        results.append(SearchToken(raw=raw, spec=spec, is_negative=is_negative, is_free=False))
-        pending_negation = False
-        pending_token = None
-
-    if pending_negation and pending_token:
-        results.append(SearchToken(raw=pending_token, spec=None, is_negative=False, is_free=True))
-
-    return results
+        start = index
+        while index < length and not expr[index].isspace():
+            index += 1
+        end = index
+        if not any(used[start:end]):
+            free.append(expr[start:end])
+    return free
 
 
 def parse_search(expr: str) -> dict[str, list[TagSpec] | list[str]]:
-    """Parse ``expr`` into tag filters and free-text terms."""
-
-    tokens = tokenize_search(expr)
+    """Parse ``expr`` into tag filters and free-text segments."""
 
     include: list[TagSpec] = []
     exclude: list[TagSpec] = []
-    free: list[str] = []
+    used = [False] * len(expr)
 
-    for token in tokens:
-        if token.spec is not None:
-            if token.is_negative:
-                exclude.append(token.spec)
-            else:
-                include.append(token.spec)
+    invalid_spans = _invalid_negative_spans(expr)
+
+    for match in _NEGATIVE_RE.finditer(expr):
+        start, end = match.span()
+        tag = match.group("neg_q") or match.group("neg")
+        spec = _create_spec(tag)
+        if spec is None:
             continue
-        if token.is_free:
-            free.append(token.raw)
+        exclude.append(spec)
+        _mark_used(used, start, end)
 
+    candidates: list[_Candidate] = []
+    for match in _POSITIVE_RE.finditer(expr):
+        start, end = match.span()
+        if any(used[start:end]):
+            continue
+        if (start, end) in invalid_spans:
+            continue
+        raw = match.group("pos_q") or match.group("pos") or ""
+        quoted = match.group("pos_q") is not None
+        candidates.append(_Candidate(start=start, end=end, raw=raw, quoted=quoted))
+
+    consumed = [False] * len(candidates)
+    index = 0
+    while index < len(candidates):
+        if consumed[index]:
+            index += 1
+            continue
+        token = candidates[index]
+        raw_upper = token.raw.upper()
+        if not token.quoted and raw_upper == "NOT":
+            lookahead = index + 1
+            while lookahead < len(candidates) and consumed[lookahead]:
+                lookahead += 1
+            if lookahead < len(candidates):
+                target = candidates[lookahead]
+                spec = _create_spec(target.raw)
+                if spec is not None:
+                    exclude.append(spec)
+                    _mark_used(used, token.start, token.end)
+                    _mark_used(used, target.start, target.end)
+                    consumed[index] = True
+                    consumed[lookahead] = True
+                    index += 1
+                    continue
+        spec = _create_spec(token.raw)
+        if spec is not None:
+            include.append(spec)
+            _mark_used(used, token.start, token.end)
+            consumed[index] = True
+        index += 1
+
+    free = _collect_free(expr, used)
     return {"include": include, "exclude": exclude, "free": free}
 
 
-__all__ = ["TagSpec", "SearchToken", "tokenize_search", "parse_search"]
+def identify_token_at(text: str, cursor: int) -> tuple[int, int, str]:
+    """Return the token bounds and text at ``cursor`` within ``text``."""
+
+    length = len(text)
+    cursor = max(0, min(cursor, length))
+    if length == 0:
+        return 0, 0, ""
+
+    start = cursor
+    if cursor > 0 and (cursor == length or not text[cursor].isspace()):
+        while start > 0 and not text[start - 1].isspace():
+            start -= 1
+
+    end = cursor
+    while end < length and not text[end].isspace():
+        end += 1
+
+    token = text[start:end]
+    if token and cursor < length and text[cursor].isspace():
+        token = ""
+        start = cursor
+        end = cursor
+    return start, end, token
+
+
+def strip_negative_prefix(token: str) -> tuple[bool, str, bool]:
+    """Return minus flag, core text and quote flag for ``token``."""
+
+    if not token:
+        return False, "", False
+
+    negative = False
+    core = token
+    if core.startswith("-"):
+        negative = True
+        core = core[1:]
+
+    quoted = False
+    if core:
+        first = core[0]
+        if first in {'"', "'"}:
+            quoted = True
+            if len(core) >= 2 and core[-1] == first:
+                core = core[1:-1]
+            else:
+                core = core[1:]
+
+    return negative, core, quoted
+
+
+__all__ = [
+    "TagSpec",
+    "parse_search",
+    "identify_token_at",
+    "strip_negative_prefix",
+]

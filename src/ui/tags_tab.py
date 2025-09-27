@@ -68,6 +68,7 @@ from PyQt6.QtWidgets import (
 from core.config import load_settings
 from core.pipeline import IndexProgress, retag_all, retag_query, run_index_once, scan_and_tag
 from core.query import extract_positive_tag_terms, translate_query
+from core.search_parser import identify_token_at, strip_negative_prefix
 from core.settings import PipelineSettings
 from db.connection import get_conn
 from db.repository import _load_tag_thresholds, list_tag_names, search_files
@@ -179,49 +180,40 @@ def _pick_highlight_colors(palette) -> tuple[str, str]:
 _TAG_LIST_ROLE = Qt.ItemDataRole.UserRole + 128
 
 
-def _normalise_completion_token(token: str) -> tuple[str, bool, str | None]:
-    """Return the completion core, minus flag and quote wrapper for ``token``."""
-
-    if not token:
-        return "", False, None
-
-    has_minus = token.startswith("-")
-    body = token[1:] if has_minus else token
-
-    quote_char: str | None = None
-    if len(body) >= 2 and body[0] == body[-1] and body[0] in {'"', "'"}:
-        quote_char = body[0]
-        body = body[1:-1]
-
-    return body, has_minus, quote_char
-
-
 class TagQueryCompleter(QCompleter):
     """Completer that keeps track of minus/quote prefixes for tag tokens."""
 
     def __init__(self, model: QAbstractItemModel, parent: QWidget | None = None) -> None:
         super().__init__(model, parent)
         self._core_prefix = ""
-        self._has_minus = False
+        self._is_negative = False
+        self._is_quoted = False
         self._quote_char: str | None = None
 
-    def set_token_context(self, token: str) -> str:
-        """Update the active token context and return the core completion prefix."""
-
-        core, has_minus, quote_char = _normalise_completion_token(token)
+    def _update_context(self, text: str, cursor: int) -> str:
+        _start, _end, token = identify_token_at(text, cursor)
+        negative, core, quoted = strip_negative_prefix(token)
         self._core_prefix = core
-        self._has_minus = has_minus and bool(core)
-        self._quote_char = quote_char
+        self._is_negative = negative
+        self._is_quoted = quoted
+        self._quote_char = None
+        if quoted:
+            body = token[1:] if token.startswith("-") else token
+            if body:
+                leader = body[0]
+                if leader in {'"', "'"}:
+                    self._quote_char = leader
+            if self._quote_char is None:
+                self._quote_char = '"'
         return self._core_prefix
 
     def splitPath(self, path: str) -> list[str]:  # type: ignore[override]
         widget = self.widget()
+        cursor = len(path)
         if widget is not None and hasattr(widget, "cursorPosition"):
             cursor = widget.cursorPosition()  # type: ignore[call-arg]
-        else:
-            cursor = len(path)
-        token, _, _ = extract_completion_token(path, cursor)
-        return [self.set_token_context(token)]
+        prefix = self._update_context(path, cursor)
+        return [prefix]
 
     def pathFromIndex(self, index: QModelIndex) -> str:  # type: ignore[override]
         base = super().pathFromIndex(index)
@@ -231,9 +223,10 @@ class TagQueryCompleter(QCompleter):
         """Return ``completion`` with the active token prefix restored."""
 
         text = completion
-        if self._quote_char is not None:
-            text = f"{self._quote_char}{text}{self._quote_char}"
-        if self._has_minus and not text.startswith("-"):
+        if self._is_quoted:
+            quote = self._quote_char or '"'
+            text = f"{quote}{text}{quote}"
+        if self._is_negative and not text.startswith("-"):
             text = f"-{text}"
         return text
 

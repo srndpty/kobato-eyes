@@ -402,9 +402,18 @@ def search_files(
 def _build_tag_exists(tag: TagSpec, *, file_alias: str) -> tuple[str, list[object]]:
     conditions = [f"ft.file_id = {file_alias}.id"]
     params: list[object] = []
+    category_id: int | None = None
     if tag.category is not None:
+        lookup_key = str(tag.category).lower()
+        category_id = _CATEGORY_KEY_LOOKUP.get(lookup_key)
+        if category_id is None:
+            try:
+                category_id = int(tag.category)
+            except (TypeError, ValueError):
+                category_id = None
+    if category_id is not None:
         conditions.append("t.category = ?")
-        params.append(int(tag.category))
+        params.append(category_id)
     conditions.append("t.name = ?")
     params.append(tag.name)
     where_clause = " AND ".join(conditions)
