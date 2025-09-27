@@ -10,15 +10,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterator, Sequence
 
-from send2trash import send2trash
-
-from PyQt6.QtCore import QObject, QPoint, Qt, QRunnable, QThreadPool, pyqtSignal
-from PyQt6.QtGui import QAction
+from PyQt6.QtCore import QObject, QPoint, QRunnable, QSize, Qt, QThreadPool, pyqtSignal
+from PyQt6.QtGui import QAction, QColor, QIcon, QPainter, QPixmap
 from PyQt6.QtWidgets import (
-    QFileDialog,
     QDoubleSpinBox,
-    QHeaderView,
+    QFileDialog,
     QHBoxLayout,
+    QHeaderView,
     QLabel,
     QLineEdit,
     QMenu,
@@ -31,18 +29,14 @@ from PyQt6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+from send2trash import send2trash
 
 from core.config import load_settings
 from db.connection import get_conn
 from db.repository import iter_files_for_dup, mark_files_absent
-from dup.scanner import (
-    DuplicateCluster,
-    DuplicateClusterEntry,
-    DuplicateFile,
-    DuplicateScanConfig,
-    DuplicateScanner,
-)
-from utils.paths import get_db_path
+from dup.scanner import DuplicateCluster, DuplicateClusterEntry, DuplicateFile, DuplicateScanConfig, DuplicateScanner
+from utils.image_io import generate_thumbnail, get_thumbnail  # 既存ユーティリティを再利用
+from utils.paths import get_cache_dir, get_db_path
 
 
 @dataclass(frozen=True)
@@ -99,6 +93,36 @@ class DuplicateScanRunnable(QRunnable):
             self.signals.finished.emit(clusters)
         except Exception as exc:  # pragma: no cover - surfaced via UI
             self.signals.error.emit(str(exc))
+
+
+# ★ DupTab クラスの直下（__init__ より上でも下でもOK）に追加
+
+
+class _ThumbSignals(QObject):
+    done = pyqtSignal(str)  # path(str) 単位で完了通知
+
+
+class _ThumbJob(QRunnable):
+    """
+    1ファイル分のサムネをディスクキャッシュに生成するだけ（Pillow使用）。
+    QPixmapはGUIスレッドで作るので、ここでは使わない。
+    """
+
+    def __init__(self, path: Path, size: tuple[int, int], cache_dir: Path, signals: _ThumbSignals) -> None:
+        super().__init__()
+        self._path = path
+        self._size = size
+        self._cache_dir = cache_dir
+        self._signals = signals
+
+    def run(self) -> None:
+        # 生成済みなら generate_thumbnail が即return。未生成なら作ってくれる。
+        try:
+            generate_thumbnail(self._path, self._cache_dir, size=self._size, format="WEBP")
+        except Exception:
+            # 作れなくてもGUI側でプレースホルダを維持するだけ
+            pass
+        self._signals.done.emit(str(self._path))
 
 
 class DupTab(QWidget):
@@ -197,8 +221,69 @@ class DupTab(QWidget):
         self._uncheck_button.clicked.connect(self._on_uncheck_all)
         self._trash_button.clicked.connect(self._on_trash_checked)
         self._export_button.clicked.connect(self._on_export_csv)
+        # ★ アイコンサイズ（Tagsタブに寄せるなら 96x96 や 128x128）
+        self._icon_size = QSize(96, 96)
+        self._tree.setIconSize(self._icon_size)
+
+        # ★ path → [QTreeWidgetItem] の逆引き（サムネ適用に使う）
+        self._thumb_bindings: dict[str, list[QTreeWidgetItem]] = {}
+
+        # ★ 進行中ジョブの重複投げ防止
+        self._thumb_inflight: set[str] = set()
+
+        # ★ サムネワーカー通信用シグナル
+        self._thumb_signals = _ThumbSignals()
+        self._thumb_signals.done.connect(self._on_thumb_done)
+
+        # ★ QThreadPool は既存の self._pool を使い回す（QRunnableをstartでOK）
+
+        # ★ プレースホルダ（薄グレーの枠）
+        self._placeholder_icon = self._make_placeholder_icon(self._icon_size)
 
         self._update_action_states()
+
+    def _make_placeholder_icon(self, size: QSize) -> QIcon:
+        img = QPixmap(size)
+        img.fill(QColor(50, 50, 50))
+        p = QPainter(img)
+        p.setPen(QColor(90, 90, 90))
+        p.drawRect(1, 1, size.width() - 2, size.height() - 2)
+        p.end()
+        return QIcon(img)
+
+    def _bind_item_to_thumb(self, item: QTreeWidgetItem, path: Path) -> None:
+        key = str(path)
+        self._thumb_bindings.setdefault(key, []).append(item)
+
+    def _request_thumb(self, path: Path) -> None:
+        """
+        サムネ生成をバックグラウンドで依頼（重複投げは抑止）。
+        生成後は _on_thumb_done でGUIスレッド側が QPixmap を適用。
+        """
+        key = str(path)
+        if key in self._thumb_inflight:
+            return
+        self._thumb_inflight.add(key)
+        cache_dir = get_cache_dir() / "thumbs"  # image_io と同じ場所
+        job = _ThumbJob(path, (self._icon_size.width(), self._icon_size.height()), cache_dir, self._thumb_signals)
+        self._pool.start(job)
+
+    def _on_thumb_done(self, path_str: str) -> None:
+        """
+        ワーカー完了後にGUIスレッドで呼ばれる。ここで QPixmap を作って setIcon。
+        image_io.get_thumbnail は QPixmap を返す（GUIスレッドOK）。
+        """
+        self._thumb_inflight.discard(path_str)
+        items = self._thumb_bindings.get(path_str)
+        if not items:
+            return
+        try:
+            pix = get_thumbnail(path_str, self._icon_size.width(), self._icon_size.height())
+            icon = QIcon(pix)
+        except Exception:
+            icon = self._placeholder_icon
+        for it in items:
+            it.setIcon(0, icon)
 
     def _update_action_states(self) -> None:
         has_clusters = bool(self._clusters)
@@ -290,16 +375,20 @@ class DupTab(QWidget):
                     item.setText(1, self._format_size(entry.file.size))
                     item.setText(2, self._format_resolution(entry.file.width, entry.file.height))
                     item.setText(3, "-" if entry.best_hamming is None else str(entry.best_hamming))
-                    item.setText(
-                        4,
-                        "-" if entry.best_cosine is None else f"{entry.best_cosine:.3f}",
-                    )
+                    item.setText(4, "-" if entry.best_cosine is None else f"{entry.best_cosine:.3f}")
                     item.setText(5, entry.file.path.as_posix())
                     item.setData(0, Qt.ItemDataRole.UserRole, entry)
+
+                    # ★ 先にプレースホルダを表示
+                    item.setIcon(0, self._placeholder_icon)
+
+                    # ★ path をバインドして、非同期リクエスト
+                    self._bind_item_to_thumb(item, entry.file.path)
+                    self._request_thumb(entry.file.path)
+
+                    # ★ チェック状態は従来通り
                     state = (
-                        Qt.CheckState.Unchecked
-                        if entry.file.file_id == cluster.keeper_id
-                        else Qt.CheckState.Checked
+                        Qt.CheckState.Unchecked if entry.file.file_id == cluster.keeper_id else Qt.CheckState.Checked
                     )
                     item.setCheckState(0, state)
                 group_item.setExpanded(True)
@@ -317,11 +406,7 @@ class DupTab(QWidget):
                 entry = child.data(0, Qt.ItemDataRole.UserRole)
                 if not isinstance(entry, DuplicateClusterEntry):
                     continue
-                state = (
-                    Qt.CheckState.Unchecked
-                    if entry.file.file_id == cluster.keeper_id
-                    else Qt.CheckState.Checked
-                )
+                state = Qt.CheckState.Unchecked if entry.file.file_id == cluster.keeper_id else Qt.CheckState.Checked
                 child.setCheckState(0, state)
         self._update_action_states()
 
@@ -334,9 +419,7 @@ class DupTab(QWidget):
 
     def _on_trash_checked(self) -> None:
         checked_entries = [
-            entry
-            for item, entry in self._iter_tree_entries()
-            if entry and item.checkState(0) == Qt.CheckState.Checked
+            entry for item, entry in self._iter_tree_entries() if entry and item.checkState(0) == Qt.CheckState.Checked
         ]
         if not checked_entries:
             QMessageBox.information(self, "Trash duplicates", "No files are checked for deletion.")
@@ -418,7 +501,9 @@ class DupTab(QWidget):
         if not self._clusters:
             QMessageBox.information(self, "Export duplicates", "No data to export.")
             return
-        file_path, _ = QFileDialog.getSaveFileName(self, "Export duplicate groups", "duplicates.csv", "CSV Files (*.csv)")
+        file_path, _ = QFileDialog.getSaveFileName(
+            self, "Export duplicate groups", "duplicates.csv", "CSV Files (*.csv)"
+        )
         if not file_path:
             return
         try:
@@ -515,9 +600,7 @@ class DupTab(QWidget):
 
     def _count_checked(self) -> int:
         return sum(
-            1
-            for item, entry in self._iter_tree_entries()
-            if entry and item.checkState(0) == Qt.CheckState.Checked
+            1 for item, entry in self._iter_tree_entries() if entry and item.checkState(0) == Qt.CheckState.Checked
         )
 
     @staticmethod
