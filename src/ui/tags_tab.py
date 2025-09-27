@@ -730,16 +730,18 @@ class TagsTab(QWidget):
 
         ensure_dirs()
         self._settings = load_settings()
-        self._db_path = Path(self._settings.db_path).expanduser()
+        self._db_path = get_db_path()
         self._db_display = str(self._db_path)
 
-        self._job_mgr = JobManager()
+        self._job_mgr = JobManager(max_workers=1)
         embedder = _resolve_embedder(self._settings)
-        dim = getattr(embedder, "dim", None)
-        if dim is None:
+        dim = getattr(embedder, "dim", None) or getattr(embedder, "embedding_dim", None)
+        if not dim and hasattr(embedder, "ensure_dim"):
+            dim = embedder.ensure_dim()
+        if not dim:
             raise RuntimeError("embedder.dim を取得できません")
 
-        hnsw = HNSWIndex(dim=dim, space="cosine")
+        hnsw = HNSWIndex(space="cosine")
         tagger = _resolve_tagger(self._settings, override=None)
 
         self._pipeline = ProcessingPipeline(

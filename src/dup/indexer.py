@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import sqlite3
 import time
 from dataclasses import dataclass
@@ -16,6 +17,8 @@ from index.hnsw import HNSWIndex
 from sig.phash import dhash, phash
 from utils.hash import compute_sha256
 from utils.image_io import safe_load_image
+
+logger = logging.getLogger(__name__)
 
 
 class EmbedderProtocol(Protocol):
@@ -39,13 +42,23 @@ class DuplicateIndexer:
     model_name: str
     initial_capacity: int = 2048
 
-    def _ensure_index(self, dim: int, additional: int) -> None:
+    def __post_init__(self) -> None:
+        dim = int(getattr(self.embedder, "embedding_dim"))
         if not self.index.is_initialized:
-            capacity = max(self.initial_capacity, additional)
+            self.index.build(dim, self.initial_capacity)
+        else:
+            cur = self.index.dim
+            if cur is not None and cur != dim:
+                raise RuntimeError(f"HNSW dim mismatch: index={cur}, embedder={dim}")
+
+    def _ensure_index(self, dim: int, additional: int) -> None:
+        slack = 256
+        if not self.index.is_initialized:
+            capacity = max(self.initial_capacity, additional + slack)
             self.index.build(dim, capacity)
         else:
-            needed = self.index.current_count + additional
-            self.index.ensure_capacity(max(needed, self.initial_capacity))
+            need = self.index.current_count + additional + slack
+            self.index.ensure_capacity(need)
 
     def index_paths(self, paths: Sequence[str | Path]) -> list[int]:
         """Compute hashes/embeddings for ``paths`` and persist them."""
@@ -73,6 +86,8 @@ class DuplicateIndexer:
             return []
 
         embeddings = self.embedder.embed_images([entry["image"] for entry in entries])
+        if embeddings.ndim != 2:
+            raise RuntimeError("Embedder must return a 2D array")
         if embeddings.shape[0] != len(entries):
             raise RuntimeError("Embedder returned mismatched batch size")
 
@@ -100,10 +115,17 @@ class DuplicateIndexer:
                 phash_u64=entry["phash"],
                 dhash_u64=entry["dhash"],
             )
-            normalized = vector.astype(np.float32)
+            # ループ内（各画像ごと）
+            normalized = np.asarray(vector, dtype=np.float32)
+            if normalized.ndim != 1:
+                normalized = normalized.reshape(-1)
             norm = float(np.linalg.norm(normalized))
             if norm > 0:
-                normalized /= norm
+                normalized = normalized / norm
+            if not normalized.flags.c_contiguous:
+                normalized = np.ascontiguousarray(normalized, dtype=np.float32)
+
+            # ① DB へ保存（正規化済みを保存）
             upsert_embedding(
                 self.conn,
                 file_id=file_id,
@@ -111,12 +133,30 @@ class DuplicateIndexer:
                 dim=normalized.shape[0],
                 vector=normalized.tobytes(),
             )
-            file_ids.append(file_id)
+
+            # ② HNSW へ追加するためのバッファにも同じものを積む
             vectors.append(normalized)
             labels.append(file_id)
+            file_ids.append(file_id)
 
         if vectors:
-            self.index.add(np.vstack(vectors), labels)
+            mat = np.vstack(vectors).astype(np.float32, copy=False)
+            # 正規化（念のため）
+            norms = np.linalg.norm(mat, axis=1, keepdims=True)
+            norms[norms == 0] = 1.0
+            mat /= norms
+            # ラベル重複を除去（DBの file_id はユニークだが、念のため）
+            uniq = {}
+            for v, lid in zip(mat, labels):
+                if lid not in uniq:
+                    uniq[lid] = v
+            if uniq:
+                lids = list(uniq.keys())
+                vecs = np.vstack([uniq[lid] for lid in lids])
+                self.index.add(vecs, lids, num_threads=1)
+
+        # ★追加：この関数の最後でコミットしておく
+        self.conn.commit()
 
         return file_ids
 
