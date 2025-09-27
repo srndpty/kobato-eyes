@@ -6,7 +6,8 @@ import pytest
 
 from core.query import translate_query
 from db.connection import get_conn
-from db.repository import search_files
+from core.search_parser import parse_search
+from db.repository import search_files, search_files_by_query
 from db.schema import apply_schema
 
 
@@ -127,3 +128,29 @@ def test_search_files_includes_tag_categories(conn) -> None:
     assert record["tags"][1][0] == "original_character"
     assert record["tags"][1][1] == pytest.approx(0.85)
     assert record["tags"][1][2] == 1
+
+
+def test_search_files_by_query_supports_negative_tags(conn) -> None:
+    file_a = _insert_file(conn, path="match.png", size=100, mtime=10.0, sha="a")
+    file_b = _insert_file(conn, path="other.png", size=200, mtime=20.0, sha="b")
+
+    _insert_tag(conn, "foo", 0.9, file_a)
+    _insert_tag(conn, "half-closed_eyes", 0.8, file_a)
+
+    _insert_tag(conn, "foo", 0.9, file_b)
+    _insert_tag(conn, "bar", 0.7, file_b)
+
+    terms = parse_search("foo -bar half-closed_eyes")
+    results = search_files_by_query(conn, terms)
+
+    assert [row["id"] for row in results] == [file_a]
+
+
+def test_search_files_by_query_treats_spaced_minus_as_free(conn) -> None:
+    file_a = _insert_file(conn, path="hair.png", size=128, mtime=30.0, sha="c")
+    _insert_tag(conn, "big-hair", 0.95, file_a)
+
+    terms = parse_search("- big-hair")
+    results = search_files_by_query(conn, terms)
+
+    assert [row["id"] for row in results] == [file_a]
