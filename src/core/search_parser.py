@@ -35,6 +35,16 @@ class TagSpec:
     category: TagCategory | None = None
 
 
+@dataclass(frozen=True)
+class SearchToken:
+    """Token produced from a search expression for testing/debugging."""
+
+    raw: str
+    spec: TagSpec | None
+    is_negative: bool
+    is_free: bool
+
+
 def _parse_tag(text: str) -> TagSpec | None:
     if not text or text == "-":
         return None
@@ -49,41 +59,81 @@ def _parse_tag(text: str) -> TagSpec | None:
     return TagSpec(name=text, category=category)
 
 
-def parse_search(expr: str) -> dict[str, list[TagSpec] | list[str]]:
-    """Parse ``expr`` into tag filters and free-text terms."""
+def tokenize_search(expr: str) -> list[SearchToken]:
+    """Tokenize ``expr`` highlighting tag/free segments and negation."""
 
     tokens = shlex.split(expr, posix=True) if expr else []
-    include: list[TagSpec] = []
-    exclude: list[TagSpec] = []
-    free: list[str] = []
+    results: list[SearchToken] = []
 
     skip_next = False
+    pending_negation = False
+    pending_token: str | None = None
+
     for raw in tokens:
         if not raw:
             continue
         if skip_next:
-            free.append(raw)
+            results.append(SearchToken(raw=raw, spec=None, is_negative=False, is_free=True))
             skip_next = False
             continue
         if raw == "-":
-            free.append(raw)
+            results.append(SearchToken(raw=raw, spec=None, is_negative=False, is_free=True))
             skip_next = True
+            pending_negation = False
+            pending_token = None
             continue
+
+        if raw.upper() == "NOT":
+            pending_negation = True
+            pending_token = raw
+            continue
+
+        negative = False
+        candidate = raw
         if raw.startswith("-") and len(raw) > 1:
+            negative = True
             candidate = raw[1:]
-            spec = _parse_tag(candidate)
-            if spec is not None:
-                exclude.append(spec)
-            else:
-                free.append(raw)
+
+        spec = _parse_tag(candidate)
+        if spec is None:
+            if pending_negation and pending_token:
+                results.append(SearchToken(raw=pending_token, spec=None, is_negative=False, is_free=True))
+            results.append(SearchToken(raw=raw, spec=None, is_negative=False, is_free=True))
+            pending_negation = False
+            pending_token = None
             continue
-        spec = _parse_tag(raw)
-        if spec is not None:
-            include.append(spec)
-        else:
-            free.append(raw)
+
+        is_negative = negative or pending_negation
+        results.append(SearchToken(raw=raw, spec=spec, is_negative=is_negative, is_free=False))
+        pending_negation = False
+        pending_token = None
+
+    if pending_negation and pending_token:
+        results.append(SearchToken(raw=pending_token, spec=None, is_negative=False, is_free=True))
+
+    return results
+
+
+def parse_search(expr: str) -> dict[str, list[TagSpec] | list[str]]:
+    """Parse ``expr`` into tag filters and free-text terms."""
+
+    tokens = tokenize_search(expr)
+
+    include: list[TagSpec] = []
+    exclude: list[TagSpec] = []
+    free: list[str] = []
+
+    for token in tokens:
+        if token.spec is not None:
+            if token.is_negative:
+                exclude.append(token.spec)
+            else:
+                include.append(token.spec)
+            continue
+        if token.is_free:
+            free.append(token.raw)
 
     return {"include": include, "exclude": exclude, "free": free}
 
 
-__all__ = ["TagSpec", "parse_search"]
+__all__ = ["TagSpec", "SearchToken", "tokenize_search", "parse_search"]

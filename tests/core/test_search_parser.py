@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from core.search_parser import parse_search
+from core.search_parser import SearchToken, parse_search, tokenize_search
 from tagger.base import TagCategory
 
 
@@ -52,3 +52,26 @@ def test_parse_search_retains_unknown_prefix() -> None:
     assert len(include) == 1
     assert include[0].name == "prefix:value"
     assert include[0].category is None
+
+
+def test_parse_search_supports_not_operator() -> None:
+    result = parse_search("megurine_luka NOT hatsune_miku")
+
+    include = result["include"]
+    exclude = result["exclude"]
+
+    assert [spec.name for spec in include] == ["megurine_luka"]
+    assert [spec.name for spec in exclude] == ["hatsune_miku"]
+
+
+def test_tokenize_search_marks_negative_tokens() -> None:
+    tokens = tokenize_search("foo -bar NOT baz - big-hair")
+
+    assert isinstance(tokens[0], SearchToken)
+    names = [token.spec.name if token.spec else token.raw for token in tokens]
+    negatives = [token.is_negative for token in tokens]
+    is_free = [token.is_free for token in tokens]
+
+    assert names == ["foo", "bar", "baz", "-", "big-hair"]
+    assert negatives == [False, True, True, False, False]
+    assert is_free == [False, False, False, True, True]

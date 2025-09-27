@@ -154,3 +154,17 @@ def test_search_files_by_query_treats_spaced_minus_as_free(conn) -> None:
     results = search_files_by_query(conn, terms)
 
     assert [row["id"] for row in results] == [file_a]
+
+
+def test_search_files_by_query_supports_not_keyword(conn) -> None:
+    file_a = _insert_file(conn, path="vocaloid.png", size=512, mtime=50.0, sha="v")
+    file_b = _insert_file(conn, path="duo.png", size=256, mtime=60.0, sha="d")
+
+    _insert_tag(conn, "megurine_luka", 0.95, file_a)
+    _insert_tag(conn, "hatsune_miku", 0.9, file_b)
+    _insert_tag(conn, "megurine_luka", 0.9, file_b)
+
+    terms = parse_search("megurine_luka NOT hatsune_miku")
+    results = search_files_by_query(conn, terms)
+
+    assert [row["id"] for row in results] == [file_a]
