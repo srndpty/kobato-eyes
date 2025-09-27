@@ -93,6 +93,10 @@ def _ensure_file_columns(conn: sqlite3.Connection) -> None:
         alterations.append("ALTER TABLE files ADD COLUMN tagger_sig TEXT")
     if "last_tagged_at" not in columns:
         alterations.append("ALTER TABLE files ADD COLUMN last_tagged_at REAL")
+    if "is_present" not in columns:
+        alterations.append("ALTER TABLE files ADD COLUMN is_present INTEGER NOT NULL DEFAULT 1")
+    if "deleted_at" not in columns:
+        alterations.append("ALTER TABLE files ADD COLUMN deleted_at TEXT")
     for statement in alterations:
         conn.execute(statement)
     if alterations:
@@ -111,6 +115,8 @@ def upsert_file(
     indexed_at: float | None = None,
     tagger_sig: str | None = None,
     last_tagged_at: float | None = None,
+    is_present: bool | int = True,
+    deleted_at: object | None = None,
 ) -> int:
     """Insert or update a file record and return its identifier."""
     _ensure_file_columns(conn)
@@ -124,9 +130,11 @@ def upsert_file(
             height,
             indexed_at,
             tagger_sig,
-            last_tagged_at
+            last_tagged_at,
+            is_present,
+            deleted_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(path) DO UPDATE SET
             size = excluded.size,
             mtime = excluded.mtime,
@@ -135,7 +143,9 @@ def upsert_file(
             height = COALESCE(excluded.height, files.height),
             indexed_at = COALESCE(excluded.indexed_at, files.indexed_at),
             tagger_sig = COALESCE(excluded.tagger_sig, files.tagger_sig),
-            last_tagged_at = COALESCE(excluded.last_tagged_at, files.last_tagged_at)
+            last_tagged_at = COALESCE(excluded.last_tagged_at, files.last_tagged_at),
+            is_present = excluded.is_present,
+            deleted_at = excluded.deleted_at
         RETURNING id
     """
 
@@ -152,6 +162,8 @@ def upsert_file(
                 indexed_at,
                 tagger_sig,
                 last_tagged_at,
+                1 if is_present else 0,
+                deleted_at,
             ),
         )
         file_id = cursor.fetchone()[0]
@@ -182,7 +194,7 @@ def list_untagged_under_path(conn: sqlite3.Connection, root_like: str) -> list[t
         SELECT f.id, f.path
         FROM files AS f
         LEFT JOIN file_tags AS ft ON ft.file_id = f.id
-        WHERE f.path LIKE ?
+        WHERE f.path LIKE ? AND f.is_present = 1
         GROUP BY f.id
         HAVING COUNT(ft.tag_id) = 0
         ORDER BY f.path ASC
@@ -350,6 +362,9 @@ def search_files(
     else:
         order_clause = "f.mtime DESC"
 
+    normalized_where = where_sql.strip() or "1=1"
+    combined_where = f"({normalized_where}) AND f.is_present = 1"
+
     query = (
         f"{query_prefix}"
         "SELECT "
@@ -358,7 +373,7 @@ def search_files(
         "FROM files f "
         f"{join_clause}"
         "WHERE "
-        f"{where_sql} "
+        f"{combined_where} "
         f"ORDER BY {order_clause} "
         "LIMIT ? OFFSET ?"
     )

@@ -8,7 +8,7 @@ import time
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Callable, Iterable, Mapping, Optional, Sequence, Set
+from typing import Callable, Iterable, Iterator, Mapping, Optional, Sequence, Set
 
 import numpy as np
 from PIL import Image
@@ -288,6 +288,7 @@ def scan_and_tag(
     recursive: bool = True,
     batch_size: int = 8,
     skip_hnsw: bool = True,
+    hard_delete_missing: bool = False,
 ) -> dict[str, object]:
     """Tag unprocessed images within ``root`` without updating embeddings or HNSW."""
 
@@ -297,16 +298,26 @@ def scan_and_tag(
         resolved_root = resolved_root.resolve(strict=False)
     except OSError:
         resolved_root = resolved_root.absolute()
+    stats_out: dict[str, object] = {
+        "queued": 0,
+        "tagged": 0,
+        "elapsed_sec": 0.0,
+        "missing": 0,
+        "soft_deleted": 0,
+        "hard_deleted": 0,
+    }
+
     if not resolved_root.exists():
         logger.info("Manual tag refresh skipped; path does not exist: %s", resolved_root)
-        return {"queued": 0, "tagged": 0, "elapsed_sec": 0.0}
+        return stats_out
 
     settings = load_settings()
     allow_exts = {ext.lower() for ext in (settings.allow_exts or DEFAULT_EXTENSIONS)}
     if resolved_root.is_file() and resolved_root.suffix.lower() not in allow_exts:
         elapsed = time.perf_counter() - start_time
+        stats_out["elapsed_sec"] = elapsed
         logger.info("Manual tag refresh skipped; unsupported file type: %s", resolved_root)
-        return {"queued": 0, "tagged": 0, "elapsed_sec": elapsed}
+        return stats_out
     thresholds = _build_threshold_map(settings.tagger.thresholds)
     max_tags_map = _build_max_tags_map(getattr(settings.tagger, "max_tags", None))
     tagger_sig = current_tagger_sig(settings, thresholds=thresholds, max_tags=max_tags_map)
@@ -343,6 +354,7 @@ def scan_and_tag(
 
         queued_paths: list[Path] = []
         seen: set[str] = set()
+        fs_paths: set[str] = set()
 
         for _, stored_path in list_untagged_under_path(conn, _like_pattern(resolved_root)):
             path_obj = Path(stored_path)
@@ -353,6 +365,7 @@ def scan_and_tag(
             if path_obj.suffix.lower() not in allow_exts:
                 continue
             literal = str(path_obj)
+            fs_paths.add(literal)
             if literal in seen:
                 continue
             queued_paths.append(path_obj)
@@ -370,6 +383,7 @@ def scan_and_tag(
             if path_obj.suffix.lower() not in allow_exts:
                 continue
             literal = str(path_obj)
+            fs_paths.add(literal)
             if literal in seen:
                 continue
             row = get_file_by_path(conn, literal)
@@ -389,14 +403,103 @@ def scan_and_tag(
                 cursor.close()
 
         total = len(queued_paths)
+        stats_out["queued"] = total
+
+        def _chunked(items: Sequence[int], size: int = 900) -> Iterator[list[int]]:
+            for index in range(0, len(items), size):
+                yield list(items[index : index + size])
+
+        missing_ids: list[int] = []
+        cursor = None
+        try:
+            if resolved_root.is_file():
+                cursor = conn.execute(
+                    "SELECT id, path FROM files WHERE is_present = 1 AND path = ?",
+                    (str(resolved_root),),
+                )
+            else:
+                cursor = conn.execute(
+                    "SELECT id, path FROM files WHERE is_present = 1 AND path LIKE ?",
+                    (_like_pattern(resolved_root),),
+                )
+            for row in cursor.fetchall():
+                path_text = str(row["path"])
+                candidate = Path(path_text)
+                if not _within_scope(candidate):
+                    continue
+                if path_text not in fs_paths:
+                    missing_ids.append(int(row["id"]))
+        finally:
+            if cursor is not None:
+                cursor.close()
+
+        missing_count = len(missing_ids)
+        stats_out["missing"] = missing_count
+        soft_deleted = 0
+        hard_deleted_count = 0
+        if missing_ids:
+            logger.info(
+                "Manual tag refresh: marking %d missing file(s) under %s", missing_count, resolved_root
+            )
+            if hard_delete_missing:
+                with conn:
+                    for chunk in _chunked(missing_ids):
+                        placeholders = ", ".join("?" for _ in chunk)
+                        conn.execute(
+                            f"DELETE FROM file_tags WHERE file_id IN ({placeholders})",
+                            chunk,
+                        )
+                        conn.execute(
+                            f"DELETE FROM embeddings WHERE file_id IN ({placeholders})",
+                            chunk,
+                        )
+                        conn.execute(
+                            f"DELETE FROM signatures WHERE file_id IN ({placeholders})",
+                            chunk,
+                        )
+                        conn.execute(
+                            f"DELETE FROM fts_files WHERE rowid IN ({placeholders})",
+                            chunk,
+                        )
+                        conn.execute(
+                            f"DELETE FROM files WHERE id IN ({placeholders})",
+                            chunk,
+                        )
+                hard_deleted_count = missing_count
+            else:
+                with conn:
+                    for chunk in _chunked(missing_ids):
+                        placeholders = ", ".join("?" for _ in chunk)
+                        conn.execute(
+                            f"UPDATE files SET is_present = 0, deleted_at = CURRENT_TIMESTAMP "
+                            f"WHERE id IN ({placeholders})",
+                            chunk,
+                        )
+                        conn.execute(
+                            f"DELETE FROM fts_files WHERE rowid IN ({placeholders})",
+                            chunk,
+                        )
+                soft_deleted = missing_count
+        stats_out["soft_deleted"] = soft_deleted
+        stats_out["hard_deleted"] = hard_deleted_count
+
         if total == 0:
             elapsed = time.perf_counter() - start_time
-            logger.info(
-                "Manual tag refresh: no untagged files under %s (elapsed %.2fs)",
-                resolved_root,
-                elapsed,
-            )
-            return {"queued": 0, "tagged": 0, "elapsed_sec": elapsed}
+            stats_out["elapsed_sec"] = elapsed
+            if missing_count:
+                logger.info(
+                    "Manual tag refresh: removed %d missing file(s) (hard_delete=%s) in %.2fs",
+                    missing_count,
+                    hard_delete_missing,
+                    elapsed,
+                )
+            else:
+                logger.info(
+                    "Manual tag refresh: no untagged files under %s (elapsed %.2fs)",
+                    resolved_root,
+                    elapsed,
+                )
+            return stats_out
 
         logger.info(
             "Manual tag refresh: tagging %d file(s) under %s (recursive=%s)",
@@ -437,13 +540,17 @@ def scan_and_tag(
                 logger.info("Manual tag refresh tagged %d/%d file(s)", tagged, total)
 
         elapsed = time.perf_counter() - start_time
+        stats_out["tagged"] = tagged
+        stats_out["elapsed_sec"] = elapsed
         logger.info(
-            "Manual tag refresh complete: tagged %d of %d file(s) in %.2fs",
+            "Manual tag refresh complete: tagged %d of %d file(s) in %.2fs (missing removed=%d, hard=%s)",
             tagged,
             total,
             elapsed,
+            missing_count,
+            hard_delete_missing,
         )
-        return {"queued": total, "tagged": tagged, "elapsed_sec": elapsed}
+        return stats_out
     finally:
         conn.close()
         if tagger is not None:
