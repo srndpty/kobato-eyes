@@ -8,7 +8,16 @@ from typing import Iterator
 import pytest
 
 from db.connection import get_conn
-from db.repository import replace_file_tags, update_fts, upsert_embedding, upsert_file, upsert_signatures, upsert_tags
+from db.repository import (
+    iter_files_for_dup,
+    mark_files_absent,
+    replace_file_tags,
+    update_fts,
+    upsert_embedding,
+    upsert_file,
+    upsert_signatures,
+    upsert_tags,
+)
 from db.schema import apply_schema
 
 
@@ -148,3 +157,59 @@ def test_repository_roundtrip(memory_conn: sqlite3.Connection) -> None:
         ("duplicate",),
     ).fetchone()
     assert final_match is not None and final_match["rowid"] == file_id
+
+
+def test_iter_files_for_dup_and_mark_absent(memory_conn: sqlite3.Connection) -> None:
+    present_id = upsert_file(
+        memory_conn,
+        path="C:/images/present.png",
+        size=512,
+        width=32,
+        height=32,
+    )
+    upsert_signatures(
+        memory_conn,
+        file_id=present_id,
+        phash_u64=0x1234,
+        dhash_u64=0x5678,
+    )
+    upsert_embedding(
+        memory_conn,
+        file_id=present_id,
+        model="clip-vit",
+        dim=2,
+        vector=(b"\x00\x00\x80?" * 2),
+    )
+
+    missing_id = upsert_file(
+        memory_conn,
+        path="C:/images/missing.png",
+        size=1024,
+        width=64,
+        height=64,
+        is_present=0,
+    )
+    upsert_signatures(
+        memory_conn,
+        file_id=missing_id,
+        phash_u64=0x1235,
+        dhash_u64=0x5679,
+    )
+
+    rows = list(iter_files_for_dup(memory_conn, None, model_name="clip-vit"))
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["file_id"] == present_id
+    assert row["embedding_dim"] == 2
+
+    filtered_rows = list(iter_files_for_dup(memory_conn, "C:/images/present%", model_name="clip-vit"))
+    assert len(filtered_rows) == 1
+    assert filtered_rows[0]["file_id"] == present_id
+
+    empty_rows = list(iter_files_for_dup(memory_conn, "Z:%", model_name="clip-vit"))
+    assert empty_rows == []
+
+    updated = mark_files_absent(memory_conn, [present_id])
+    assert updated == 1
+    status = memory_conn.execute("SELECT is_present FROM files WHERE id = ?", (present_id,)).fetchone()
+    assert status is not None and status["is_present"] == 0

@@ -15,6 +15,7 @@ SCHEMA_STATEMENTS: tuple[str, ...] = (
         size INTEGER,
         mtime REAL,
         sha256 TEXT,
+        is_present INTEGER NOT NULL DEFAULT 1,
         width INTEGER,
         height INTEGER,
         indexed_at REAL,
@@ -85,6 +86,7 @@ SCHEMA_STATEMENTS: tuple[str, ...] = (
     """
     CREATE INDEX IF NOT EXISTS files_present_path_idx ON files(is_present, path);
     """,
+    # !!! ここに "files_is_present_path_idx" は置かない（v3 migration が作る）
 )
 
 
@@ -111,9 +113,7 @@ def _migrate_to_v2(conn: sqlite3.Connection) -> None:
 def _migrate_to_v3(conn: sqlite3.Connection) -> None:
     _add_column_if_missing(conn, "files", "is_present", "INTEGER NOT NULL DEFAULT 1")
     _add_column_if_missing(conn, "files", "deleted_at", "TEXT")
-    conn.execute(
-        "CREATE INDEX IF NOT EXISTS files_present_path_idx ON files(is_present, path)"
-    )
+    conn.execute("CREATE INDEX IF NOT EXISTS files_present_path_idx ON files(is_present, path)")
 
 
 MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
