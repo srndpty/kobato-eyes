@@ -5,7 +5,7 @@ from __future__ import annotations
 import sqlite3
 from typing import Callable, Iterable
 
-CURRENT_SCHEMA_VERSION = 2
+CURRENT_SCHEMA_VERSION = 3
 
 SCHEMA_STATEMENTS: tuple[str, ...] = (
     """
@@ -15,6 +15,7 @@ SCHEMA_STATEMENTS: tuple[str, ...] = (
         size INTEGER,
         mtime REAL,
         sha256 TEXT,
+        is_present INTEGER NOT NULL DEFAULT 1,
         width INTEGER,
         height INTEGER,
         indexed_at REAL,
@@ -83,6 +84,9 @@ SCHEMA_STATEMENTS: tuple[str, ...] = (
     """
     CREATE INDEX IF NOT EXISTS files_path_idx ON files(path);
     """,
+    """
+    CREATE INDEX IF NOT EXISTS files_is_present_path_idx ON files(is_present, path);
+    """,
 )
 
 
@@ -106,8 +110,14 @@ def _migrate_to_v2(conn: sqlite3.Connection) -> None:
     _add_column_if_missing(conn, "files", "last_tagged_at", "REAL")
 
 
+def _migrate_to_v3(conn: sqlite3.Connection) -> None:
+    _add_column_if_missing(conn, "files", "is_present", "INTEGER NOT NULL DEFAULT 1")
+    conn.execute("CREATE INDEX IF NOT EXISTS files_is_present_path_idx ON files(is_present, path)")
+
+
 MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     2: _migrate_to_v2,
+    3: _migrate_to_v3,
 }
 
 

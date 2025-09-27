@@ -83,6 +83,8 @@ def _ensure_file_columns(conn: sqlite3.Connection) -> None:
     rows = conn.execute("PRAGMA table_info(files)").fetchall()
     columns = {row[1] for row in rows}
     alterations: list[str] = []
+    if "is_present" not in columns:
+        alterations.append("ALTER TABLE files ADD COLUMN is_present INTEGER NOT NULL DEFAULT 1")
     if "width" not in columns:
         alterations.append("ALTER TABLE files ADD COLUMN width INTEGER")
     if "height" not in columns:
@@ -106,6 +108,7 @@ def upsert_file(
     size: int | None = None,
     mtime: float | None = None,
     sha256: str | None = None,
+    is_present: int | bool = 1,
     width: int | None = None,
     height: int | None = None,
     indexed_at: float | None = None,
@@ -120,17 +123,19 @@ def upsert_file(
             size,
             mtime,
             sha256,
+            is_present,
             width,
             height,
             indexed_at,
             tagger_sig,
             last_tagged_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(path) DO UPDATE SET
             size = excluded.size,
             mtime = excluded.mtime,
             sha256 = excluded.sha256,
+            is_present = COALESCE(excluded.is_present, files.is_present),
             width = COALESCE(excluded.width, files.width),
             height = COALESCE(excluded.height, files.height),
             indexed_at = COALESCE(excluded.indexed_at, files.indexed_at),
@@ -147,6 +152,7 @@ def upsert_file(
                 size,
                 mtime,
                 sha256,
+                int(is_present),
                 width,
                 height,
                 indexed_at,
@@ -192,6 +198,60 @@ def list_untagged_under_path(conn: sqlite3.Connection, root_like: str) -> list[t
         return [(int(row[0]), str(row[1])) for row in cursor.fetchall()]
     finally:
         cursor.close()
+
+
+def iter_files_for_dup(
+    conn: sqlite3.Connection,
+    root_like: str | None = None,
+    *,
+    model_name: str | None = None,
+) -> Iterable[sqlite3.Row]:
+    """Yield file rows containing duplicate detection attributes."""
+
+    join_embeddings = "LEFT JOIN embeddings AS e ON e.file_id = f.id"
+    params: list[object] = []
+    if model_name is not None:
+        join_embeddings += " AND e.model = ?"
+        params.append(model_name)
+    query = [
+        "SELECT",
+        "    f.id AS file_id,",
+        "    f.path AS path,",
+        "    f.size AS size,",
+        "    f.width AS width,",
+        "    f.height AS height,",
+        "    f.is_present AS is_present,",
+        "    s.phash_u64 AS phash_u64,",
+        "    e.vector AS embedding_vector,",
+        "    e.dim AS embedding_dim",
+        "FROM files AS f",
+        "JOIN signatures AS s ON s.file_id = f.id",
+        join_embeddings,
+        "WHERE f.is_present != 0",
+    ]
+    if root_like:
+        query.append("  AND f.path LIKE ?")
+        params.append(root_like)
+    query.append("ORDER BY f.path ASC")
+    sql = "\n".join(query)
+    cursor = conn.execute(sql, tuple(params))
+    try:
+        for row in cursor:
+            yield row
+    finally:
+        cursor.close()
+
+
+def mark_files_absent(conn: sqlite3.Connection, file_ids: Sequence[int]) -> int:
+    """Set ``is_present`` to ``0`` for the provided ``file_ids``."""
+
+    if not file_ids:
+        return 0
+    placeholders = ", ".join("?" for _ in file_ids)
+    sql = f"UPDATE files SET is_present = 0 WHERE id IN ({placeholders})"
+    with conn:
+        cursor = conn.execute(sql, tuple(int(file_id) for file_id in file_ids))
+        return cursor.rowcount
 
 
 def upsert_tags(conn: sqlite3.Connection, tags: Sequence[Mapping[str, Any]]) -> dict[str, int]:
@@ -414,12 +474,14 @@ def mark_indexed_at(
 __all__ = [
     "upsert_file",
     "get_file_by_path",
+    "iter_files_for_dup",
     "upsert_tags",
     "replace_file_tags",
     "update_fts",
     "upsert_signatures",
     "upsert_embedding",
     "search_files",
+    "mark_files_absent",
     "mark_indexed_at",
     "list_tag_names",
     "list_untagged_under_path",
