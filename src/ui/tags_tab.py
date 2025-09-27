@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import html
+import itertools
 import logging
 import os
 import re
+import shutil
 import sqlite3
 import subprocess
 import sys
@@ -69,7 +71,7 @@ from core.pipeline import IndexProgress, retag_all, retag_query, run_index_once,
 from core.query import extract_positive_tag_terms, translate_query
 from core.settings import PipelineSettings
 from db.connection import get_conn
-from db.repository import _load_tag_thresholds, list_tag_names, search_files
+from db.repository import _load_tag_thresholds, iter_paths_for_search, list_tag_names, search_files
 from tagger import labels_util
 from tagger.base import TagCategory
 from tagger.wd14_onnx import ONNXRUNTIME_MISSING_MESSAGE
@@ -77,6 +79,7 @@ from ui.autocomplete import abbreviate_count, extract_completion_token, replace_
 from ui.tag_stats import TagStatsDialog
 from utils.image_io import get_thumbnail
 from utils.paths import ensure_dirs, get_db_path
+from utils.search_export import make_export_dir
 
 logger = logging.getLogger(__name__)
 
@@ -176,6 +179,62 @@ def _pick_highlight_colors(palette) -> tuple[str, str]:
 
 
 _TAG_LIST_ROLE = Qt.ItemDataRole.UserRole + 128
+
+
+# --- ワーカーシグナル ---------------------------------------------------
+class _CopySignals(QObject):
+    progress = pyqtSignal(int, int)  # current, total
+    finished = pyqtSignal(str, int, int)  # dest_dir, ok_count, ng_count
+    error = pyqtSignal(str)
+
+
+# --- バックグラウンドコピー ---------------------------------------------
+class _CopyRunnable(QRunnable):
+    def __init__(self, db_path: Path, query: str, dest_dir: Path) -> None:
+        super().__init__()
+        self.db_path = db_path
+        self.query = query
+        self.dest_dir = dest_dir
+        self.signals = _CopySignals()
+
+    def _unique_dest(self, name: str) -> Path:
+        """同名ファイルがある場合は _2, _3... と連番で回避。"""
+        dest = self.dest_dir / name
+        if not dest.exists():
+            return dest
+        stem = dest.stem
+        suf = dest.suffix
+        for i in itertools.count(2):
+            cand = self.dest_dir / f"{stem}_{i}{suf}"
+            if not cand.exists():
+                return cand
+
+    def run(self) -> None:
+        try:
+            # 1) パス列挙
+            with get_conn(self.db_path) as conn:
+                paths = list(iter_paths_for_search(conn, self.query))
+            total = len(paths)
+            self.signals.progress.emit(0, total)
+            ok = ng = 0
+
+            # 2) コピー
+            for idx, p in enumerate(paths, start=1):
+                try:
+                    src = Path(p)
+                    if src.exists():
+                        dst = self._unique_dest(src.name)
+                        shutil.copy2(src, dst)
+                        ok += 1
+                    else:
+                        ng += 1
+                except Exception:
+                    ng += 1
+                self.signals.progress.emit(idx, total)
+
+            self.signals.finished.emit(str(self.dest_dir), ok, ng)
+        except Exception as e:
+            self.signals.error.emit(str(e))
 
 
 class _HighlightDelegate(QStyledItemDelegate):
@@ -612,9 +671,12 @@ class TagsTab(QWidget):
         self._retag_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
         self._retag_button.setMenu(self._retag_menu)
         self._refresh_button = QPushButton("🔄 Refresh", self)
-        self._refresh_button.setToolTip(
-            "Scan & tag untagged in this folder (Shift+Click = hard delete missing)"
-        )
+        self._refresh_button.setToolTip("Scan & tag untagged in this folder (Shift+Click = hard delete missing)")
+        # 検索バーのボタン群を並べているあたり（_refresh_button のすぐ右あたりが見栄え良い）
+        self._copy_button = QPushButton("Copy results…", self)
+        self._copy_button.setEnabled(False)  # 初期は無効
+        self._copy_button.clicked.connect(self._on_copy_results_clicked)
+
         self._load_more_button = QPushButton("Load more", self)
         self._load_more_button.setEnabled(False)
         self._status_label = QLabel(self)
@@ -729,6 +791,7 @@ class TagsTab(QWidget):
         search_layout.addWidget(self._search_button)
         search_layout.addWidget(self._retag_button)
         search_layout.addWidget(self._refresh_button)
+        search_layout.addWidget(self._copy_button)
 
         toggle_layout = QHBoxLayout()
         toggle_layout.addWidget(self._table_button)
@@ -816,6 +879,66 @@ class TagsTab(QWidget):
         self._update_control_states()
         QTimer.singleShot(0, self._initialise_autocomplete)
         QTimer.singleShot(0, self._bootstrap_results_if_any)
+
+    def _on_copy_results_clicked(self) -> None:
+        # 現在の検索が確定していることを確認
+        if not self._current_query or not self._current_where:
+            QMessageBox.information(self, "Copy results", "Run a search first.")
+            return
+
+        query = self._current_query.strip() or "*"
+
+        # 件数の事前確認（UI表示用）
+        try:
+            with get_conn(self._db_path) as conn:
+                total = sum(1 for _ in iter_paths_for_search(conn, query))
+        except Exception as e:
+            QMessageBox.critical(self, "Copy results", f"Failed to enumerate results:\n{e}")
+            return
+
+        if total <= 0:
+            QMessageBox.information(self, "Copy results", "No results to copy.")
+            return
+
+        dest = make_export_dir(query)
+        choice = QMessageBox.question(
+            self,
+            "Copy results",
+            f"Copy {total} file(s) to:\n{dest}\n\nProceed?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes,
+        )
+        if choice != QMessageBox.StandardButton.Yes:
+            return
+
+        runnable = _CopyRunnable(self._db_path, query, dest)
+        runnable.signals.progress.connect(lambda cur, tot: self._status_label.setText(f"Copying… {cur}/{tot}"))
+        runnable.signals.error.connect(lambda msg: QMessageBox.critical(self, "Copy results", msg))
+
+        def _done(dest_dir: str, ok: int, ng: int) -> None:
+            self._status_label.setText(f"Copied {ok} file(s). Failed {ng}. → {dest_dir}")
+            open_ok = QMessageBox.question(
+                self,
+                "Copy results",
+                f"Done.\nCopied {ok}, Failed {ng}.\nOpen folder?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.Yes,
+            )
+            if open_ok == QMessageBox.StandardButton.Yes:
+                try:
+                    if sys.platform.startswith("win"):
+                        subprocess.Popen(["explorer", dest_dir])
+                    elif sys.platform == "darwin":
+                        subprocess.Popen(["open", dest_dir])
+                    else:
+                        subprocess.Popen(["xdg-open", dest_dir])
+                except Exception:
+                    pass
+            self._copy_button.setEnabled(True)
+
+        runnable.signals.finished.connect(_done)
+        self._copy_button.setEnabled(False)
+        (getattr(self, "_threadpool", None) or QThreadPool.globalInstance()).start(runnable)
 
     def _on_debug_toggled(self, checked: bool) -> None:
         # 中身の表示・非表示
@@ -1737,6 +1860,12 @@ class TagsTab(QWidget):
         self._retag_results_action.setEnabled(bool(self._current_where) and retag_enabled)
         refresh_enabled = not self._refresh_active and not self._indexing_active and not self._search_busy
         self._refresh_button.setEnabled(refresh_enabled)
+        # ★ 検索済み & 処理中でない時だけコピーを有効化
+        copy_enabled = bool(self._current_where) and not (
+            self._search_busy or self._indexing_active or self._refresh_active
+        )
+        if hasattr(self, "_copy_button"):
+            self._copy_button.setEnabled(copy_enabled)
 
     def _handle_index_started(self) -> None:
         self._indexing_active = True
