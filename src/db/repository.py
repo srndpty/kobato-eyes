@@ -485,6 +485,41 @@ def mark_indexed_at(
         )
 
 
+def build_where_and_params_for_query(
+    conn: sqlite3.Connection,
+    query: str,
+    *,
+    alias_file: str = "f",
+) -> tuple[str, list[object]]:
+    """
+    UIのタグ検索クエリ文字列を WHERE 節とプレースホルダ値に変換する。
+    - DBに保存されたタグしきい値(_load_tag_thresholds)を使う
+    - core.query.translate_query を呼んで SQL 断片を得る
+    """
+    from core.query import translate_query  # ここでimportして循環回避
+
+    try:
+        thresholds = _load_tag_thresholds(conn)  # dict[int,float] を想定
+    except Exception:
+        thresholds = {}
+    fragment = translate_query(query, file_alias=alias_file, thresholds=thresholds)
+    where = (fragment.where or "").strip() or "1=1"
+    params = list(fragment.params or [])
+    return where, params
+
+
+def iter_paths_for_search(conn: sqlite3.Connection, query: str) -> Iterator[str]:
+    """
+    検索クエリに一致する files.path を is_present=1 で列挙。
+    """
+    where, params = build_where_and_params_for_query(conn, query, alias_file="f")
+    sql = f"SELECT f.path FROM files f WHERE f.is_present = 1 AND ({where}) ORDER BY f.id"
+    cur = conn.execute(sql, params)
+    for row in cur:
+        # conn.row_factory = sqlite3.Row 前提。tupleでも動くように両対応
+        yield (row["path"] if isinstance(row, sqlite3.Row) else row[0])
+
+
 __all__ = [
     "upsert_file",
     "get_file_by_path",
