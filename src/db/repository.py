@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import sqlite3
 from collections.abc import Iterable, Mapping, Sequence
-from typing import Any
+from typing import Any, Dict, Iterator, Optional
 
 _CATEGORY_KEY_LOOKUP = {
     "0": 0,
@@ -202,44 +202,48 @@ def list_untagged_under_path(conn: sqlite3.Connection, root_like: str) -> list[t
 
 def iter_files_for_dup(
     conn: sqlite3.Connection,
-    root_like: str | None = None,
+    path_like: Optional[str],
     *,
-    model_name: str | None = None,
-) -> Iterable[sqlite3.Row]:
-    """Yield file rows containing duplicate detection attributes."""
+    model_name: Optional[str] = None,  # 使わない場合はそのまま None でOK（将来のcosine用）
+) -> Iterator[Dict[str, Any]]:
+    """
+    Duplicatesスキャン用に、必ず **plain dict** を返す。
+    DuplicateFile.from_row() が dict.get を使っても落ちないようにする。
 
-    join_embeddings = "LEFT JOIN embeddings AS e ON e.file_id = f.id"
-    params: list[object] = []
-    if model_name is not None:
-        join_embeddings += " AND e.model = ?"
-        params.append(model_name)
-    query = [
-        "SELECT",
-        "    f.id AS file_id,",
-        "    f.path AS path,",
-        "    f.size AS size,",
-        "    f.width AS width,",
-        "    f.height AS height,",
-        "    f.is_present AS is_present,",
-        "    s.phash_u64 AS phash_u64,",
-        "    e.vector AS embedding_vector,",
-        "    e.dim AS embedding_dim",
-        "FROM files AS f",
-        "JOIN signatures AS s ON s.file_id = f.id",
-        join_embeddings,
-        "WHERE f.is_present != 0",
-    ]
-    if root_like:
-        query.append("  AND f.path LIKE ?")
-        params.append(root_like)
-    query.append("ORDER BY f.path ASC")
-    sql = "\n".join(query)
-    cursor = conn.execute(sql, tuple(params))
-    try:
-        for row in cursor:
-            yield row
-    finally:
-        cursor.close()
+    返すキー（DuplicateFile.from_row が期待する名前に合わせる）:
+      - file_id, path, size, width, height, phash_u64, embedding
+    embedding は重いので基本 None を返す（将来必要になったらJOIN）。
+    """
+    sql = """
+      SELECT
+        f.id         AS file_id,
+        f.path       AS path,
+        COALESCE(f.size, 0)    AS size,
+        f.width      AS width,
+        f.height     AS height,
+        s.phash_u64  AS phash_u64
+      FROM files f
+      LEFT JOIN signatures s ON s.file_id = f.id
+      WHERE f.is_present = 1
+    """
+    params: list[Any] = []
+    if path_like:
+        sql += " AND f.path LIKE ? ESCAPE '\\' "
+        params.append(path_like)
+    sql += " ORDER BY f.id"
+
+    cur = conn.execute(sql, params)
+    for r in cur:
+        # ★ sqlite3.Row → 必ず plain dict に変換（.get が使える形）
+        yield {
+            "file_id": r["file_id"],
+            "path": r["path"],
+            "size": r["size"],
+            "width": r["width"],
+            "height": r["height"],
+            "phash_u64": r["phash_u64"],
+            "embedding": None,  # 将来 embeddings JOIN するならここで埋める
+        }
 
 
 def mark_files_absent(conn: sqlite3.Connection, file_ids: Sequence[int]) -> int:
@@ -376,9 +380,7 @@ def search_files(
     base_params: list[object] = []
     if use_relevance:
         placeholders = ", ".join("?" for _ in tag_terms)
-        general_thr, character_thr, copyright_thr, default_thr = _resolve_relevance_thresholds(
-            thresholds
-        )
+        general_thr, character_thr, copyright_thr, default_thr = _resolve_relevance_thresholds(thresholds)
         cte = (
             "WITH q AS ("
             "SELECT ft.file_id AS fid, SUM(ft.score) AS rel "
