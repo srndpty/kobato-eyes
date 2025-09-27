@@ -1,11 +1,10 @@
-"""Translate simplified tag queries into SQL expressions."""
+"""Utilities for parsing whitespace-delimited tag queries."""
 
 from __future__ import annotations
 
 import re
-import shlex
 from dataclasses import dataclass
-from typing import Mapping, Sequence
+from typing import Dict, List, Optional, Tuple
 
 from tagger.base import TagCategory
 
@@ -18,64 +17,37 @@ class QueryFragment:
     params: list[object]
 
 
-def file_pk(alias: str) -> str:
-    """Return the primary key reference for a given file table alias."""
-
-    return f"{alias}.id"
-
-
-class _TokenKind:
-    LPAREN = "LPAREN"
-    RPAREN = "RPAREN"
-    AND = "AND"
-    OR = "OR"
-    NOT = "NOT"
-    TAG = "TAG"
-    CATEGORY = "CATEGORY"
-    SCORE = "SCORE"
-
-
 @dataclass(frozen=True)
-class _Token:
-    kind: str
-    value: str
+class TagSpec:
+    """Description of a single tag token extracted from a query."""
 
-
-@dataclass(frozen=True)
-class _Expression:
-    pass
-
-
-@dataclass(frozen=True)
-class _TagExpr(_Expression):
+    raw: str
+    category: Optional[str]
     name: str
+    negative: bool = False
 
 
-@dataclass(frozen=True)
-class _CategoryExpr(_Expression):
-    category: TagCategory
+_WHITESPACE_RE = re.compile(r"\s+", flags=re.UNICODE)
 
+TAG_CHARS = r"[A-Za-z0-9:_'\-]+"
+_TAG_VALID_RE = re.compile(f"^{TAG_CHARS}$")
 
-@dataclass(frozen=True)
-class _ScoreExpr(_Expression):
-    operator: str
-    threshold: float
+_CATEGORY_ALIAS_TO_CANONICAL: Dict[str, str] = {
+    "0": "general",
+    "general": "general",
+    "1": "character",
+    "character": "character",
+    "2": "rating",
+    "rating": "rating",
+    "3": "copyright",
+    "copyright": "copyright",
+    "4": "artist",
+    "artist": "artist",
+    "5": "meta",
+    "meta": "meta",
+}
 
-
-@dataclass(frozen=True)
-class _UnaryExpr(_Expression):
-    op: str
-    operand: _Expression
-
-
-@dataclass(frozen=True)
-class _BinaryExpr(_Expression):
-    op: str
-    left: _Expression
-    right: _Expression
-
-
-_CATEGORY_ALIASES = {
+_CANONICAL_TO_CATEGORY: Dict[str, TagCategory] = {
     "general": TagCategory.GENERAL,
     "character": TagCategory.CHARACTER,
     "rating": TagCategory.RATING,
@@ -84,353 +56,165 @@ _CATEGORY_ALIASES = {
     "meta": TagCategory.META,
 }
 
-_SCORE_RE = re.compile(r"score\s*(>=|<=|=|>|<)\s*([0-9]*\.?[0-9]+)", re.IGNORECASE)
+
+def tokenize_whitespace_only(query: str) -> List[str]:
+    """Split ``query`` by Unicode whitespace without special quoting rules."""
+
+    if not query:
+        return []
+    normalized = query.replace("\u3000", " ")
+    return [token for token in _WHITESPACE_RE.split(normalized) if token]
 
 
-def _split_parens_safely(raw: str) -> list[str]:
-    """Split parentheses tokens while keeping tag-like strings intact."""
+def strip_negative_prefix(token: str) -> Tuple[bool, str]:
+    """Return a tuple describing whether ``token`` is negative and its core value."""
 
-    if "(" in raw and ")" in raw and not any(char.isspace() for char in raw):
-        return [raw]
+    if token.startswith("-") and len(token) > 1:
+        return True, token[1:]
+    return False, token
 
-    tokens: list[str] = []
-    buffer: list[str] = []
+
+def is_not_keyword(token: str) -> bool:
+    """Return ``True`` if ``token`` is the NOT keyword (case insensitive)."""
+
+    return token.upper() == "NOT"
+
+
+def split_category(raw: str) -> Tuple[Optional[str], str]:
+    """Split ``raw`` into an optional category and the remaining tag name."""
+
+    if ":" not in raw:
+        return None, raw
+    left, right = raw.split(":", 1)
+    if not left or not right:
+        return None, raw
+    canonical = _CATEGORY_ALIAS_TO_CANONICAL.get(left.lower())
+    if canonical is None:
+        return None, raw
+    return canonical, right
+
+
+def parse_search(query: str) -> Dict[str, List[TagSpec]]:
+    """Parse ``query`` into positive and negative tag specifications."""
+
+    tokens = tokenize_whitespace_only(query)
+    include: List[TagSpec] = []
+    exclude: List[TagSpec] = []
+    free: List[TagSpec] = []
+
     i = 0
-    while i < len(raw):
-        char = raw[i]
-        if char == "\\" and i + 1 < len(raw) and raw[i + 1] in "()":
-            buffer.append(char)
-            buffer.append(raw[i + 1])
-            i += 2
-            continue
-        if char in "()":
-            if buffer:
-                tokens.append("".join(buffer))
-                buffer = []
-            tokens.append(char)
+    while i < len(tokens):
+        token = tokens[i]
+        if is_not_keyword(token):
+            if i + 1 < len(tokens):
+                candidate = tokens[i + 1]
+                _, core = strip_negative_prefix(candidate)
+                category, name = split_category(core)
+                spec = TagSpec(raw=core, category=category, name=name, negative=True)
+                exclude.append(spec)
+                i += 2
+                continue
+            free.append(TagSpec(raw=token, category=None, name=token))
             i += 1
             continue
-        buffer.append(char)
-        i += 1
-    if buffer:
-        tokens.append("".join(buffer))
-    return [token for token in tokens if token]
 
-
-def _tokenize(query: str) -> list[_Token]:
-    raw_tokens = shlex.split(query, posix=True) if query else []
-    tokens: list[_Token] = []
-    for raw_token in raw_tokens:
-        for raw in _split_parens_safely(raw_token):
-            upper = raw.upper()
-            if raw == "(":
-                tokens.append(_Token(_TokenKind.LPAREN, raw))
-            elif raw == ")":
-                tokens.append(_Token(_TokenKind.RPAREN, raw))
-            elif upper == "AND":
-                tokens.append(_Token(_TokenKind.AND, raw))
-            elif upper == "OR":
-                tokens.append(_Token(_TokenKind.OR, raw))
-            elif upper == "NOT":
-                tokens.append(_Token(_TokenKind.NOT, raw))
-            elif raw.lower().startswith("category:"):
-                name = raw.split(":", 1)[1].lower()
-                if name not in _CATEGORY_ALIASES:
-                    raise ValueError(f"Unknown category '{name}'")
-                tokens.append(_Token(_TokenKind.CATEGORY, name))
-            elif _SCORE_RE.fullmatch(raw):
-                tokens.append(_Token(_TokenKind.SCORE, raw))
-            else:
-                tag = raw.replace(r"\(", "(").replace(r"\)", ")")
-                tokens.append(_Token(_TokenKind.TAG, tag))
-    return tokens
-
-
-class _Parser:
-    def __init__(self, tokens: Sequence[_Token]):
-        self._tokens = tokens
-        self._index = 0
-
-    def parse(self) -> _Expression | None:
-        if not self._tokens:
-            return None
-        expr = self._parse_or()
-        if self._index != len(self._tokens):
-            token = self._tokens[self._index]
-            raise ValueError(f"Unexpected token '{token.value}'")
-        return expr
-
-    def _parse_or(self) -> _Expression:
-        left = self._parse_and()
-        while self._match(_TokenKind.OR):
-            right = self._parse_and()
-            left = _BinaryExpr("OR", left, right)
-        return left
-
-    def _parse_and(self) -> _Expression:
-        left = self._parse_not()
-        while True:
-            if self._match(_TokenKind.AND):
-                right = self._parse_not()
-                left = _BinaryExpr("AND", left, right)
-                continue
-            if self._peek_is_operand():
-                right = self._parse_not()
-                left = _BinaryExpr("AND", left, right)
-                continue
-            break
-        return left
-
-    def _parse_not(self) -> _Expression:
-        if self._match(_TokenKind.NOT):
-            operand = self._parse_not()
-            return _UnaryExpr("NOT", operand)
-        return self._parse_primary()
-
-    def _parse_primary(self) -> _Expression:
-        if self._match(_TokenKind.LPAREN):
-            expr = self._parse_or()
-            if not self._match(_TokenKind.RPAREN):
-                raise ValueError("Missing closing parenthesis")
-            return expr
-
-        token = self._advance()
-        if token is None:
-            raise ValueError("Unexpected end of query")
-        if token.kind == _TokenKind.TAG:
-            return _TagExpr(name=token.value)
-        if token.kind == _TokenKind.CATEGORY:
-            category = _CATEGORY_ALIASES[token.value]
-            return _CategoryExpr(category=category)
-        if token.kind == _TokenKind.SCORE:
-            match = _SCORE_RE.fullmatch(token.value)
-            if match is None:
-                raise ValueError(f"Invalid score predicate '{token.value}'")
-            operator, threshold_s = match.groups()
-            threshold = float(threshold_s)
-            return _ScoreExpr(operator=operator, threshold=threshold)
-        raise ValueError(f"Unsupported token '{token.value}'")
-
-    def _match(self, kind: str) -> bool:
-        if self._peek(kind):
-            self._index += 1
-            return True
-        return False
-
-    def _peek(self, kind: str) -> bool:
-        token = self._current()
-        return token is not None and token.kind == kind
-
-    def _current(self) -> _Token | None:
-        if self._index >= len(self._tokens):
-            return None
-        return self._tokens[self._index]
-
-    def _advance(self) -> _Token | None:
-        token = self._current()
-        if token is not None:
-            self._index += 1
-        return token
-
-    def _peek_is_operand(self) -> bool:
-        token = self._current()
-        if token is None:
-            return False
-        return token.kind in {
-            _TokenKind.TAG,
-            _TokenKind.CATEGORY,
-            _TokenKind.SCORE,
-            _TokenKind.LPAREN,
-            _TokenKind.NOT,
-        }
-
-
-_FALLBACK_THRESHOLDS: dict[int, float] = {
-    0: 0.35,
-    1: 0.25,
-    3: 0.25,
-    -1: 0.0,
-}
-
-
-def _normalize_thresholds(thresholds: Mapping[int, float]) -> dict[int, float]:
-    mapping = dict(_FALLBACK_THRESHOLDS)
-    for key, value in thresholds.items():
-        try:
-            mapping[int(key)] = float(value)
-        except (TypeError, ValueError):
+        is_negative, core = strip_negative_prefix(token)
+        if not core:
+            free.append(TagSpec(raw=token, category=None, name=token, negative=is_negative))
+            i += 1
             continue
-    return mapping
+        category, name = split_category(core)
+        spec = TagSpec(raw=core, category=category, name=name, negative=is_negative)
+        if is_negative:
+            exclude.append(spec)
+        else:
+            include.append(spec)
+        i += 1
+
+    return {"include": include, "exclude": exclude, "free": free}
 
 
-def _threshold_tuple(thresholds: Mapping[int, float]) -> tuple[float, float, float, float]:
-    normalized = _normalize_thresholds(thresholds)
-    return (
-        normalized.get(0, 0.0),
-        normalized.get(1, 0.0),
-        normalized.get(3, 0.0),
-        normalized.get(-1, 0.0),
+def _resolve_category_key(category: Optional[str]) -> Optional[int]:
+    """Convert a canonical category label into its database key."""
+
+    if category is None:
+        return None
+    lookup = _CANONICAL_TO_CATEGORY.get(category.lower())
+    if lookup is None:
+        return None
+    return int(lookup)
+
+
+def _exists_clause_for_tag(alias_file: str, spec: TagSpec) -> Tuple[str, List[object]]:
+    """Return an EXISTS clause and parameters for ``spec`` against ``alias_file``."""
+
+    category_key = _resolve_category_key(spec.category)
+    if category_key is not None:
+        clause = (
+            "EXISTS (SELECT 1 FROM file_tags ft "
+            "JOIN tags t ON t.id = ft.tag_id "
+            f"WHERE ft.file_id = {alias_file}.id "
+            "AND t.category = ? AND t.name = ?)"
+        )
+        return clause, [category_key, spec.name]
+    clause = (
+        "EXISTS (SELECT 1 FROM file_tags ft "
+        "JOIN tags t ON t.id = ft.tag_id "
+        f"WHERE ft.file_id = {alias_file}.id "
+        "AND t.name = ?)"
     )
+    return clause, [spec.name]
 
 
-def _build_sql(
-    expr: _Expression | None,
-    *,
-    file_alias: str = "f",
-    thresholds: Mapping[int, float] | None = None,
-) -> QueryFragment:
-    if expr is None:
+def translate_query(query: str, *, file_alias: str = "f") -> QueryFragment:
+    """Convert ``query`` into a QueryFragment for database filtering."""
+
+    parsed = parse_search(query)
+    clauses: List[str] = []
+    params: List[object] = []
+
+    for spec in parsed["include"]:
+        clause, clause_params = _exists_clause_for_tag(file_alias, spec)
+        clauses.append(clause)
+        params.extend(clause_params)
+
+    for spec in parsed["exclude"]:
+        clause, clause_params = _exists_clause_for_tag(file_alias, spec)
+        clauses.append(f"NOT {clause}")
+        params.extend(clause_params)
+
+    if not clauses:
         return QueryFragment(where="1=1", params=[])
 
-    where, params = _compile_expression(
-        expr,
-        file_alias=file_alias,
-        thresholds=thresholds,
-    )
+    where = " AND ".join(clauses)
     return QueryFragment(where=where, params=params)
 
 
-def _compile_expression(
-    expr: _Expression,
-    *,
-    file_alias: str,
-    thresholds: Mapping[int, float] | None,
-) -> tuple[str, list[object]]:
-    if isinstance(expr, _TagExpr):
-        if thresholds is None:
-            clause = (
-                "EXISTS ("
-                "SELECT 1 FROM file_tags ft JOIN tags t ON t.id = ft.tag_id "
-                f"WHERE ft.file_id = {file_pk(file_alias)} AND t.name = ?)"
-            )
-            return clause, [expr.name]
-        else:
-            general_thr, character_thr, copyright_thr, default_thr = _threshold_tuple(thresholds)
-            clause = (
-                "EXISTS ("
-                "SELECT 1 FROM file_tags ft JOIN tags t ON t.id = ft.tag_id "
-                f"WHERE ft.file_id = {file_pk(file_alias)} "
-                "AND t.name = ? "
-                "AND ft.score >= CASE t.category "
-                "WHEN 0 THEN ? "
-                "WHEN 4 THEN ? "
-                "WHEN 3 THEN ? "
-                "ELSE ? "
-                "END)"
-            )
-            return (
-                clause,
-                [
-                    expr.name,
-                    general_thr,
-                    character_thr,
-                    copyright_thr,
-                    default_thr,
-                ],
-            )
-    if isinstance(expr, _CategoryExpr):
-        category_key = int(expr.category)
-        if thresholds is None:
-            clause = (
-                "EXISTS ("
-                "SELECT 1 FROM file_tags ft JOIN tags t ON t.id = ft.tag_id "
-                f"WHERE ft.file_id = {file_pk(file_alias)} AND t.category = ?)"
-            )
-            return clause, [category_key]
-        else:
-            normalized = _normalize_thresholds(thresholds)
-            threshold_value = float(normalized.get(category_key, 0.0))
-            clause = (
-                "EXISTS ("
-                "SELECT 1 FROM file_tags ft JOIN tags t ON t.id = ft.tag_id "
-                f"WHERE ft.file_id = {file_pk(file_alias)} "
-                "AND t.category = ? "
-                "AND ft.score >= ?)"
-            )
-            return clause, [category_key, threshold_value]
-    if isinstance(expr, _ScoreExpr):
-        clause = (
-            "EXISTS (SELECT 1 FROM file_tags ft "
-            f"WHERE ft.file_id = {file_pk(file_alias)} AND ft.score {expr.operator} ? )"
-        )
-        return clause, [expr.threshold]
-    if isinstance(expr, _UnaryExpr):
-        inner, params = _compile_expression(
-            expr.operand,
-            file_alias=file_alias,
-            thresholds=thresholds,
-        )
-        return f"NOT ({inner})", params
-    if isinstance(expr, _BinaryExpr):
-        left_sql, left_params = _compile_expression(
-            expr.left,
-            file_alias=file_alias,
-            thresholds=thresholds,
-        )
-        right_sql, right_params = _compile_expression(
-            expr.right,
-            file_alias=file_alias,
-            thresholds=thresholds,
-        )
-        combined = f"({left_sql}) {expr.op} ({right_sql})"
-        return combined, left_params + right_params
+def extract_positive_tag_terms(query: str) -> List[str]:
+    """Return lower-cased unique tag names that appear positively in ``query``."""
 
-    raise TypeError(f"Unhandled expression type: {expr}")
-
-
-def extract_positive_tag_terms(query: str) -> list[str]:
-    """Return tag names present in ``query`` that are not negated."""
-
-    tokens = _tokenize(query)
-    parser = _Parser(tokens)
-    expr = parser.parse()
-    if expr is None:
-        return []
-
+    parsed = parse_search(query)
     seen: set[str] = set()
-    ordered: list[str] = []
-
-    def walk(node: _Expression, negated: bool = False) -> None:
-        if isinstance(node, _TagExpr):
-            if not negated:
-                name = node.name.strip()
-                if not name or name.endswith(":"):
-                    return
-                lowered = name.lower()
-                if lowered not in seen:
-                    seen.add(lowered)
-                    ordered.append(lowered)
-            return
-        if isinstance(node, _UnaryExpr) and node.op == "NOT":
-            walk(node.operand, not negated)
-            return
-        if isinstance(node, _BinaryExpr):
-            walk(node.left, negated)
-            walk(node.right, negated)
-            return
-        if isinstance(node, (_CategoryExpr, _ScoreExpr)):
-            return
-
-    walk(expr, False)
+    ordered: List[str] = []
+    for spec in parsed["include"]:
+        name = spec.name.strip()
+        if not name:
+            continue
+        if _TAG_VALID_RE.fullmatch(name) is None:
+            continue
+        lowered = name.lower()
+        if lowered not in seen:
+            seen.add(lowered)
+            ordered.append(lowered)
     return ordered
-
-
-def translate_query(
-    query: str,
-    *,
-    file_alias: str = "f",
-    thresholds: Mapping[int, float] | None = None,
-) -> QueryFragment:
-    """Convert a simplified tag query string into an SQL WHERE fragment."""
-    tokens = _tokenize(query)
-    parser = _Parser(tokens)
-    expr = parser.parse()
-    return _build_sql(expr, file_alias=file_alias, thresholds=thresholds)
 
 
 __all__ = [
     "QueryFragment",
+    "TAG_CHARS",
+    "TagSpec",
     "extract_positive_tag_terms",
-    "file_pk",
+    "parse_search",
+    "tokenize_whitespace_only",
     "translate_query",
 ]

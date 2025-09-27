@@ -598,6 +598,7 @@ class TagsTab(QWidget):
         self._completion_candidates: list[labels_util.TagMeta] = []
         self._pending_completion_text = ""
         self._current_completion_range: tuple[int, int] = (0, 0)
+        self._current_completion_negative = False
         self._update_completion_candidates()
         self._search_button = QPushButton("Search", self)
         self._retag_menu = QMenu("Retag with current model", self)
@@ -1009,8 +1010,12 @@ class TagsTab(QWidget):
         cursor_position = self._query_edit.cursorPosition()
         token, start, end = extract_completion_token(text, cursor_position)
         self._current_completion_range = (start, end)
-        prefix = token.lower()
+        is_negative = token.startswith("-") and len(token) > 1
+        core = token[1:] if is_negative else token
+        self._current_completion_negative = is_negative
+        prefix = core.lower()
         if not prefix:
+            self._current_completion_negative = False
             self._tag_model.reset_with([])
             self._hide_completion_popup()
             return
@@ -1024,11 +1029,12 @@ class TagsTab(QWidget):
             limited = ranked[:50]
             self._tag_model.reset_with(limited)
             # ★ ここが肝心：QCompleter にも “このトークン” を prefix として教える
-            self._completer.setCompletionPrefix(token)
+            self._completer.setCompletionPrefix(core)
             self._completer.complete()
         else:
             self._tag_model.reset_with([])
             self._hide_completion_popup()
+            self._current_completion_negative = False
 
     def _hide_completion_popup(self) -> None:
         popup = self._completer.popup()
@@ -1051,9 +1057,13 @@ class TagsTab(QWidget):
         start, end = self._current_completion_range
         # インデックスがベース文字列からはみ出す場合の保険
         if start > len(base_text) or end > len(base_text):
-            token, start, end = replace_completion_token.extract_completion_token(base_text, len(base_text))
+            token, start, end = extract_completion_token(base_text, len(base_text))
 
-        new_text, cursor = replace_completion_token(base_text, start, end, completion_text)
+        replacement = completion_text
+        if self._current_completion_negative and replacement:
+            replacement = f"-{replacement}"
+
+        new_text, cursor = replace_completion_token(base_text, start, end, replacement)
         print(f"base_text:{base_text}, new_text:{new_text}, cursor:{cursor}")
         block = self._query_edit.blockSignals(True)
         self._query_edit.setText(new_text)
