@@ -1,11 +1,6 @@
-"""Tests for simplified query to SQL translation."""
-
-from __future__ import annotations
-
 import pytest
 
-from core.query import QueryFragment, translate_query
-
+from core.query import QueryFragment, parse_search, translate_query
 
 ALIAS = "f"
 
@@ -17,79 +12,85 @@ def expected_tag_exists(alias: str = ALIAS) -> str:
     )
 
 
-def _assert_query(sql: str, params: list[object], query: str) -> None:
-    fragment = translate_query(query, file_alias=ALIAS)
-    assert fragment.where == sql
-    assert fragment.params == params
+def expected_tag_exists_with_category(alias: str = ALIAS) -> str:
+    return (
+        "EXISTS (SELECT 1 FROM file_tags ft JOIN tags t ON t.id = ft.tag_id "
+        f"WHERE ft.file_id = {alias}.id AND t.category = ? AND t.name = ?)"
+    )
 
 
 def test_single_tag_translates_to_exists() -> None:
-    expected = expected_tag_exists()
-    _assert_query(expected, ["kobato"], "kobato")
+    fragment = translate_query("kobato", file_alias=ALIAS)
+    assert fragment.where == expected_tag_exists()
+    assert fragment.params == ["kobato"]
 
 
-def test_or_expression() -> None:
-    left = expected_tag_exists()
-    right = left
-    expected = f"({left}) OR ({right})"
-    fragment = translate_query("kobato OR azusa", file_alias=ALIAS)
+def test_negative_prefix_translates_to_not_exists() -> None:
+    fragment = translate_query("-hatsune_miku", file_alias=ALIAS)
+    assert fragment.where == f"NOT {expected_tag_exists()}"
+    assert fragment.params == ["hatsune_miku"]
+
+
+def test_not_keyword_translates_to_exclusion() -> None:
+    fragment = translate_query("megurine_luka NOT hatsune_miku", file_alias=ALIAS)
+    expected = f"{expected_tag_exists()} AND NOT {expected_tag_exists()}"
     assert fragment.where == expected
-    assert fragment.params == ["kobato", "azusa"]
+    assert fragment.params == ["megurine_luka", "hatsune_miku"]
 
 
-def test_not_expression_with_implicit_and() -> None:
-    tag_clause = expected_tag_exists()
-    expected = f"({tag_clause}) AND (NOT ({tag_clause}))"
-    fragment = translate_query("rating:safe NOT spoiler", file_alias=ALIAS)
+def test_or_combination_translates_to_or() -> None:
+    fragment = translate_query("haruhi OR miku", file_alias=ALIAS)
+    expected = f"{expected_tag_exists()} OR {expected_tag_exists()}"
     assert fragment.where == expected
-    assert fragment.params == ["rating:safe", "spoiler"]
+    assert fragment.params == ["haruhi", "miku"]
 
 
-def test_category_and_score_filters() -> None:
-    category_clause = (
-        "EXISTS (SELECT 1 FROM file_tags ft JOIN tags t ON t.id = ft.tag_id "
-        f"WHERE ft.file_id = {ALIAS}.id AND t.category = ?)"
-    )
-    score_clause = (
-        "EXISTS (SELECT 1 FROM file_tags ft "
-        f"WHERE ft.file_id = {ALIAS}.id AND ft.score > ? )"
-    )
-    expected = f"({category_clause}) AND ({score_clause})"
-    fragment = translate_query("category:character score>0.75", file_alias=ALIAS)
+def test_category_prefix_maps_to_numeric_category() -> None:
+    fragment = translate_query("character:megurine_luka", file_alias=ALIAS)
+    assert fragment.where == expected_tag_exists_with_category()
+    assert fragment.params == [1, "megurine_luka"]
+
+
+def test_unknown_category_treated_as_plain_tag() -> None:
+    fragment = translate_query("pool:summer", file_alias=ALIAS)
+    assert fragment.where == expected_tag_exists()
+    assert fragment.params == ["pool:summer"]
+
+
+@pytest.mark.parametrize(
+    "token",
+    [
+        "don't_say_\"lazy\"",
+        "!?",
+        "cute_&_girly_(idolmaster)",
+        "=_=",
+        "^^^",
+        "<|>_<|>",
+        "@_@",
+        ";)",
+        ">:)",
+        "st._gloriana's_military_uniform",
+        "double_\\m/",
+        "kaguya-sama_wa_kokurasetai_~tensai-tachi_no_renai_zunousen~",
+        "otome_game_no_hametsu_flag_shika_nai_akuyaku_reijou_ni_tensei_shite_shimatta",
+    ],
+)
+def test_special_character_tokens_do_not_break_translation(token: str) -> None:
+    fragment = translate_query(token, file_alias=ALIAS)
+    assert fragment.where == expected_tag_exists()
+    assert fragment.params == [token]
+
+
+def test_mixed_positive_and_negative_tokens() -> None:
+    fragment = translate_query("megurine_luka -hatsune_miku", file_alias=ALIAS)
+    expected = f"{expected_tag_exists()} AND NOT {expected_tag_exists()}"
     assert fragment.where == expected
-    assert fragment.params == [1, 0.75]
+    assert fragment.params == ["megurine_luka", "hatsune_miku"]
 
 
-def test_parentheses_override_precedence() -> None:
-    clause = expected_tag_exists()
-    expected = f"({clause}) OR (({clause}) AND ({clause}))"
-    fragment = translate_query("tag1 OR (tag2 tag3)", file_alias=ALIAS)
-    assert fragment.where == expected
-    assert fragment.params == ["tag1", "tag2", "tag3"]
-
-
-def test_invalid_category_raises() -> None:
-    with pytest.raises(ValueError):
-        translate_query("category:unknown", file_alias=ALIAS)
-
-
-def test_tag_with_parentheses_is_single_token() -> None:
-    clause = expected_tag_exists()
-    fragment = translate_query("mallow_(pokemon)", file_alias=ALIAS)
-    assert fragment.where == clause
-    assert fragment.params == ["mallow_(pokemon)"]
-
-
-def test_tag_with_colons_is_treated_as_tag() -> None:
-    clause = expected_tag_exists()
-    fragment = translate_query("artist:name:with:colon", file_alias=ALIAS)
-    assert fragment.where == clause
-    assert fragment.params == ["artist:name:with:colon"]
-
-
-def test_invalid_trailing_token_raises() -> None:
-    with pytest.raises(ValueError):
-        translate_query("kobato AND", file_alias=ALIAS)
+def test_parse_search_uses_unicode_whitespace() -> None:
+    parsed = parse_search("miku\u3000luka\t rin")
+    assert [spec.name for spec in parsed["include"]] == ["miku", "luka", "rin"]
 
 
 def test_empty_query_returns_trivial_fragment() -> None:

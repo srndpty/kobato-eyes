@@ -6,6 +6,8 @@ import sqlite3
 from collections.abc import Iterable, Mapping, Sequence
 from typing import Any
 
+from core.query import TagSpec, translate_query
+
 _CATEGORY_KEY_LOOKUP = {
     "0": 0,
     "general": 0,
@@ -76,6 +78,50 @@ def _load_tag_thresholds(conn: sqlite3.Connection) -> dict[int, float]:
     for category, default in _DEFAULT_CATEGORY_THRESHOLDS.items():
         thresholds.setdefault(category, default)
     return thresholds
+
+
+def _category_key_from_spec(spec: TagSpec) -> int | None:
+    """Return the integer category key for ``spec`` if one is available."""
+
+    if not spec.category:
+        return None
+    key = _CATEGORY_KEY_LOOKUP.get(spec.category.lower())
+    if key is None:
+        try:
+            return int(spec.category)
+        except (TypeError, ValueError):
+            return None
+    return key
+
+
+def _exists_clause_for_tag(alias_file: str, spec: TagSpec) -> tuple[str, list[object]]:
+    """Build an EXISTS clause and its parameters for ``spec``."""
+
+    category_key = _category_key_from_spec(spec)
+    if category_key is not None:
+        sql = (
+            "EXISTS (SELECT 1 FROM file_tags ft "
+            "JOIN tags t ON t.id = ft.tag_id "
+            f"WHERE ft.file_id = {alias_file}.id "
+            "AND t.category = ? AND t.name = ?)"
+        )
+        return sql, [category_key, spec.name]
+    sql = (
+        "EXISTS (SELECT 1 FROM file_tags ft "
+        "JOIN tags t ON t.id = ft.tag_id "
+        f"WHERE ft.file_id = {alias_file}.id "
+        "AND t.name = ?)"
+    )
+    return sql, [spec.name]
+
+
+def build_where_and_params_for_query(query: str, alias_file: str = "f") -> tuple[str, list[object]]:
+    """Return an ``AND``-prefixed WHERE tail and parameters for ``query``."""
+
+    fragment = translate_query(query, file_alias=alias_file)
+    if fragment.where == "1=1":
+        return "", []
+    return f" AND {fragment.where}", list(fragment.params)
 
 
 def _ensure_file_columns(conn: sqlite3.Connection) -> None:
@@ -416,6 +462,7 @@ __all__ = [
     "get_file_by_path",
     "upsert_tags",
     "replace_file_tags",
+    "build_where_and_params_for_query",
     "update_fts",
     "upsert_signatures",
     "upsert_embedding",
