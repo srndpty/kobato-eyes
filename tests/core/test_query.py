@@ -38,6 +38,13 @@ def test_not_keyword_translates_to_exclusion() -> None:
     assert fragment.params == ["megurine_luka", "hatsune_miku"]
 
 
+def test_or_combination_translates_to_or() -> None:
+    fragment = translate_query("haruhi OR miku", file_alias=ALIAS)
+    expected = f"{expected_tag_exists()} OR {expected_tag_exists()}"
+    assert fragment.where == expected
+    assert fragment.params == ["haruhi", "miku"]
+
+
 def test_category_prefix_maps_to_numeric_category() -> None:
     fragment = translate_query("character:megurine_luka", file_alias=ALIAS)
     assert fragment.where == expected_tag_exists_with_category()

@@ -6,7 +6,7 @@ import sqlite3
 from collections.abc import Iterable, Mapping, Sequence
 from typing import Any
 
-from core.query import TagSpec, parse_search
+from core.query import TagSpec, translate_query
 
 _CATEGORY_KEY_LOOKUP = {
     "0": 0,
@@ -118,23 +118,10 @@ def _exists_clause_for_tag(alias_file: str, spec: TagSpec) -> tuple[str, list[ob
 def build_where_and_params_for_query(query: str, alias_file: str = "f") -> tuple[str, list[object]]:
     """Return an ``AND``-prefixed WHERE tail and parameters for ``query``."""
 
-    parsed = parse_search(query)
-    clauses: list[str] = []
-    params: list[object] = []
-
-    for spec in parsed["include"]:
-        clause, clause_params = _exists_clause_for_tag(alias_file, spec)
-        clauses.append(clause)
-        params.extend(clause_params)
-
-    for spec in parsed["exclude"]:
-        clause, clause_params = _exists_clause_for_tag(alias_file, spec)
-        clauses.append(f"NOT {clause}")
-        params.extend(clause_params)
-
-    if not clauses:
+    fragment = translate_query(query, file_alias=alias_file)
+    if fragment.where == "1=1":
         return "", []
-    return " AND " + " AND ".join(clauses), params
+    return f" AND {fragment.where}", list(fragment.params)
 
 
 def _ensure_file_columns(conn: sqlite3.Connection) -> None:

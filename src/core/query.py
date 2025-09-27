@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 from tagger.base import TagCategory
 
@@ -31,6 +31,54 @@ _WHITESPACE_RE = re.compile(r"\s+", flags=re.UNICODE)
 
 TAG_CHARS = r"[A-Za-z0-9:_'\-]+"
 _TAG_VALID_RE = re.compile(f"^{TAG_CHARS}$")
+
+
+class _TokenKind:
+    """Token kinds produced by the boolean lexer."""
+
+    LPAREN = "LPAREN"
+    RPAREN = "RPAREN"
+    AND = "AND"
+    OR = "OR"
+    NOT = "NOT"
+    TAG = "TAG"
+
+
+@dataclass(frozen=True)
+class _Token:
+    """Lexical token containing its kind and original value."""
+
+    kind: str
+    value: str
+
+
+@dataclass(frozen=True)
+class _Expression:
+    """Base class for parsed boolean expressions."""
+
+
+@dataclass(frozen=True)
+class _TagExpr(_Expression):
+    """Leaf expression describing a single tag specification."""
+
+    spec: TagSpec
+
+
+@dataclass(frozen=True)
+class _UnaryExpr(_Expression):
+    """Unary boolean operation such as NOT."""
+
+    op: str
+    operand: _Expression
+
+
+@dataclass(frozen=True)
+class _BinaryExpr(_Expression):
+    """Binary boolean operation such as AND/OR."""
+
+    op: str
+    left: _Expression
+    right: _Expression
 
 _CATEGORY_ALIAS_TO_CANONICAL: Dict[str, str] = {
     "0": "general",
@@ -134,6 +182,179 @@ def parse_search(query: str) -> Dict[str, List[TagSpec]]:
     return {"include": include, "exclude": exclude, "free": free}
 
 
+def _split_parens_for_lex(raw: str, balance: int) -> Tuple[List[str], int]:
+    """Split ``raw`` while tracking parenthesis ``balance`` for grouping."""
+
+    if "(" in raw and ")" in raw and not any(ch.isspace() for ch in raw):
+        return [raw], balance
+
+    tokens: List[str] = []
+    buffer: List[str] = []
+    i = 0
+    while i < len(raw):
+        char = raw[i]
+        if char == "\\" and i + 1 < len(raw) and raw[i + 1] in "()":
+            buffer.append(char)
+            buffer.append(raw[i + 1])
+            i += 2
+            continue
+        if char == "(":
+            if buffer:
+                tokens.append("".join(buffer))
+                buffer = []
+            tokens.append("(")
+            balance += 1
+            i += 1
+            continue
+        if char == ")":
+            if balance == 0:
+                buffer.append(char)
+                i += 1
+                continue
+            if buffer:
+                tokens.append("".join(buffer))
+                buffer = []
+            tokens.append(")")
+            balance = max(balance - 1, 0)
+            i += 1
+            continue
+        buffer.append(char)
+        i += 1
+    if buffer:
+        tokens.append("".join(buffer))
+    return [token for token in tokens if token], balance
+
+
+def _make_tag_spec(raw: str) -> TagSpec:
+    """Return a TagSpec for ``raw`` while preserving its original text."""
+
+    is_negative, core = strip_negative_prefix(raw)
+    category, name = split_category(core)
+    return TagSpec(raw=core, category=category, name=name, negative=is_negative)
+
+
+def _normalise_spec_for_expr(spec: TagSpec) -> TagSpec:
+    """Return a positive TagSpec suitable for embedding in expressions."""
+
+    if not spec.negative:
+        return spec
+    return TagSpec(raw=spec.raw, category=spec.category, name=spec.name, negative=False)
+
+
+def _lex_boolean_tokens(query: str) -> List[_Token]:
+    """Lex ``query`` into boolean-aware tokens without raising errors."""
+
+    tokens: List[_Token] = []
+    balance = 0
+    for token in tokenize_whitespace_only(query):
+        pieces, balance = _split_parens_for_lex(token, balance)
+        for piece in pieces:
+            if piece == "(":
+                tokens.append(_Token(_TokenKind.LPAREN, piece))
+            elif piece == ")":
+                tokens.append(_Token(_TokenKind.RPAREN, piece))
+            else:
+                upper = piece.upper()
+                if piece == upper and upper in {_TokenKind.AND, _TokenKind.OR, _TokenKind.NOT}:
+                    tokens.append(_Token(upper, piece))
+                else:
+                    tokens.append(_Token(_TokenKind.TAG, piece))
+    return tokens
+
+
+class _Parser:
+    """Recursive-descent parser for boolean tag expressions."""
+
+    def __init__(self, tokens: Sequence[_Token]):
+        self._tokens = tokens
+        self._index = 0
+
+    def parse(self) -> Optional[_Expression]:
+        if not self._tokens:
+            return None
+        expr = self._parse_or()
+        if self._index != len(self._tokens):
+            return None
+        return expr
+
+    def _parse_or(self) -> _Expression:
+        left = self._parse_and()
+        while self._match(_TokenKind.OR):
+            right = self._parse_and()
+            left = _BinaryExpr("OR", left, right)
+        return left
+
+    def _parse_and(self) -> _Expression:
+        left = self._parse_not()
+        while True:
+            if self._match(_TokenKind.AND):
+                right = self._parse_not()
+                left = _BinaryExpr("AND", left, right)
+                continue
+            if self._peek_is_operand():
+                right = self._parse_not()
+                left = _BinaryExpr("AND", left, right)
+                continue
+            break
+        return left
+
+    def _parse_not(self) -> _Expression:
+        if self._match(_TokenKind.NOT):
+            operand = self._parse_not()
+            return _UnaryExpr("NOT", operand)
+        return self._parse_primary()
+
+    def _parse_primary(self) -> _Expression:
+        if self._match(_TokenKind.LPAREN):
+            expr = self._parse_or()
+            if not self._match(_TokenKind.RPAREN):
+                return None
+            return expr
+
+        token = self._advance()
+        if token is None:
+            return None
+        if token.kind != _TokenKind.TAG:
+            return None
+        spec = _make_tag_spec(token.value)
+        base_spec = _normalise_spec_for_expr(spec)
+        expr: _Expression = _TagExpr(spec=base_spec)
+        if spec.negative:
+            expr = _UnaryExpr("NOT", expr)
+        return expr
+
+    def _match(self, kind: str) -> bool:
+        if self._peek(kind):
+            self._index += 1
+            return True
+        return False
+
+    def _peek(self, kind: str) -> bool:
+        token = self._current()
+        return token is not None and token.kind == kind
+
+    def _current(self) -> Optional[_Token]:
+        if self._index >= len(self._tokens):
+            return None
+        return self._tokens[self._index]
+
+    def _advance(self) -> Optional[_Token]:
+        token = self._current()
+        if token is not None:
+            self._index += 1
+        return token
+
+    def _peek_is_operand(self) -> bool:
+        token = self._current()
+        if token is None:
+            return False
+        return token.kind in {
+            _TokenKind.TAG,
+            _TokenKind.LPAREN,
+            _TokenKind.NOT,
+        }
+
+
 def _resolve_category_key(category: Optional[str]) -> Optional[int]:
     """Convert a canonical category label into its database key."""
 
@@ -166,46 +387,79 @@ def _exists_clause_for_tag(alias_file: str, spec: TagSpec) -> Tuple[str, List[ob
     return clause, [spec.name]
 
 
+def _compile_expression(expr: _Expression, *, file_alias: str) -> Tuple[str, List[object], int]:
+    """Compile an expression tree into SQL, parameters and precedence."""
+
+    if isinstance(expr, _TagExpr):
+        clause, params = _exists_clause_for_tag(file_alias, expr.spec)
+        return clause, params, 3
+    if isinstance(expr, _UnaryExpr) and expr.op == "NOT":
+        inner_sql, inner_params, inner_prec = _compile_expression(expr.operand, file_alias=file_alias)
+        if inner_prec < 2:
+            inner_sql = f"({inner_sql})"
+        return f"NOT {inner_sql}", inner_params, 2
+    if isinstance(expr, _BinaryExpr):
+        current_prec = 1 if expr.op == "AND" else 0
+        left_sql, left_params, left_prec = _compile_expression(expr.left, file_alias=file_alias)
+        right_sql, right_params, right_prec = _compile_expression(expr.right, file_alias=file_alias)
+        if left_prec < current_prec:
+            left_sql = f"({left_sql})"
+        if right_prec < current_prec:
+            right_sql = f"({right_sql})"
+        combined_params = left_params + right_params
+        return f"{left_sql} {expr.op} {right_sql}", combined_params, current_prec
+    raise TypeError(f"Unsupported expression node: {expr}")
+
+
 def translate_query(query: str, *, file_alias: str = "f") -> QueryFragment:
     """Convert ``query`` into a QueryFragment for database filtering."""
 
-    parsed = parse_search(query)
-    clauses: List[str] = []
-    params: List[object] = []
-
-    for spec in parsed["include"]:
-        clause, clause_params = _exists_clause_for_tag(file_alias, spec)
-        clauses.append(clause)
-        params.extend(clause_params)
-
-    for spec in parsed["exclude"]:
-        clause, clause_params = _exists_clause_for_tag(file_alias, spec)
-        clauses.append(f"NOT {clause}")
-        params.extend(clause_params)
-
-    if not clauses:
+    tokens = _lex_boolean_tokens(query)
+    parser = _Parser(tokens)
+    expr = parser.parse()
+    if expr is None:
         return QueryFragment(where="1=1", params=[])
-
-    where = " AND ".join(clauses)
+    try:
+        where, params, _ = _compile_expression(expr, file_alias=file_alias)
+    except TypeError:
+        return QueryFragment(where="1=1", params=[])
     return QueryFragment(where=where, params=params)
 
 
 def extract_positive_tag_terms(query: str) -> List[str]:
     """Return lower-cased unique tag names that appear positively in ``query``."""
 
-    parsed = parse_search(query)
+    tokens = _lex_boolean_tokens(query)
+    parser = _Parser(tokens)
+    expr = parser.parse()
+    if expr is None:
+        return []
+
     seen: set[str] = set()
     ordered: List[str] = []
-    for spec in parsed["include"]:
-        name = spec.name.strip()
-        if not name:
-            continue
-        if _TAG_VALID_RE.fullmatch(name) is None:
-            continue
-        lowered = name.lower()
-        if lowered not in seen:
-            seen.add(lowered)
-            ordered.append(lowered)
+
+    def walk(node: _Expression, negated: bool = False) -> None:
+        if isinstance(node, _TagExpr):
+            if negated:
+                return
+            name = node.spec.name.strip()
+            if not name or name.endswith(":"):
+                return
+            if _TAG_VALID_RE.fullmatch(name) is None:
+                return
+            lowered = name.lower()
+            if lowered not in seen:
+                seen.add(lowered)
+                ordered.append(lowered)
+            return
+        if isinstance(node, _UnaryExpr) and node.op == "NOT":
+            walk(node.operand, not negated)
+            return
+        if isinstance(node, _BinaryExpr):
+            walk(node.left, negated)
+            walk(node.right, negated)
+
+    walk(expr)
     return ordered
 
 
