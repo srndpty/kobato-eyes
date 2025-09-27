@@ -84,9 +84,7 @@ SCHEMA_STATEMENTS: tuple[str, ...] = (
     """
     CREATE INDEX IF NOT EXISTS files_path_idx ON files(path);
     """,
-    """
-    CREATE INDEX IF NOT EXISTS files_is_present_path_idx ON files(is_present, path);
-    """,
+    # !!! ここに "files_is_present_path_idx" は置かない（v3 migration が作る）
 )
 
 
