@@ -791,7 +791,6 @@ class TagsTab(QWidget):
         search_layout.addWidget(self._search_button)
         search_layout.addWidget(self._retag_button)
         search_layout.addWidget(self._refresh_button)
-        search_layout.addWidget(self._copy_button)
 
         toggle_layout = QHBoxLayout()
         toggle_layout.addWidget(self._table_button)
@@ -799,6 +798,7 @@ class TagsTab(QWidget):
         self._stats_button = QPushButton("Stats", self)
         self._stats_button.setToolTip("Show tag statistics")
         toggle_layout.addWidget(self._stats_button)
+        toggle_layout.addWidget(self._copy_button)
         toggle_layout.addStretch()
 
         layout = QVBoxLayout(self)
