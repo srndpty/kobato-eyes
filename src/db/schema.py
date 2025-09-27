@@ -21,6 +21,8 @@ SCHEMA_STATEMENTS: tuple[str, ...] = (
         indexed_at REAL,
         tagger_sig TEXT,
         last_tagged_at REAL,
+        is_present INTEGER NOT NULL DEFAULT 1,
+        deleted_at TEXT,
         created_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
     """,
@@ -82,7 +84,7 @@ SCHEMA_STATEMENTS: tuple[str, ...] = (
     CREATE INDEX IF NOT EXISTS idx_embeddings_model ON embeddings(model);
     """,
     """
-    CREATE INDEX IF NOT EXISTS files_path_idx ON files(path);
+    CREATE INDEX IF NOT EXISTS files_present_path_idx ON files(is_present, path);
     """,
     # !!! ここに "files_is_present_path_idx" は置かない（v3 migration が作る）
 )
@@ -110,7 +112,8 @@ def _migrate_to_v2(conn: sqlite3.Connection) -> None:
 
 def _migrate_to_v3(conn: sqlite3.Connection) -> None:
     _add_column_if_missing(conn, "files", "is_present", "INTEGER NOT NULL DEFAULT 1")
-    conn.execute("CREATE INDEX IF NOT EXISTS files_is_present_path_idx ON files(is_present, path)")
+    _add_column_if_missing(conn, "files", "deleted_at", "TEXT")
+    conn.execute("CREATE INDEX IF NOT EXISTS files_present_path_idx ON files(is_present, path)")
 
 
 MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {

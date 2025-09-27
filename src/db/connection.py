@@ -24,6 +24,7 @@ def _ensure_indexes(conn: sqlite3.Connection) -> None:
     CREATE INDEX IF NOT EXISTS idx_file_tags_tag_file      ON file_tags(tag_id, file_id);
     CREATE UNIQUE INDEX IF NOT EXISTS uq_tags_name         ON tags(name);
     CREATE INDEX IF NOT EXISTS idx_tags_category           ON tags(category);
+    CREATE INDEX IF NOT EXISTS files_present_path_idx      ON files(is_present, path);
     """)
     # 初回だけで十分だが、呼ばれても副作用は小さい
     try:

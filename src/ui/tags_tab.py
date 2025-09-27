@@ -466,11 +466,13 @@ class RefreshRunnable(QRunnable):
         *,
         recursive: bool = True,
         batch_size: int = 8,
+        hard_delete: bool = False,
     ) -> None:
         super().__init__()
         self._folder = Path(folder)
         self._recursive = recursive
         self._batch_size = batch_size
+        self._hard_delete = hard_delete
         self.signals = self.Signals()
 
     def run(self) -> None:  # noqa: D401
@@ -480,6 +482,7 @@ class RefreshRunnable(QRunnable):
                 recursive=self._recursive,
                 batch_size=self._batch_size,
                 skip_hnsw=True,
+                hard_delete_missing=self._hard_delete,
             )
         except Exception as exc:  # pragma: no cover - defensive logging
             logger.exception("Manual refresh failed for %s", self._folder)
@@ -487,6 +490,7 @@ class RefreshRunnable(QRunnable):
             return
         stats = dict(stats)
         stats["folder"] = str(self._folder)
+        stats["hard_delete"] = self._hard_delete
         self.signals.finished.emit(stats)
 
 
@@ -608,7 +612,9 @@ class TagsTab(QWidget):
         self._retag_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
         self._retag_button.setMenu(self._retag_menu)
         self._refresh_button = QPushButton("🔄 Refresh", self)
-        self._refresh_button.setToolTip("Scan & tag untagged in this folder")
+        self._refresh_button.setToolTip(
+            "Scan & tag untagged in this folder (Shift+Click = hard delete missing)"
+        )
         self._load_more_button = QPushButton("Load more", self)
         self._load_more_button.setEnabled(False)
         self._status_label = QLabel(self)
@@ -1200,16 +1206,19 @@ class TagsTab(QWidget):
         if folder is None:
             self._show_toast("Select a file or run a search to choose a folder.")
             return
-        self._start_refresh_task(folder)
+        modifiers = QApplication.keyboardModifiers()
+        hard_delete = bool(modifiers & Qt.KeyboardModifier.ShiftModifier)
+        self._start_refresh_task(folder, hard_delete=hard_delete)
 
-    def _start_refresh_task(self, folder: Path) -> None:
+    def _start_refresh_task(self, folder: Path, *, hard_delete: bool = False) -> None:
         self._refresh_active = True
         self._active_refresh_folder = folder
-        task = RefreshRunnable(folder)
+        task = RefreshRunnable(folder, hard_delete=hard_delete)
         self._current_refresh_task = task
         task.signals.finished.connect(self._handle_refresh_finished)
         task.signals.error.connect(self._handle_refresh_failed)
-        self._status_label.setText("Scanning…")
+        mode_hint = " (hard delete)" if hard_delete else ""
+        self._status_label.setText(f"Scanning…{mode_hint}")
         self._update_control_states()
         self._refresh_pool.start(task)
 
@@ -1263,12 +1272,25 @@ class TagsTab(QWidget):
         queued = int(stats.get("queued", 0) or 0)
         tagged = int(stats.get("tagged", 0) or 0)
         elapsed = float(stats.get("elapsed_sec", 0.0) or 0.0)
+        missing = int(stats.get("missing", 0) or 0)
+        soft_deleted = int(stats.get("soft_deleted", 0) or 0)
+        hard_deleted = int(stats.get("hard_deleted", 0) or 0)
+        removed_total = soft_deleted + hard_deleted
+        if missing <= 0 and removed_total > 0:
+            missing = removed_total
+        hard_delete = bool(stats.get("hard_delete", False) or hard_deleted)
+        removal_label = "hard delete" if hard_delete else "soft delete"
         folder_text = str(folder) if folder is not None else str(stats.get("folder", ""))
-        status = f"Scanning complete: {queued} found, tagged {tagged} ({elapsed:.2f}s)."
+        status = (
+            f"Refresh complete: {tagged} tagged added, {removed_total} missing removed "
+            f"({removal_label}, {elapsed:.2f}s; queued {queued})."
+        )
         if folder_text:
             status += f" [{folder_text}]"
         self._status_label.setText(status)
-        toast = f"Tagged {tagged}/{queued} image(s)."
+        toast = f"{tagged} tagged added; {removed_total} missing removed"
+        if hard_delete:
+            toast += " (hard delete)"
         if folder_text:
             toast = f"{toast} {folder_text}"
         self._show_toast(toast)
