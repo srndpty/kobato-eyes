@@ -242,6 +242,20 @@ class DupTab(QWidget):
 
         self._update_action_states()
 
+    def _cluster_hamming_score(self, cluster: "DuplicateCluster") -> int:
+        """
+        クラスター内で keeper 以外の best_hamming の最大値を返す。
+        値が大きいほど“目視確認の必要性が高い”とみなす。
+        すべて None の場合は -1（最下位扱い）を返す。
+        """
+        vals = []
+        for e in cluster.files:
+            if e.file.file_id == cluster.keeper_id:
+                continue
+            if e.best_hamming is not None:
+                vals.append(e.best_hamming)
+        return max(vals) if vals else -1
+
     def _make_placeholder_icon(self, size: QSize) -> QIcon:
         img = QPixmap(size)
         img.fill(QColor(50, 50, 50))
@@ -324,7 +338,11 @@ class DupTab(QWidget):
         if not isinstance(payload, list):
             self._status_label.setText("Scan completed with unexpected payload")
             return
-        self._clusters = [cluster for cluster in payload if isinstance(cluster, DuplicateCluster)]
+        # ★ ここでクラスターをハミング距離の大きい順に並べ替える
+        self._clusters = [c for c in payload if isinstance(c, DuplicateCluster)]
+        # 同点は「グループサイズが大きいほう」を優先したい場合はタプルキーにする
+        self._clusters.sort(key=lambda c: (self._cluster_hamming_score(c), len(c.files)), reverse=True)
+
         if not self._clusters:
             self._status_label.setText("No duplicate groups detected.")
             self._tree.clear()
