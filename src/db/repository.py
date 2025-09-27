@@ -6,6 +6,8 @@ import sqlite3
 from collections.abc import Iterable, Mapping, Sequence
 from typing import Any
 
+from core.search_parser import TagSpec
+
 _CATEGORY_KEY_LOOKUP = {
     "0": 0,
     "general": 0,
@@ -397,6 +399,85 @@ def search_files(
     return results
 
 
+def _build_tag_exists(tag: TagSpec, *, file_alias: str) -> tuple[str, list[object]]:
+    conditions = [f"ft.file_id = {file_alias}.id"]
+    params: list[object] = []
+    category_id: int | None = None
+    if tag.category is not None:
+        lookup_key = str(tag.category).lower()
+        category_id = _CATEGORY_KEY_LOOKUP.get(lookup_key)
+        if category_id is None:
+            try:
+                category_id = int(tag.category)
+            except (TypeError, ValueError):
+                category_id = None
+    if category_id is not None:
+        conditions.append("t.category = ?")
+        params.append(category_id)
+    conditions.append("t.name = ?")
+    params.append(tag.name)
+    where_clause = " AND ".join(conditions)
+    clause = (
+        "EXISTS ("
+        "SELECT 1 FROM file_tags ft "
+        "JOIN tags t ON t.id = ft.tag_id "
+        f"WHERE {where_clause})"
+    )
+    return clause, params
+
+
+def build_tag_filters(
+    include: Sequence[TagSpec],
+    exclude: Sequence[TagSpec],
+    *,
+    file_alias: str = "f",
+) -> tuple[str, list[object]]:
+    """Return a WHERE clause enforcing ``include``/``exclude`` tag filters."""
+
+    clauses: list[str] = ["1=1"]
+    params: list[object] = []
+
+    for tag in include:
+        clause, clause_params = _build_tag_exists(tag, file_alias=file_alias)
+        clauses.append(f"AND {clause}")
+        params.extend(clause_params)
+
+    for tag in exclude:
+        clause, clause_params = _build_tag_exists(tag, file_alias=file_alias)
+        clauses.append(f"AND NOT {clause}")
+        params.extend(clause_params)
+
+    return " ".join(clauses), params
+
+
+def search_files_by_query(
+    conn: sqlite3.Connection,
+    terms: Mapping[str, Sequence[TagSpec] | Sequence[str]],
+    *,
+    order: str = "mtime",
+    order_by: str | None = None,
+    limit: int = 200,
+    offset: int = 0,
+) -> list[dict[str, object]]:
+    """Search files using a parsed tag query mapping."""
+
+    include_terms = tuple(terms.get("include", ()))
+    exclude_terms = tuple(terms.get("exclude", ()))
+
+    where_sql, params = build_tag_filters(include_terms, exclude_terms, file_alias="f")
+
+    return search_files(
+        conn,
+        where_sql,
+        params,
+        tags_for_relevance=[tag.name for tag in include_terms] or None,
+        order=order,
+        order_by=order_by,
+        limit=limit,
+        offset=offset,
+    )
+
+
 def mark_indexed_at(
     conn: sqlite3.Connection,
     file_id: int,
@@ -420,6 +501,8 @@ __all__ = [
     "upsert_signatures",
     "upsert_embedding",
     "search_files",
+    "search_files_by_query",
+    "build_tag_filters",
     "mark_indexed_at",
     "list_tag_names",
     "list_untagged_under_path",

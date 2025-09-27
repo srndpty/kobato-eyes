@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Callable, Iterable, List, Optional, Sequence
 
 from PyQt6.QtCore import (
+    QAbstractItemModel,
     QAbstractListModel,
     QEvent,
     QModelIndex,
@@ -67,6 +68,7 @@ from PyQt6.QtWidgets import (
 from core.config import load_settings
 from core.pipeline import IndexProgress, retag_all, retag_query, run_index_once, scan_and_tag
 from core.query import extract_positive_tag_terms, translate_query
+from core.search_parser import identify_token_at, strip_negative_prefix
 from core.settings import PipelineSettings
 from db.connection import get_conn
 from db.repository import _load_tag_thresholds, list_tag_names, search_files
@@ -176,6 +178,57 @@ def _pick_highlight_colors(palette) -> tuple[str, str]:
 
 
 _TAG_LIST_ROLE = Qt.ItemDataRole.UserRole + 128
+
+
+class TagQueryCompleter(QCompleter):
+    """Completer that keeps track of minus/quote prefixes for tag tokens."""
+
+    def __init__(self, model: QAbstractItemModel, parent: QWidget | None = None) -> None:
+        super().__init__(model, parent)
+        self._core_prefix = ""
+        self._is_negative = False
+        self._is_quoted = False
+        self._quote_char: str | None = None
+
+    def _update_context(self, text: str, cursor: int) -> str:
+        _start, _end, token = identify_token_at(text, cursor)
+        negative, core, quoted = strip_negative_prefix(token)
+        self._core_prefix = core
+        self._is_negative = negative
+        self._is_quoted = quoted
+        self._quote_char = None
+        if quoted:
+            body = token[1:] if token.startswith("-") else token
+            if body:
+                leader = body[0]
+                if leader in {'"', "'"}:
+                    self._quote_char = leader
+            if self._quote_char is None:
+                self._quote_char = '"'
+        return self._core_prefix
+
+    def splitPath(self, path: str) -> list[str]:  # type: ignore[override]
+        widget = self.widget()
+        cursor = len(path)
+        if widget is not None and hasattr(widget, "cursorPosition"):
+            cursor = widget.cursorPosition()  # type: ignore[call-arg]
+        prefix = self._update_context(path, cursor)
+        return [prefix]
+
+    def pathFromIndex(self, index: QModelIndex) -> str:  # type: ignore[override]
+        base = super().pathFromIndex(index)
+        return self.format_completion(base)
+
+    def format_completion(self, completion: str) -> str:
+        """Return ``completion`` with the active token prefix restored."""
+
+        text = completion
+        if self._is_quoted:
+            quote = self._quote_char or '"'
+            text = f"{quote}{text}{quote}"
+        if self._is_negative and not text.startswith("-"):
+            text = f"-{text}"
+        return text
 
 
 class _HighlightDelegate(QStyledItemDelegate):
@@ -550,7 +603,7 @@ class TagsTab(QWidget):
         self._query_edit = QLineEdit(self)
         self._query_edit.setPlaceholderText("Search tags…")
         self._tag_model = self.TagListModel(parent=self)
-        self._completer = QCompleter(self._tag_model, self)
+        self._completer = TagQueryCompleter(self._tag_model, self)
         self._completer.setCompletionMode(QCompleter.CompletionMode.PopupCompletion)
         self._completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
         self._completer.setCompletionRole(int(self._tag_model.NAME_ROLE))
@@ -892,13 +945,14 @@ class TagsTab(QWidget):
             return
         text_clean = str(completion)
         text_clean = re.sub(r"\s* \([^)]*\)\s*$", "", text_clean)  # 念のため
+        formatted = self._completer.format_completion(text_clean)
 
         base_text = self._pending_completion_text or self._query_edit.text()
         start, end = self._current_completion_range
         if start > len(base_text) or end > len(base_text):
             token, start, end = extract_completion_token(base_text, len(base_text))
 
-        new_text, cursor = replace_completion_token(base_text, start, end, text_clean)
+        new_text, cursor = replace_completion_token(base_text, start, end, formatted)
 
         def apply():
             block = self._query_edit.blockSignals(True)
@@ -1009,7 +1063,8 @@ class TagsTab(QWidget):
         cursor_position = self._query_edit.cursorPosition()
         token, start, end = extract_completion_token(text, cursor_position)
         self._current_completion_range = (start, end)
-        prefix = token.lower()
+        core_token = self._completer.set_token_context(token)
+        prefix = core_token.lower()
         if not prefix:
             self._tag_model.reset_with([])
             self._hide_completion_popup()
@@ -1024,7 +1079,7 @@ class TagsTab(QWidget):
             limited = ranked[:50]
             self._tag_model.reset_with(limited)
             # ★ ここが肝心：QCompleter にも “このトークン” を prefix として教える
-            self._completer.setCompletionPrefix(token)
+            self._completer.setCompletionPrefix(core_token)
             self._completer.complete()
         else:
             self._tag_model.reset_with([])
@@ -1051,10 +1106,10 @@ class TagsTab(QWidget):
         start, end = self._current_completion_range
         # インデックスがベース文字列からはみ出す場合の保険
         if start > len(base_text) or end > len(base_text):
-            token, start, end = replace_completion_token.extract_completion_token(base_text, len(base_text))
+            token, start, end = extract_completion_token(base_text, len(base_text))
 
-        new_text, cursor = replace_completion_token(base_text, start, end, completion_text)
-        print(f"base_text:{base_text}, new_text:{new_text}, cursor:{cursor}")
+        formatted = self._completer.format_completion(completion_text)
+        new_text, cursor = replace_completion_token(base_text, start, end, formatted)
         block = self._query_edit.blockSignals(True)
         self._query_edit.setText(new_text)
         self._query_edit.blockSignals(block)
