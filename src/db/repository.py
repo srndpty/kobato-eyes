@@ -175,6 +175,25 @@ def list_tag_names(conn: sqlite3.Connection, limit: int = 0) -> list[str]:
     return [str(row[0]) for row in cursor.fetchall()]
 
 
+def list_untagged_under_path(conn: sqlite3.Connection, root_like: str) -> list[tuple[int, str]]:
+    """Return untagged file identifiers and paths under the provided LIKE pattern."""
+
+    query = """
+        SELECT f.id, f.path
+        FROM files AS f
+        LEFT JOIN file_tags AS ft ON ft.file_id = f.id
+        WHERE f.path LIKE ?
+        GROUP BY f.id
+        HAVING COUNT(ft.tag_id) = 0
+        ORDER BY f.path ASC
+    """
+    cursor = conn.execute(query, (root_like,))
+    try:
+        return [(int(row[0]), str(row[1])) for row in cursor.fetchall()]
+    finally:
+        cursor.close()
+
+
 def upsert_tags(conn: sqlite3.Connection, tags: Sequence[Mapping[str, Any]]) -> dict[str, int]:
     """Ensure tags exist and return a mapping from tag name to identifier."""
     results: dict[str, int] = {}
@@ -402,4 +421,6 @@ __all__ = [
     "upsert_embedding",
     "search_files",
     "mark_indexed_at",
+    "list_tag_names",
+    "list_untagged_under_path",
 ]

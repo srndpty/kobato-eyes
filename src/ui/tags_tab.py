@@ -65,7 +65,7 @@ from PyQt6.QtWidgets import (
 )
 
 from core.config import load_settings
-from core.pipeline import IndexProgress, retag_all, retag_query, run_index_once
+from core.pipeline import IndexProgress, retag_all, retag_query, run_index_once, scan_and_tag
 from core.query import extract_positive_tag_terms, translate_query
 from core.settings import PipelineSettings
 from db.connection import get_conn
@@ -453,6 +453,43 @@ class IndexRunnable(QRunnable):
             self.signals.finished.emit(stats)
 
 
+class RefreshRunnable(QRunnable):
+    """Run ``scan_and_tag`` on a worker thread and forward the resulting summary."""
+
+    class Signals(QObject):
+        finished = pyqtSignal(dict)
+        error = pyqtSignal(str)
+
+    def __init__(
+        self,
+        folder: Path,
+        *,
+        recursive: bool = True,
+        batch_size: int = 8,
+    ) -> None:
+        super().__init__()
+        self._folder = Path(folder)
+        self._recursive = recursive
+        self._batch_size = batch_size
+        self.signals = self.Signals()
+
+    def run(self) -> None:  # noqa: D401
+        try:
+            stats = scan_and_tag(
+                self._folder,
+                recursive=self._recursive,
+                batch_size=self._batch_size,
+                skip_hnsw=True,
+            )
+        except Exception as exc:  # pragma: no cover - defensive logging
+            logger.exception("Manual refresh failed for %s", self._folder)
+            self.signals.error.emit(str(exc))
+            return
+        stats = dict(stats)
+        stats["folder"] = str(self._folder)
+        self.signals.finished.emit(stats)
+
+
 class TagsTab(QWidget):
     """Provide a search bar and tabular or grid results for tag queries."""
 
@@ -570,6 +607,8 @@ class TagsTab(QWidget):
         self._retag_button.setText("Retag…")
         self._retag_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
         self._retag_button.setMenu(self._retag_menu)
+        self._refresh_button = QPushButton("🔄 Refresh", self)
+        self._refresh_button.setToolTip("Scan & tag untagged in this folder")
         self._load_more_button = QPushButton("Load more", self)
         self._load_more_button.setEnabled(False)
         self._status_label = QLabel(self)
@@ -683,6 +722,7 @@ class TagsTab(QWidget):
         search_layout.addWidget(self._query_edit)
         search_layout.addWidget(self._search_button)
         search_layout.addWidget(self._retag_button)
+        search_layout.addWidget(self._refresh_button)
 
         toggle_layout = QHBoxLayout()
         toggle_layout.addWidget(self._table_button)
@@ -709,6 +749,7 @@ class TagsTab(QWidget):
         self._grid_button.toggled.connect(self._on_grid_toggled)
         self._stats_button.clicked.connect(self._open_stats)
         self._placeholder_button.clicked.connect(self._on_index_now)
+        self._refresh_button.clicked.connect(self._on_refresh_clicked)
 
         self._current_query: Optional[str] = None
         self._current_where: Optional[str] = None
@@ -733,12 +774,17 @@ class TagsTab(QWidget):
 
         self._index_pool = QThreadPool(self)
         self._index_pool.setMaxThreadCount(1)
+        self._refresh_pool = QThreadPool(self)
+        self._refresh_pool.setMaxThreadCount(1)
         self._search_busy = False
         self._indexing_active = False
         self._retag_active = False
+        self._refresh_active = False
         self._can_load_more = False
         self._progress_dialog: QProgressDialog | None = None
         self._current_index_task: IndexRunnable | None = None
+        self._current_refresh_task: RefreshRunnable | None = None
+        self._active_refresh_folder: Path | None = None
 
         self._toast_label = QLabel("", self)
         self._toast_label.setObjectName("toastLabel")
@@ -1146,6 +1192,110 @@ class TagsTab(QWidget):
             params=list(self._current_params),
             force_all=False,
         )
+
+    def _on_refresh_clicked(self) -> None:
+        if self._refresh_active or self._indexing_active:
+            return
+        folder = self._determine_refresh_folder()
+        if folder is None:
+            self._show_toast("Select a file or run a search to choose a folder.")
+            return
+        self._start_refresh_task(folder)
+
+    def _start_refresh_task(self, folder: Path) -> None:
+        self._refresh_active = True
+        self._active_refresh_folder = folder
+        task = RefreshRunnable(folder)
+        self._current_refresh_task = task
+        task.signals.finished.connect(self._handle_refresh_finished)
+        task.signals.error.connect(self._handle_refresh_failed)
+        self._status_label.setText("Scanning…")
+        self._update_control_states()
+        self._refresh_pool.start(task)
+
+    def _determine_refresh_folder(self) -> Path | None:
+        folder: Path | None = None
+        if self._stack.currentWidget() is self._table_view:
+            model = self._table_view.selectionModel()
+            if model is not None:
+                rows = model.selectedRows()
+                if rows:
+                    folder = self._folder_for_row(rows[0].row())
+        elif self._stack.currentWidget() is self._grid_view:
+            model = self._grid_view.selectionModel()
+            if model is not None:
+                indexes = model.selectedIndexes()
+                if indexes:
+                    stored_row = indexes[0].data(Qt.ItemDataRole.UserRole)
+                    row_index = int(stored_row) if stored_row is not None else indexes[0].row()
+                    folder = self._folder_for_row(row_index)
+        if folder is None and self._results_cache:
+            folder = self._folder_for_row(0)
+        return folder
+
+    def _folder_for_row(self, row: int) -> Path | None:
+        if not (0 <= row < len(self._results_cache)):
+            return None
+        raw_path = str(self._results_cache[row].get("path", ""))
+        if not raw_path:
+            return None
+        base = Path(raw_path).parent
+        try:
+            return base.resolve(strict=False)
+        except OSError:
+            return base.absolute()
+
+    def _handle_refresh_finished(self, stats: dict[str, object]) -> None:
+        task = self._current_refresh_task
+        if task is not None:
+            try:
+                task.signals.finished.disconnect(self._handle_refresh_finished)
+            except TypeError:
+                pass
+            try:
+                task.signals.error.disconnect(self._handle_refresh_failed)
+            except TypeError:
+                pass
+        self._current_refresh_task = None
+        self._refresh_active = False
+        folder = self._active_refresh_folder
+        self._active_refresh_folder = None
+        queued = int(stats.get("queued", 0) or 0)
+        tagged = int(stats.get("tagged", 0) or 0)
+        elapsed = float(stats.get("elapsed_sec", 0.0) or 0.0)
+        folder_text = str(folder) if folder is not None else str(stats.get("folder", ""))
+        status = f"Scanning complete: {queued} found, tagged {tagged} ({elapsed:.2f}s)."
+        if folder_text:
+            status += f" [{folder_text}]"
+        self._status_label.setText(status)
+        toast = f"Tagged {tagged}/{queued} image(s)."
+        if folder_text:
+            toast = f"{toast} {folder_text}"
+        self._show_toast(toast)
+        self._update_control_states()
+        if self._current_where:
+            QTimer.singleShot(0, self._on_search_clicked)
+
+    def _handle_refresh_failed(self, message: str) -> None:
+        task = self._current_refresh_task
+        if task is not None:
+            try:
+                task.signals.finished.disconnect(self._handle_refresh_finished)
+            except TypeError:
+                pass
+            try:
+                task.signals.error.disconnect(self._handle_refresh_failed)
+            except TypeError:
+                pass
+        self._current_refresh_task = None
+        self._refresh_active = False
+        folder = self._active_refresh_folder
+        self._active_refresh_folder = None
+        folder_text = f" {folder}" if folder is not None else ""
+        error_text = f"Refresh failed{folder_text}: {message}"
+        self._status_label.setText(error_text)
+        self._show_toast(error_text)
+        self._update_control_states()
 
     def _start_indexing_task(self, task: IndexRunnable) -> None:
         self._current_index_task = task
@@ -1563,6 +1713,8 @@ class TagsTab(QWidget):
         retag_enabled = not self._indexing_active and not self._search_busy
         self._retag_button.setEnabled(retag_enabled)
         self._retag_results_action.setEnabled(bool(self._current_where) and retag_enabled)
+        refresh_enabled = not self._refresh_active and not self._indexing_active and not self._search_busy
+        self._refresh_button.setEnabled(refresh_enabled)
 
     def _handle_index_started(self) -> None:
         self._indexing_active = True

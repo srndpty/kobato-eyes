@@ -39,6 +39,7 @@ from core.watcher import DirectoryWatcher
 from db.connection import bootstrap_if_needed, get_conn
 from db.repository import (
     get_file_by_path,
+    list_untagged_under_path,
     mark_indexed_at,
     replace_file_tags,
     update_fts,
@@ -53,7 +54,7 @@ from sig.phash import dhash, phash
 from tagger.base import ITagger, TagCategory
 from utils.hash import compute_sha256
 from utils.image_io import safe_load_image
-from utils.paths import ensure_dirs, get_index_dir
+from utils.paths import ensure_dirs, get_db_path, get_index_dir
 
 logger = logging.getLogger(__name__)
 
@@ -279,6 +280,179 @@ class ProcessingPipeline(QObject):
                 self._scheduled.discard(resolved)
 
         signals.finished.connect(_on_finished)
+
+
+def scan_and_tag(
+    root: Path,
+    *,
+    recursive: bool = True,
+    batch_size: int = 8,
+    skip_hnsw: bool = True,
+) -> dict[str, object]:
+    """Tag unprocessed images within ``root`` without updating embeddings or HNSW."""
+
+    start_time = time.perf_counter()
+    resolved_root = Path(root).expanduser()
+    try:
+        resolved_root = resolved_root.resolve(strict=False)
+    except OSError:
+        resolved_root = resolved_root.absolute()
+    if not resolved_root.exists():
+        logger.info("Manual tag refresh skipped; path does not exist: %s", resolved_root)
+        return {"queued": 0, "tagged": 0, "elapsed_sec": 0.0}
+
+    settings = load_settings()
+    allow_exts = {ext.lower() for ext in (settings.allow_exts or DEFAULT_EXTENSIONS)}
+    if resolved_root.is_file() and resolved_root.suffix.lower() not in allow_exts:
+        elapsed = time.perf_counter() - start_time
+        logger.info("Manual tag refresh skipped; unsupported file type: %s", resolved_root)
+        return {"queued": 0, "tagged": 0, "elapsed_sec": elapsed}
+    thresholds = _build_threshold_map(settings.tagger.thresholds)
+    max_tags_map = _build_max_tags_map(getattr(settings.tagger, "max_tags", None))
+    tagger_sig = current_tagger_sig(settings, thresholds=thresholds, max_tags=max_tags_map)
+    db_path = get_db_path()
+    bootstrap_if_needed(db_path)
+    conn = get_conn(db_path)
+    tagger: ITagger | None = None
+
+    def _like_pattern(path: Path) -> str:
+        literal = str(path)
+        if path.is_dir():
+            if literal.endswith(("/", "\\")):
+                return f"{literal}%"
+            separator = "\\" if "\\" in literal and "/" not in literal else "/"
+            return f"{literal}{separator}%"
+        return literal
+
+    def _within_scope(candidate: Path) -> bool:
+        if resolved_root.is_file():
+            return candidate == resolved_root
+        if candidate == resolved_root:
+            return False
+        try:
+            relative = candidate.relative_to(resolved_root)
+        except ValueError:
+            return False
+        if not recursive and len(relative.parts) > 1:
+            return False
+        return True
+
+    try:
+        if not skip_hnsw:
+            logger.info("scan_and_tag operates in tagging-only mode; embeddings/HNSW are skipped.")
+
+        queued_paths: list[Path] = []
+        seen: set[str] = set()
+
+        for _, stored_path in list_untagged_under_path(conn, _like_pattern(resolved_root)):
+            path_obj = Path(stored_path)
+            if not path_obj.exists():
+                continue
+            if not _within_scope(path_obj):
+                continue
+            if path_obj.suffix.lower() not in allow_exts:
+                continue
+            literal = str(path_obj)
+            if literal in seen:
+                continue
+            queued_paths.append(path_obj)
+            seen.add(literal)
+
+        if resolved_root.is_file():
+            fs_iterable: Iterable[Path] = [resolved_root]
+        else:
+            fs_iterable = iter_images([resolved_root], excluded=[], extensions=allow_exts)
+
+        for candidate in fs_iterable:
+            path_obj = Path(candidate)
+            if not _within_scope(path_obj):
+                continue
+            if path_obj.suffix.lower() not in allow_exts:
+                continue
+            literal = str(path_obj)
+            if literal in seen:
+                continue
+            row = get_file_by_path(conn, literal)
+            if row is None:
+                queued_paths.append(path_obj)
+                seen.add(literal)
+                continue
+            cursor = conn.execute(
+                "SELECT 1 FROM file_tags WHERE file_id = ? LIMIT 1",
+                (row["id"],),
+            )
+            try:
+                if cursor.fetchone() is None:
+                    queued_paths.append(path_obj)
+                    seen.add(literal)
+            finally:
+                cursor.close()
+
+        total = len(queued_paths)
+        if total == 0:
+            elapsed = time.perf_counter() - start_time
+            logger.info(
+                "Manual tag refresh: no untagged files under %s (elapsed %.2fs)",
+                resolved_root,
+                elapsed,
+            )
+            return {"queued": 0, "tagged": 0, "elapsed_sec": elapsed}
+
+        logger.info(
+            "Manual tag refresh: tagging %d file(s) under %s (recursive=%s)",
+            total,
+            resolved_root,
+            recursive,
+        )
+
+        tagger = _resolve_tagger(
+            settings,
+            None,
+            thresholds=thresholds,
+            max_tags=max_tags_map,
+        )
+        config = TagJobConfig(
+            thresholds=thresholds or None,
+            max_tags=max_tags_map or None,
+            tagger_sig=tagger_sig,
+        )
+
+        tagged = 0
+        for index, path_obj in enumerate(queued_paths, start=1):
+            logger.info(
+                "Manual tag refresh progress: %d/%d %s",
+                index,
+                total,
+                path_obj,
+            )
+            try:
+                result = run_tag_job(tagger, path_obj, conn, config=config)
+            except Exception:  # pragma: no cover - defensive logging
+                logger.exception("Tagging failed during refresh for %s", path_obj)
+                continue
+            if result is None:
+                continue
+            tagged += 1
+            if batch_size > 0 and tagged % max(batch_size, 1) == 0:
+                logger.info("Manual tag refresh tagged %d/%d file(s)", tagged, total)
+
+        elapsed = time.perf_counter() - start_time
+        logger.info(
+            "Manual tag refresh complete: tagged %d of %d file(s) in %.2fs",
+            tagged,
+            total,
+            elapsed,
+        )
+        return {"queued": total, "tagged": tagged, "elapsed_sec": elapsed}
+    finally:
+        conn.close()
+        if tagger is not None:
+            closer = getattr(tagger, "close", None)
+            if callable(closer):
+                try:
+                    closer()
+                except Exception:  # pragma: no cover - defensive logging
+                    logger.exception("Failed to close tagger after manual refresh")
 
 
 @dataclass
@@ -1142,6 +1316,7 @@ __all__ = [
     "PipelineSettings",
     "ProcessingPipeline",
     "current_tagger_sig",
+    "scan_and_tag",
     "retag_all",
     "retag_query",
     "run_index_once",

@@ -80,6 +80,9 @@ SCHEMA_STATEMENTS: tuple[str, ...] = (
     """
     CREATE INDEX IF NOT EXISTS idx_embeddings_model ON embeddings(model);
     """,
+    """
+    CREATE INDEX IF NOT EXISTS files_path_idx ON files(path);
+    """,
 )
 
 
