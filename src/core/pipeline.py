@@ -37,16 +37,7 @@ from core.settings import PipelineSettings
 from core.tag_job import TagJobConfig, run_tag_job
 from core.watcher import DirectoryWatcher
 from db.connection import bootstrap_if_needed, get_conn
-from db.repository import (
-    bulk_update_files_meta_by_id,
-    fts_delete_rows,
-    fts_replace_rows,
-    get_file_by_path,
-    list_untagged_under_path,
-    mark_indexed_at,
-    upsert_file,
-    upsert_tags,
-)
+from db.repository import fts_delete_rows, get_file_by_path, list_untagged_under_path, mark_indexed_at, upsert_file
 from dup.indexer import DuplicateIndexer, EmbedderProtocol, add_embeddings_to_hnsw, load_hnsw_index, save_hnsw_index
 from index.hnsw import HNSWIndex
 from sig.phash import dhash, phash
@@ -830,75 +821,15 @@ def run_index_once(
             idx = 0
             current_batch = batch_size
 
-            # -------- ここから “まとめ書き化” の追加 --------
-            # 一度のフラッシュでDBに書く件数（調整可：256〜1024）
-            DB_CHUNK = int(getattr(settings, "db_flush_chunk", 512))
-            # FTSに入れる上位タグ数（I/O抑制用、検索品質とトレードオフ）
-            FTS_TOPK = int(getattr(settings, "fts_topk", 128))
+            # --- DB ライター起動 ---
+            from core.db_writer import DBItem, DBStop, DBWriter
 
-            # 推論結果を貯めるバッファ: [(record, [(name,score,category), ...]), ...]
-            pending_db: list[tuple[_FileRecord, list[tuple[str, float, TagCategory]]]] = []
-            # タグ名→id のキャッシュ（ラン全体）
-            tag_cache: dict[str, int] = {}
-
-            def _flush_db_batch(
-                per_file_merged: list[tuple[_FileRecord, list[tuple[str, float, TagCategory]]]],
-            ) -> None:
-                if not per_file_merged:
-                    return
-                t0 = time.perf_counter()
-                conn.execute("BEGIN IMMEDIATE")
-
-                # (2) file_tags: 削除 → まとめて INSERT
-                file_ids = [rec.file_id for rec, _ in per_file_merged]
-                if file_ids:
-                    # パラメータ上限を避けるチャンク削除
-                    CH_DEL = 900
-                    for i in range(0, len(file_ids), CH_DEL):
-                        chunk = file_ids[i : i + CH_DEL]
-                        placeholders = ",".join(["?"] * len(chunk))
-                        conn.execute(f"DELETE FROM file_tags WHERE file_id IN ({placeholders})", chunk)
-
-                tag_rows: list[tuple[int, int, float]] = []
-                for rec, items in per_file_merged:
-                    for name, score, _cat in items:
-                        tid = tag_cache.get(name)
-                        if tid is not None:
-                            tag_rows.append((rec.file_id, int(tid), float(score)))
-                if tag_rows:
-                    conn.executemany(
-                        "INSERT INTO file_tags (file_id, tag_id, score) VALUES (?, ?, ?)",
-                        tag_rows,
-                    )
-
-                # (3) FTS: REPLACE 相当（contentless/非contentless 両対応のヘルパを想定）
-                fts_rows: list[tuple[int, str]] = []
-                for rec, items in per_file_merged:
-                    items_sorted = sorted(items, key=lambda t: t[1], reverse=True)
-                    text = " ".join([name for name, _score, _cat in items_sorted[:FTS_TOPK]])
-                    if text:
-                        fts_rows.append((rec.file_id, text))
-                if fts_rows:
-                    fts_replace_rows(conn, fts_rows)
-
-                # (4) files: width/height/tagger_sig/last_tagged_at を一括更新
-                tagged_at = time.time()
-                rows_for_files: list[tuple[int, int | None, int | None, str | None, float | None]] = []
-                for rec, _ in per_file_merged:
-                    # 既存の幅高がなければ書く。あるなら据え置きでOKなら None に。
-                    if rec.is_new or rec.changed or (rec.width is None) or (rec.height is None):
-                        w, h = rec.width or 0, rec.height or 0
-                    else:
-                        w, h = None, None
-                    rows_for_files.append((rec.file_id, w, h, tagger_sig, tagged_at))
-                if rows_for_files:
-                    bulk_update_files_meta_by_id(conn, rows_for_files, coalesce_wh=True)
-
-                conn.commit()
-                t1 = time.perf_counter()
-                logger.info("FLUSH %d files: db_ms=%.0f", len(per_file_merged), (t1 - t0) * 1000.0)
-
-            # -------- “まとめ書き化” ここまで --------
+            dbw = DBWriter(
+                db_path,
+                flush_chunk=getattr(settings, "db_flush_chunk", 1024),
+                fts_topk=getattr(settings, "fts_topk", 128),
+            )
+            dbw.start()
 
             while idx < len(tag_records):
                 if cancelled or _should_cancel():
@@ -934,9 +865,8 @@ def run_index_once(
                     idx += len(batch_slice)
                     continue
 
-                # 推論結果 → per_file_merged へ。新規タグは upsert して cache 更新。
-                new_tag_defs: list[dict[str, object]] = []
-                per_file_merged: list[tuple[_FileRecord, list[tuple[str, float, TagCategory]]]] = []
+                # 推論結果 → DBWriter に投げる形へ変換
+                per_file_items: list[DBItem] = []
 
                 for rec, result in zip(batch_valid, results):
                     merged: dict[str, tuple[float, TagCategory]] = {}
@@ -949,12 +879,10 @@ def run_index_once(
                         if (cur is None) or (score > cur[0]):
                             merged[name] = (score, pred.category)
 
-                    items = [(n, s, c) for n, (s, c) in merged.items()]
-                    per_file_merged.append((rec, items))
-
-                    for n, _s, c in items:
-                        if n not in tag_cache:
-                            new_tag_defs.append({"name": n, "category": int(c)})
+                    items = [(n, s, int(c)) for n, (s, c) in merged.items()]
+                    w = rec.width if (rec.is_new or rec.changed or rec.width is None or rec.height is None) else None
+                    h = rec.height if (rec.is_new or rec.changed or rec.width is None or rec.height is None) else None
+                    per_file_items.append(DBItem(rec.file_id, items, w, h))
 
                     # UI統計用フラグはここで反映（DBはフラッシュ時に書く）
                     previous_sig = rec.stored_tagger_sig
@@ -966,31 +894,24 @@ def run_index_once(
                     if (not rec.is_new) and (not rec.changed) and (previous_sig != tagger_sig):
                         stats["retagged"] = int(stats.get("retagged", 0)) + 1
 
-                if new_tag_defs:
-                    created = upsert_tags(conn, new_tag_defs)  # ここは小さめの upsert を頻発させてもOK
-                    tag_cache.update(created)
+                # ここで即 enqueue（DBWriter がまとめる）
+                for it in per_file_items:
+                    dbw.put(it)
 
-                # 貯める
-                pending_db.extend(per_file_merged)
-
-                # しきい値に達したら一括フラッシュ
-                if len(pending_db) >= DB_CHUNK:
-                    _flush_db_batch(pending_db)
-                    pending_db.clear()
-
-                # 進捗
-                processed_tags += len(per_file_merged)
-                fts_processed += len(per_file_merged)
+                # 進捗（推論完了ベース）
+                done_now = len(per_file_items)
+                processed_tags += done_now
+                fts_processed += done_now
                 last_logged = log_progress("Tagging", processed_tags, len(tag_records), last_logged)
                 _emit(IndexProgress(phase=IndexPhase.TAG, done=processed_tags, total=len(tag_records)))
                 _emit(IndexProgress(phase=IndexPhase.FTS, done=fts_processed, total=len(tag_records)))
 
                 idx += len(batch_slice)
 
-            # 端数をフラッシュ
-            if pending_db:
-                _flush_db_batch(pending_db)
-                pending_db.clear()
+            # DBWriter を停止・待機
+            dbw.put(DBStop())
+            dbw.join()
+            dbw.raise_if_failed()
 
             stats["tagged"] = processed_tags
             logger.info("Tagging complete: %d image(s) processed", processed_tags)
