@@ -92,7 +92,10 @@ class DuplicateScanRunnable(QRunnable):
             clusters = DuplicateScanner(config).build_clusters(files)
             self.signals.finished.emit(clusters)
         except Exception as exc:  # pragma: no cover - surfaced via UI
-            self.signals.error.emit(str(exc))
+            try:
+                self.signals.error.emit(str(exc))
+            except RuntimeError:
+                pass
 
 
 # ★ DupTab クラスの直下（__init__ より上でも下でもOK）に追加
