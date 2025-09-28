@@ -675,6 +675,13 @@ def run_index_once(
         db_literal if (db_literal.startswith("file:") or db_literal == ":memory:") else Path(db_path).expanduser()
     )
     cancelled = False
+    # ← finally で必ず扱えるよう先に初期化
+    dbw = None
+    tagger = None
+    loader_threads: list["threading.Thread"] = []
+    stop_evt = None
+    load_q = None
+    tensor_q = None
 
     try:
         logger.info("Scanning %d root(s) for eligible images", len(roots))
@@ -800,7 +807,15 @@ def run_index_once(
         _emit(IndexProgress(phase=IndexPhase.TAG, done=0, total=len(tag_records)), force=True)
         _emit(IndexProgress(phase=IndexPhase.FTS, done=0, total=len(tag_records)), force=True)
 
+        # 先頭付近で必要な import
+        import os
+        import threading
+        from queue import Empty, Queue
+
+        # … run_index_once 内 …
+
         if tag_records and not cancelled:
+            dbw = None
             try:
                 tagger = _resolve_tagger(
                     settings,
@@ -814,115 +829,228 @@ def run_index_once(
 
             stats["tagger_name"] = type(tagger).__name__ if tagger_override is not None else settings.tagger.name
             logger.info("Tagging %d image(s)", len(tag_records))
-
-            processed_tags = 0
-            fts_processed = 0
-            last_logged = 0
-            idx = 0
-            current_batch = batch_size
-
-            # --- DB ライター起動 ---
-            from core.db_writer import DBItem, DBStop, DBWriter
+            # === ここで DBWriter を起動（推論と並列でDB書き込み） ===
+            # 既に実装済みの DBWriter/DBItem を使う前提です。
+            # * 自前でDB接続を持つ実装 → db_path を渡す
+            # * 共有接続を使う実装     → conn を渡す（その場合は WAL/排他に注意）
+            from core.db_writer import DBItem, DBWriter  # ★ あなたの配置に合わせて修正
 
             dbw = DBWriter(
-                db_path,
-                flush_chunk=getattr(settings, "db_flush_chunk", 1024),
-                fts_topk=getattr(settings, "fts_topk", 128),
+                db_path=db_path,
+                flush_chunk=2048,
+                fts_topk=128,
+                queue_size=16384,
+                default_tagger_sig=tagger_sig,  # ← ここが肝。retag ループ防止
             )
             dbw.start()
 
+            # === プリフェッチ設定（段階投入 & 停止可能）===
+            current_batch = batch_size
+            prefetch_depth = 8  # 先読みを厚く
+            W = max(8, min(16, (os.cpu_count() or 8)))  # CPU余力を使う
+            tensor_q: "Queue[tuple[_FileRecord, np.ndarray, int, int]]" = Queue(
+                maxsize=prefetch_depth * current_batch * 2
+            )
+            load_q = Queue(maxsize=prefetch_depth * current_batch * 2)
+            stop_evt = threading.Event()
+
+            # ローダーワーカ
+            def _loader():
+                while True:
+                    if stop_evt.is_set():
+                        break
+                    try:
+                        rec = load_q.get(timeout=0.2)
+                    except Empty:
+                        continue
+
+                    if rec is None:
+                        load_q.task_done()
+                        break
+                    try:
+                        if not ensure_image_loaded(rec) or rec.image is None:
+                            continue
+                        # ここで“前処理”まで済ませてテンソル化（(1,H,W,3)）
+                        img = rec.image
+                        tensor = tagger.preprocess_image(img)
+                        tensor.setflags(write=False)
+                        if not stop_evt.is_set():
+                            tensor_q.put((rec, tensor, rec.width or 0, rec.height or 0))
+                        # ★ ここが重要：テンソル化後はPILを即解放して積み上がりを防ぐ
+                        rec.image = None
+                        try:
+                            if img is not None:
+                                img.close()
+                        except Exception:
+                            pass
+                        del img
+                    except Exception:
+                        # 壊れ画像などはスキップ（ログは軽めに）
+                        logger.debug("prefetch failed for %s", rec.path, exc_info=True)
+                    finally:
+                        load_q.task_done()
+
+            # ローダ起動
+            for _ in range(W):
+                th = threading.Thread(target=_loader, name="prefetcher", daemon=True)
+                th.start()
+                loader_threads.append(th)
+
+            # 段階投入：必要なぶんだけ load_q に積む
+            next_idx = 0
+
+            def _top_up():
+                nonlocal next_idx
+                if stop_evt.is_set():
+                    return
+                target = prefetch_depth * current_batch * 2
+                while (load_q.qsize() < target) and (next_idx < len(tag_records)):
+                    load_q.put(tag_records[next_idx])
+                    next_idx += 1
+
+            # ==== メインループ：キューから取り出して推論 → DBWriter ====
+            processed_tags = 0
+            fts_processed = 0
+            last_logged = 0
+            produced = 0
             start = time.perf_counter()
 
-            while idx < len(tag_records):
-                if cancelled or _should_cancel():
-                    cancelled = True
+            # バッチをどんどん組み立てて流す
+            pending = True
+            while pending:
+                batch_tensors: list[np.ndarray] = []
+                batch_records: list[_FileRecord] = []
+
+                # まず補充
+                _top_up()
+
+                # current_batch ぶん集める（適度にブロック）
+                while len(batch_tensors) < current_batch:
+                    try:
+                        rec, ten, w, h = tensor_q.get(timeout=0.2)
+                    except Empty:
+                        if stop_evt.is_set():
+                            pending = False
+                            break
+                        # 生産が止まっていて、投入済みもなく、もう供給も尽きたら終了
+                        if (next_idx >= len(tag_records)) and load_q.empty() and tensor_q.empty():
+                            pending = False
+                            break
+                        # もう少し補充して続行
+                        _top_up()
+                        continue
+                    batch_records.append(rec)
+                    batch_tensors.append(ten)
+
+                if not batch_tensors:
                     break
 
-                if idx >= 2000:
-                    print(f"time elapsed for the first 2000 images: {time.perf_counter() - start}")
-
-                current_batch = max(1, current_batch)
-                batch_slice = tag_records[idx : idx + current_batch]
-
-                images: list[Image.Image] = []
-                batch_valid: list[_FileRecord] = []
-                for rec in batch_slice:
-                    if ensure_image_loaded(rec) and rec.image is not None:
-                        images.append(rec.image)
-                        batch_valid.append(rec)
-
-                if not images:
-                    idx += len(batch_slice)
-                    continue
-
+                # 推論（すでにテンソルなので高速パス）
                 try:
-                    results = tagger.infer_batch(
-                        images,
+                    if _should_cancel():
+                        cancelled = True
+                        break
+                    results = tagger.infer_preprocessed(
+                        batch_tensors,
                         thresholds=thresholds or None,
                         max_tags=max_tags_map or None,
                     )
-                except Exception as exc:  # pragma: no cover - defensive logging
-                    if current_batch > 1:
-                        current_batch = max(1, current_batch // 2)
-                        logger.warning("Tagger batch failed (%s); reducing batch size to %d", exc, current_batch)
-                        continue
-                    logger.exception("Tagger failed for batch starting with %s", batch_valid[0].path)
-                    idx += len(batch_slice)
+                except Exception as exc:
+                    logger.exception("Tagger failed for prebatched run: %s", exc)
+                    # バッチを小さくして継続、などの処理を入れてもOK
                     continue
 
-                # 推論結果 → DBWriter に投げる形へ変換
-                per_file_items: list[DBItem] = []
+                # 結果を DBWriter へ
+                tagged_at_now = time.time()
+                done_now = 0
+                for rec, result in zip(batch_records, results):
+                    if cancelled or _should_cancel():
+                        cancelled = True
+                        break
+                    items = [(p.name, float(p.score), int(p.category)) for p in result.tags if p.name]
+                    need_wh = rec.is_new or rec.changed or rec.width is None or rec.height is None
+                    w = rec.width if need_wh else None
+                    h = rec.height if need_wh else None
+                    # キャンセル直後は enqueue しない
+                    if not cancelled:
+                        item = DBItem(rec.file_id, items, w, h, tagger_sig=tagger_sig, tagged_at=time.time())
+                        # ★ 満杯で推論を止めない：短いリトライで押し込む
+                        import queue
+                        import time as _t
 
-                for rec, result in zip(batch_valid, results):
-                    merged: dict[str, tuple[float, TagCategory]] = {}
-                    for pred in result.tags:
-                        name = pred.name.strip()
-                        if not name:
-                            continue
-                        score = float(pred.score)
-                        cur = merged.get(name)
-                        if (cur is None) or (score > cur[0]):
-                            merged[name] = (score, pred.category)
+                        for _ in range(4):  # 最大 ~20ms 程度だけ粘る
+                            try:
+                                dbw.put(item, block=False)
+                                break
+                            except queue.Full:
+                                _t.sleep(0.005)
+                        else:
+                            # どうしても満杯なら最後はブロッキングで必ず入れる（データは落とさない）
+                            dbw.put(item, block=True)
 
-                    items = [(n, s, int(c)) for n, (s, c) in merged.items()]
-                    w = rec.width if (rec.is_new or rec.changed or rec.width is None or rec.height is None) else None
-                    h = rec.height if (rec.is_new or rec.changed or rec.width is None or rec.height is None) else None
-                    per_file_items.append(DBItem(rec.file_id, items, w, h))
-
-                    # UI統計用フラグはここで反映（DBはフラッシュ時に書く）
-                    previous_sig = rec.stored_tagger_sig
+                    # UI統計のための反映だけ即時更新
+                    prev = rec.stored_tagger_sig
                     rec.needs_tagging = False
                     rec.tag_exists = True
                     rec.stored_tagger_sig = tagger_sig
                     rec.current_tagger_sig = tagger_sig
-                    rec.last_tagged_at = time.time()
-                    if (not rec.is_new) and (not rec.changed) and (previous_sig != tagger_sig):
+                    rec.last_tagged_at = tagged_at_now
+                    if (not rec.is_new) and (not rec.changed) and (prev != tagger_sig):
                         stats["retagged"] = int(stats.get("retagged", 0)) + 1
-
-                # ここで即 enqueue（DBWriter がまとめる）
-                for it in per_file_items:
-                    dbw.put(it)
-
-                # 進捗（推論完了ベース）
-                done_now = len(per_file_items)
+                    done_now += 1
+                if cancelled:
+                    break
                 processed_tags += done_now
                 fts_processed += done_now
+                produced += done_now
+
+                # 進捗＆ログ
+                if produced >= 2000:
+                    produced = 0
+                    logger.info("time elapsed for the last 2000 images: %.2fs", time.perf_counter() - start)
+                    start = time.perf_counter()
+
                 last_logged = log_progress("Tagging", processed_tags, len(tag_records), last_logged)
                 _emit(IndexProgress(phase=IndexPhase.TAG, done=processed_tags, total=len(tag_records)))
                 _emit(IndexProgress(phase=IndexPhase.FTS, done=fts_processed, total=len(tag_records)))
+                # ★ 一時配列・結果の参照を切って早めに回収させる
+                try:
+                    batch_tensors.clear()
+                except Exception:
+                    pass
+                del batch_tensors
+                del results
+                # 数千枚ごとに軽くGC（Pythonヒープの断片化対策）
+                if (processed_tags % 4096) == 0:
+                    import gc
 
-                idx += len(batch_slice)
+                    gc.collect()
+            # 片付け
+            if stop_evt is not None:
+                stop_evt.set()
 
-            # DBWriter を停止・待機
-            dbw.put(DBStop())
-            dbw.join()
-            dbw.raise_if_failed()
+            # キューをドレインしてメモリ解放を早める
+            def _drain(q):
+                try:
+                    while True:
+                        q.get_nowait()
+                except Empty:
+                    pass
 
-            stats["tagged"] = processed_tags
-            logger.info("Tagging complete: %d image(s) processed", processed_tags)
-            _emit(IndexProgress(phase=IndexPhase.TAG, done=processed_tags, total=len(tag_records)), force=True)
-            _emit(IndexProgress(phase=IndexPhase.FTS, done=fts_processed, total=len(tag_records)), force=True)
-
+            try:
+                if tensor_q is not None:
+                    _drain(tensor_q)
+                if load_q is not None:
+                    _drain(load_q)
+            except Exception:
+                pass
+            # ローダ join
+            for th in loader_threads:
+                try:
+                    th.join(timeout=2.0)
+                except Exception:
+                    pass
+            # DBWriter はここでは止めず、finally で flush=not cancelled で止める（二重 stop 防止のため）
         # ===== EMBEDDING =====（ここは従来どおりでOKだが、必要なら同様に一括 executemany 化できる）
         embed_records = [r for r in records if r.needs_embedding and not r.load_failed]
         _emit(IndexProgress(phase=IndexPhase.EMBED, done=0, total=len(embed_records)), force=True)
@@ -1058,7 +1186,36 @@ def run_index_once(
             rec.image = None
 
     finally:
-        conn.close()
+        # 1) ローダ停止・ドレイン
+        try:
+            if stop_evt is not None:
+                stop_evt.set()
+            from queue import Empty as _E
+
+            def _drain(q):
+                try:
+                    while True:
+                        q.get_nowait()
+                except _E:
+                    pass
+
+            if tensor_q is not None:
+                _drain(tensor_q)
+            if load_q is not None:
+                _drain(load_q)
+            for th in loader_threads:
+                try:
+                    th.join(timeout=2.0)
+                except Exception:
+                    pass
+        except Exception:
+            logger.exception("prefetch stop failed")
+        # 2) DBWriter 停止：キャンセル時は flush=False で早期解放
+        try:
+            if dbw is not None:
+                dbw.stop(flush=not cancelled, timeout=30.0)
+        except Exception:
+            logger.exception("dbwriter stop failed")
 
     # ===== HNSW 追記 =====
     _emit(IndexProgress(phase=IndexPhase.HNSW, done=0, total=len(hnsw_additions)), force=True)

@@ -282,6 +282,68 @@ class WD14Tagger(ITagger):
         image = np.expand_dims(image, 0)
         return image
 
+    # --- 追加: 外部からも使える前処理ラッパー（1枚 → (1,H,W,3) float32 BGR） ---
+    def preprocess_image(self, image: Image.Image) -> np.ndarray:
+        return self._preprocess(image)
+
+    # --- 追加: すでに前処理済みのテンソル群で推論する高速パス ---
+    def infer_preprocessed(
+        self,
+        tensors: Iterable[np.ndarray],
+        *,
+        thresholds: ThresholdMap | None = None,
+        max_tags: MaxTagsMap | None = None,
+    ) -> list[TagResult]:
+        batch_list = list(tensors)
+        if not batch_list:
+            return []
+        # (N,H,W,3) が来る前提。vstack して一度に推論。
+        batch = np.vstack(batch_list)
+        ort_start = perf_counter()
+        outputs = self._session.run(self._output_names, {self._input_name: batch})
+        ort_ms = (perf_counter() - ort_start) * 1000.0
+        logits = outputs[0]
+        if logits.shape[1] != len(self._labels):
+            raise RuntimeError(
+                f"Model output dimension {logits.shape[1]} does not match label count {len(self._labels)}"
+            )
+        # 以降は infer_batch と同じ後処理
+        post_start = perf_counter()
+        minv = float(np.min(logits))
+        maxv = float(np.max(logits))
+        if 0.0 <= minv <= 1.0 and 0.0 <= maxv <= 1.0:
+            probabilities = logits.astype(np.float32, copy=False)
+        else:
+            probabilities = _sigmoid(logits)
+        resolved_thresholds = self._resolve_thresholds(self._default_thresholds, thresholds)
+        resolved_limits = self._resolve_max_tags(self._default_max_tags, max_tags)
+        results: list[TagResult] = []
+        for probs in probabilities:
+            predictions: list[TagPrediction] = []
+            by_category: dict[TagCategory, list[TagPrediction]] = {}
+            for label, score in zip(self._labels, probs):
+                p = float(score)
+                thr = resolved_thresholds.get(label.category, 0.0)
+                if p < thr:
+                    continue
+                pred = TagPrediction(name=label.name, score=p, category=label.category)
+                by_category.setdefault(label.category, []).append(pred)
+            for cat, preds in by_category.items():
+                preds.sort(key=lambda it: it.score, reverse=True)
+                limit = resolved_limits.get(cat)
+                if limit is not None:
+                    preds = preds[: max(limit, 0)]
+                predictions.extend(preds)
+            predictions.sort(key=lambda it: it.score, reverse=True)
+            results.append(TagResult(tags=predictions))
+        post_ms = (perf_counter() - post_start) * 1000.0
+        batch_size = len(batch_list)
+        imgs_per_second = batch_size / ((ort_ms + post_ms) / 1000.0) if (ort_ms + post_ms) > 0 else float("inf")
+        logger.info(
+            "WD14 prebatched batch=%d ort=%.2fms post=%.2fms imgs/s=%.2f", batch_size, ort_ms, post_ms, imgs_per_second
+        )
+        return results
+
     @staticmethod
     def _resolve_thresholds(
         defaults: dict[TagCategory, float], overrides: ThresholdMap | None
@@ -438,7 +500,7 @@ def _configure_session_options(options: "ort.SessionOptions") -> None:
     """Apply default optimisation, logging, and profiling settings."""
 
     options.graph_optimization_level = getattr(ort.GraphOptimizationLevel, "ORT_ENABLE_ALL", 99)
-    options.enable_profiling = True
+    options.enable_profiling = False  # 必要に応じてTrueに
     options.log_severity_level = 2
     profile_dir = _resolve_profile_dir()
     profile_dir.mkdir(parents=True, exist_ok=True)

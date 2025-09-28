@@ -19,6 +19,8 @@ class DBItem:
     tags: List[Tuple[str, float, int]]
     width: Optional[int]
     height: Optional[int]
+    tagger_sig: Optional[str]
+    tagged_at: Optional[float]
 
 
 @dataclass(frozen=True)
@@ -40,7 +42,9 @@ class DBWriter(threading.Thread):
     - 大きめトランザクションでバルク書き
     """
 
-    def __init__(self, db_path, flush_chunk=1024, fts_topk=128, queue_size=4096):
+    def __init__(
+        self, db_path, flush_chunk=1024, fts_topk=128, queue_size=1024, *, default_tagger_sig: str | None = None
+    ):
         super().__init__(name="DBWriter", daemon=True)
         self._db_path = db_path
         self._flush_chunk = int(flush_chunk)
@@ -50,6 +54,8 @@ class DBWriter(threading.Thread):
         self._stop_evt = threading.Event()
         self._written = 0
         self._tag_cache: Dict[str, int] = {}
+        # files 更新用の既定 tagger_sig（アイテム未指定時に使用）
+        self._default_tagger_sig = default_tagger_sig
 
     def put(self, item: object, block=True, timeout=None):
         self._q.put(item, block=block, timeout=timeout)
@@ -102,6 +108,27 @@ class DBWriter(threading.Thread):
                     self._flush(conn, batch)
                     batch.clear()
 
+    def stop(self, *, flush: bool = True, timeout: float | None = 10.0) -> None:
+        """
+        キューを閉じ、残りを flush してから停止。join まで行う。
+        """
+        try:
+            if flush:
+                # 先にフラッシュ要求を入れてから停止トークン
+                self._q.put(DBFlush())
+            self._q.put(DBStop())
+        except Exception:
+            # すでに終了/破棄されている等。join だけ試す。
+            pass
+        self._stop_evt.set()
+        try:
+            self.join(timeout=timeout)
+        except RuntimeError:
+            # すでに join 済みなど
+            pass
+        # スレッド内例外をメイン側へ
+        self.raise_if_failed()
+
     def _flush(self, conn: sqlite3.Connection, items: Sequence[DBItem]):
         if not items:
             return
@@ -149,11 +176,16 @@ class DBWriter(threading.Thread):
             fts_replace_rows(conn, fts_rows)
 
         # 4) files: width/height/tagger_sig/last_tagged_at
-        #   width/height は None なら据え置き（bulk_update_files_meta_by_id が coalesce）
+        #   - width/height は None → 据え置き
+        #   - tagger_sig はアイテムに無ければ default を使う（必ず埋める）
         now = time.time()
-        rows = []
+        rows: list[tuple[int | None, int | None, str | None, float | None, int]] = []
         for it in items:
-            rows.append((it.file_id, it.width, it.height, None, now))
+            sig = getattr(it, "tagger_sig", None) or self._default_tagger_sig
+            ts = getattr(it, "tagged_at", None) or now
+            # bulk_update_files_meta_by_id の期待順序:
+            # (width, height, tagger_sig, last_tagged_at, file_id)
+            rows.append((it.width, it.height, sig, ts, it.file_id))
         bulk_update_files_meta_by_id(conn, rows, coalesce_wh=True)
 
         conn.commit()
