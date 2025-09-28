@@ -831,10 +831,15 @@ def run_index_once(
             )
             dbw.start()
 
+            start = time.perf_counter()
+
             while idx < len(tag_records):
                 if cancelled or _should_cancel():
                     cancelled = True
                     break
+
+                if idx >= 2000:
+                    print(f"time elapsed for the first 2000 images: {time.perf_counter() - start}")
 
                 current_batch = max(1, current_batch)
                 batch_slice = tag_records[idx : idx + current_batch]
