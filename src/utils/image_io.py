@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import os
 from collections import OrderedDict
 from pathlib import Path
 from threading import Lock
+from typing import Optional
 
-from PIL import Image, UnidentifiedImageError
+from PIL import Image, ImageFile, UnidentifiedImageError
+from PIL.Image import DecompressionBombError
 
 try:  # pragma: no cover - handled at runtime when PyQt6 is missing
     from PyQt6.QtCore import Qt
@@ -17,7 +20,6 @@ except ImportError:  # pragma: no cover - simplifies headless testing environmen
     Qt = None  # type: ignore[assignment]
     QPixmap = None  # type: ignore[assignment]
 
-from utils.fs import to_system_path
 from utils.paths import ensure_dirs, get_cache_dir
 
 DEFAULT_THUMBNAIL_SIZE = (320, 320)
@@ -33,17 +35,94 @@ def _thumb_cache_dir() -> Path:
     return cache_dir
 
 
-def safe_load_image(path: str | Path, mode: str | None = "RGB") -> Image.Image | None:
-    """Load an image from disk, returning a copy or ``None`` if decoding fails."""
-    source = Path(path)
+logger = logging.getLogger(__name__)
+
+# 既定の上限（Pillowデフォルトは ~1.79e8 px）
+DEFAULT_BOMB_CAP = 350_000_000  # 3.5e8 px まで許容（開いたら即縮小）
+DEFAULT_HARD_SKIP = 220_000_000  # これ超は埋め込みではスキップ
+DEFAULT_MAX_SIDE = 4096  # ここまでに縮小して返す
+
+
+def safe_load_image(
+    source: str | Path,
+    *,
+    max_side: int = DEFAULT_MAX_SIDE,
+    bomb_pixel_cap: Optional[int] = DEFAULT_BOMB_CAP,
+    hard_skip_pixels: Optional[int] = None,  # ← 追加: これ超は開かない
+    rgb: bool = True,
+    skip_on_bomb: bool = False,
+):
+    p = str(source)
+    old_cap = Image.MAX_IMAGE_PIXELS
+    if bomb_pixel_cap is not None:
+        Image.MAX_IMAGE_PIXELS = int(bomb_pixel_cap)
+
     try:
-        with Image.open(to_system_path(source)) as image:
-            image.load()
-            if mode is None:
-                return image.copy()
-            return image.convert(mode).copy()
-    except (FileNotFoundError, OSError, ValueError, UnidentifiedImageError):
+        # まずはヘッダだけでサイズを取る（ここは低コスト）
+        img = Image.open(p)  # デコード前
+        w, h = img.size
+        px = (w or 0) * (h or 0)
+
+        # 超巨大は最初からスキップ（ここが肝）
+        if hard_skip_pixels is not None and px > hard_skip_pixels:
+            logger.warning("Skip very large image (header %dx%d ~%d px): %s", w, h, px, p)
+            try:
+                img.close()
+            except Exception:
+                pass
+            return None
+
+        # JPEG 等は draft で縮小デコードを促す
+        try:
+            img.draft("RGB", (max_side, max_side))
+        except Exception:
+            pass
+
+        ImageFile.LOAD_TRUNCATED_IMAGES = True
+        try:
+            img.load()  # ここで実デコード
+        except DecompressionBombError as e:
+            logger.warning("Huge image detected (bomb): %s (%s)", p, e)
+            if skip_on_bomb:
+                try:
+                    img.close()
+                except Exception:
+                    pass
+                return None
+            # 通す場合は制限を外して開き直し
+            try:
+                img.close()
+            except Exception:
+                pass
+            Image.MAX_IMAGE_PIXELS = None
+            img = Image.open(p)
+            try:
+                img.draft("RGB", (max_side, max_side))
+            except Exception:
+                pass
+            img.load()
+        except MemoryError:
+            # ここで落ちていた。スキップに切り替え
+            logger.error("MemoryError while decoding (header %dx%d ~%d px): %s", w, h, px, p)
+            try:
+                img.close()
+            except Exception:
+                pass
+            return None
+
+        # ここまで来たら即縮小して RAM を抑える
+        if max(img.size) > max_side:
+            img.thumbnail((max_side, max_side), Image.Resampling.LANCZOS)
+
+        if rgb and img.mode != "RGB":
+            img = img.convert("RGB")
+        return img
+
+    except (UnidentifiedImageError, OSError) as e:
+        logger.warning("safe_load_image failed for %s: %s", p, e)
         return None
+    finally:
+        Image.MAX_IMAGE_PIXELS = old_cap
 
 
 def resize_image(

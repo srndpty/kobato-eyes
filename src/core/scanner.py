@@ -9,7 +9,7 @@ DEFAULT_EXTENSIONS = {
     ".jpg",
     ".jpeg",
     ".png",
-    ".gif",
+    # ".gif",
     ".bmp",
     ".webp",
     ".tiff",

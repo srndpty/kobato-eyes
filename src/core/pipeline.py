@@ -43,7 +43,6 @@ from index.hnsw import HNSWIndex
 from sig.phash import dhash, phash
 from tagger.base import ITagger, TagCategory
 from utils.hash import compute_sha256
-from utils.image_io import safe_load_image
 from utils.paths import ensure_dirs, get_db_path, get_index_dir
 
 logger = logging.getLogger(__name__)
@@ -776,10 +775,17 @@ def run_index_once(
             if rec.load_failed:
                 return False
             if rec.image is None:
-                image = safe_load_image(rec.path)
+                from utils.image_io import safe_load_image
+
+                image = safe_load_image(
+                    rec.path,
+                    max_side=4096,
+                    bomb_pixel_cap=350_000_000,
+                    hard_skip_pixels=220_000_000,  # ← これが効く
+                    skip_on_bomb=True,  # ← 爆弾判定はスキップ
+                )
                 if image is None:
                     rec.load_failed = True
-                    logger.warning("Skipping unreadable image %s", rec.path)
                     return False
                 rec.image = image
                 rec.width = image.width
@@ -800,7 +806,7 @@ def run_index_once(
         _emit(IndexProgress(phase=IndexPhase.TAG, done=0, total=len(tag_records)), force=True)
         _emit(IndexProgress(phase=IndexPhase.FTS, done=0, total=len(tag_records)), force=True)
 
-        if tag_records and not cancelled:
+        if False and tag_records and not cancelled:
             try:
                 tagger = _resolve_tagger(
                     settings,
@@ -887,7 +893,9 @@ def run_index_once(
                     items = [(n, s, int(c)) for n, (s, c) in merged.items()]
                     w = rec.width if (rec.is_new or rec.changed or rec.width is None or rec.height is None) else None
                     h = rec.height if (rec.is_new or rec.changed or rec.width is None or rec.height is None) else None
-                    per_file_items.append(DBItem(rec.file_id, items, w, h))
+                    per_file_items.append(
+                        DBItem(rec.file_id, items, w, h, tagger_sig=tagger_sig, tagged_at=time.time())
+                    )
 
                     # UI統計用フラグはここで反映（DBはフラッシュ時に書く）
                     previous_sig = rec.stored_tagger_sig
@@ -910,6 +918,33 @@ def run_index_once(
                 last_logged = log_progress("Tagging", processed_tags, len(tag_records), last_logged)
                 _emit(IndexProgress(phase=IndexPhase.TAG, done=processed_tags, total=len(tag_records)))
                 _emit(IndexProgress(phase=IndexPhase.FTS, done=fts_processed, total=len(tag_records)))
+
+                # ⭐ ここから “このバッチ分の” メモリ開放（PIL画像・結果配列）
+                for rec in batch_valid:
+                    img = rec.image
+                    rec.image = None
+                    try:
+                        if img is not None:
+                            img.close()
+                    except Exception:
+                        pass
+                    del img
+
+                # リストの参照も切る（できるだけ早く）
+                try:
+                    images.clear()
+                    per_file_items.clear()
+                except Exception:
+                    pass
+                del images
+                del per_file_items
+                del results
+
+                # 数千枚に一回だけ軽くGC（断片化対策）
+                if (processed_tags % 4096) == 0:
+                    import gc
+
+                    gc.collect()
 
                 idx += len(batch_slice)
 
@@ -980,6 +1015,9 @@ def run_index_once(
                         sig_rows: list[tuple[int, int, int]] = []
 
                         for rec, image, vector in zip(valid, images, vectors):
+                            # 使う属性は先に取り出してからクローズできるようにする  # ← 追加
+                            _w, _h = getattr(image, "width", None), getattr(image, "height", None)  # ← 追加
+
                             array = np.asarray(vector, dtype=np.float32)
                             if array.ndim != 1:
                                 array = np.reshape(array, (-1,))
@@ -992,8 +1030,8 @@ def run_index_once(
                                 array /= norm
 
                             # files の基本属性更新（念のため）
-                            up_rows_file.append(
-                                (rec.size, rec.mtime, rec.sha, str(rec.path), image.width, image.height)
+                            up_rows_file.append(  # ← 変更: image.width/height をローカルにした値で
+                                (rec.size, rec.mtime, rec.sha, str(rec.path), _w or 0, _h or 0)
                             )
                             # signatures
                             sig_rows.append((rec.file_id, int(phash(image)), int(dhash(image))))
@@ -1015,6 +1053,14 @@ def run_index_once(
                                 hnsw_additions.append((rec.file_id, array.copy()))
                             processed_embeddings += 1
 
+                            # ここで画像を即解放し、参照も切る  # ← 追加
+                            try:
+                                if image is not None:
+                                    image.close()
+                            except Exception:
+                                pass
+                            rec.image = None
+                            del array  # ベクトル一時配列も解放しやすく  # ← 追加
                         # bulk upserts
                         if up_rows_file:
                             conn.executemany(
@@ -1039,6 +1085,23 @@ def run_index_once(
                         conn.rollback()
                         raise
 
+                    # バッチ終了時にリスト参照を切って早めに回収  # ← 追加
+                    try:
+                        images.clear()
+                    except Exception:
+                        pass
+                    del images
+                    try:
+                        vectors.clear()
+                    except Exception:
+                        pass
+                    del vectors
+
+                    # 数千件ごとに軽くGCして断片化を抑える  # ← 追加
+                    if (processed_embeddings % 4096) == 0:
+                        import gc
+
+                        gc.collect()
                     last_logged = log_progress("Embedding", processed_embeddings, len(embed_records), last_logged)
                     _emit(IndexProgress(phase=IndexPhase.EMBED, done=processed_embeddings, total=len(embed_records)))
 
@@ -1059,6 +1122,11 @@ def run_index_once(
 
     finally:
         conn.close()
+        try:
+            if dbw is not None:
+                dbw.stop(flush=not cancelled, timeout=30.0)
+        except Exception:
+            logger.exception("dbwriter stop failed")
 
     # ===== HNSW 追記 =====
     _emit(IndexProgress(phase=IndexPhase.HNSW, done=0, total=len(hnsw_additions)), force=True)
@@ -1129,10 +1197,9 @@ def retag_query(
     arguments: tuple[object, ...] = tuple(params or ())
     conn = get_conn(db_path)
     try:
-        conn.execute(
-            f"UPDATE files SET tagger_sig = NULL, last_tagged_at = NULL WHERE {predicate}",
-            arguments,
-        )
+        # predicate 内で f.* を参照できるように、外側の UPDATE にもエイリアスを付ける
+        sql = "UPDATE files AS f " "SET tagger_sig = NULL, last_tagged_at = NULL " f"WHERE {predicate}"
+        conn.execute(sql, arguments)
         affected = conn.execute("SELECT changes()").fetchone()[0] or 0
         conn.commit()
         logger.info("Flagged %d file(s) for re-tagging (predicate=%s)", affected, predicate)
