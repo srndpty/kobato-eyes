@@ -1,6 +1,7 @@
 # src/core/db_writer.py
 from __future__ import annotations
 
+import os
 import queue
 import sqlite3
 import threading
@@ -43,7 +44,17 @@ class DBWriter(threading.Thread):
     """
 
     def __init__(
-        self, db_path, flush_chunk=1024, fts_topk=128, queue_size=1024, *, default_tagger_sig: str | None = None
+        self,
+        db_path,
+        flush_chunk=1024,
+        fts_topk=128,
+        queue_size=16384,  # ← メモリに余裕があれば大きめ推奨（必要なら元に戻してOK）
+        *,
+        default_tagger_sig: str | None = None,
+        wal_soft_cap_mb: int = 256,  # ← ここで上限を小さめに（状況で上げ下げ可）
+        cache_mb: int = 256,  # ← SQLite ページキャッシュ（RAM）を厚めに
+        checkpoint_every: int = 2,  # ← 2 フラッシュごとに PASSIVE
+        truncate_idle_every: int = 32,  # ← アイドル時 TRUNCATE 周期
     ):
         super().__init__(name="DBWriter", daemon=True)
         self._db_path = db_path
@@ -56,6 +67,14 @@ class DBWriter(threading.Thread):
         self._tag_cache: Dict[str, int] = {}
         # files 更新用の既定 tagger_sig（アイテム未指定時に使用）
         self._default_tagger_sig = default_tagger_sig
+        # checkpoint / pacing
+        self._flush_count = 0
+        self._checkpoint_every = int(checkpoint_every)
+        self._truncate_idle_every = int(truncate_idle_every)
+        self._wal_soft_cap_mb = int(wal_soft_cap_mb)
+        self._cache_kb = int(cache_mb) * 1024
+        self._base_flush_chunk = int(flush_chunk)
+        self._queue_capacity = queue_size
 
     def put(self, item: object, block=True, timeout=None):
         self._q.put(item, block=block, timeout=timeout)
@@ -68,9 +87,40 @@ class DBWriter(threading.Thread):
     def written(self) -> int:
         return self._written
 
+    # パイプラインが水位監視に使うための簡易API
+    def qsize_safe(self) -> int | None:
+        try:
+            return self._q.qsize()
+        except NotImplementedError:
+            return None
+
+    @property
+    def queue_capacity(self) -> int:
+        return self._queue_capacity
+
+    # 明示フラッシュ（DBFlush を投入するだけ）
+    def flush(self, force: bool = True) -> None:
+        try:
+            self._q.put(DBFlush())
+        except Exception:
+            pass
+
     def run(self):
         try:
-            conn = get_conn(self._db_path)
+            # ここで書き込み向け PRAGMA（順番バグ修正：conn 取得後に設定）
+            try:
+                conn = get_conn(self._db_path)
+                # 書き込み向け PRAGMA（ここで確実に設定）
+                conn.execute("PRAGMA journal_mode=WAL")
+                conn.execute("PRAGMA synchronous=OFF")
+                conn.execute("PRAGMA wal_autocheckpoint=0")  # -- 自前で checkpoint
+                conn.execute("PRAGMA busy_timeout=5000")
+                conn.execute("PRAGMA temp_store=MEMORY")
+                conn.execute("PRAGMA mmap_size=268435456")  # -- 256MB
+                conn.execute(f"PRAGMA cache_size={-self._cache_kb}")  # -- KB 指定（負値）
+                conn.execute("PRAGMA journal_size_limit=1073741824")  # -- 1GB cap.
+            except Exception:
+                pass
             try:
                 self._loop(conn)
             finally:
@@ -190,4 +240,73 @@ class DBWriter(threading.Thread):
 
         conn.commit()
         self._written += len(items)
-        # ログ
+        self._flush_count += 1
+        self._maybe_checkpoint(conn)
+        self._maybe_retarget_flush_chunk(conn)
+        # 任意の観測ログ（うるさければ削除）
+        try:
+            if (self._flush_count % 8) == 0:
+                qsz = self._q.qsize()
+                wal = self._wal_size_mb(conn)
+                import logging
+
+                logging.getLogger(__name__).info(
+                    "FLUSH #%d written=%d q=%d wal=%dMB chunk=%d",
+                    self._flush_count,
+                    self._written,
+                    qsz,
+                    wal,
+                    self._flush_chunk,
+                )
+        except Exception:
+            pass
+
+    def _wal_size_mb(self, conn: sqlite3.Connection) -> int:
+        # wal ファイルサイズ（存在しなければ 0）
+        wal_path = str(self._db_path) + "-wal"
+        try:
+            return int(os.path.getsize(wal_path) // (1024 * 1024))
+        except OSError:
+            return 0
+
+    def _maybe_checkpoint(self, conn: sqlite3.Connection) -> None:
+        wal_now = self._wal_size_mb(conn)
+        # 1) ソフト上限超えなら即 PASSIVE（reader が居ても進む範囲で消化）
+        if wal_now >= self._wal_soft_cap_mb:
+            try:
+                conn.execute("PRAGMA wal_checkpoint(PASSIVE)")
+            except Exception:
+                pass
+            return
+        # 2) 周期的に PASSIVE
+        if self._checkpoint_every > 0 and (self._flush_count % self._checkpoint_every) == 0:
+            try:
+                conn.execute("PRAGMA wal_checkpoint(PASSIVE)")
+            except Exception:
+                pass
+        # 3) さらに長周期でアイドルなら TRUNCATE
+        if self._truncate_idle_every > 0 and (self._flush_count % self._truncate_idle_every) == 0:
+            # キューが空＝アイドル時だけ TRUNCATE（ブロッキングを避ける）
+            if self._q.empty():
+                try:
+                    conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+                except Exception:
+                    pass
+                try:
+                    conn.execute("PRAGMA optimize")
+                except Exception:
+                    pass
+
+    def _maybe_retarget_flush_chunk(self, conn: sqlite3.Connection) -> None:
+        """WAL の膨張に応じて flush_chunk を一時的に絞る/戻す。"""
+        try:
+            wal = self._wal_size_mb(conn)
+            if wal >= self._wal_soft_cap_mb:
+                # バースト気味：半分に絞る（下限 256）
+                self._flush_chunk = max(256, self._flush_chunk // 2)
+            elif self._q.empty() and (self._flush_count % 16 == 0):
+                # 余裕がある：ゆっくり元の値へ
+                if self._flush_chunk < self._base_flush_chunk:
+                    self._flush_chunk = min(self._base_flush_chunk, self._flush_chunk * 2)
+        except Exception:
+            pass

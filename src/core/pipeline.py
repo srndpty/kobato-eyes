@@ -837,10 +837,14 @@ def run_index_once(
 
             dbw = DBWriter(
                 db_path=db_path,
-                flush_chunk=2048,
+                flush_chunk=1024,
                 fts_topk=128,
-                queue_size=16384,
+                queue_size=8192,
                 default_tagger_sig=tagger_sig,  # ← ここが肝。retag ループ防止
+                wal_soft_cap_mb=256,  # 256MB 超えたらすぐ PASSIVE
+                cache_mb=256,  # 256MB のページキャッシュ
+                checkpoint_every=2,  # 2 フラッシュごとに PASSIVE
+                truncate_idle_every=32,  # アイドル時は TRUNCATE
             )
             dbw.start()
 
@@ -853,6 +857,31 @@ def run_index_once(
             )
             load_q = Queue(maxsize=prefetch_depth * current_batch * 2)
             stop_evt = threading.Event()
+
+            # ローダスレッド管理（未定義対策）
+            loader_threads: list[threading.Thread] = []
+
+            # --- DBWriter のキュー水位で一時的にバッチを上下させる ---
+            HI, LO = 0.70, 0.30
+            BMIN, BMAX = 8, batch_size
+
+            def _maybe_adjust_batch():
+                nonlocal current_batch
+                try:
+                    q = dbw.qsize_safe()
+                except Exception:
+                    q = None
+                if q is None:
+                    return
+                cap = dbw.queue_capacity
+                if cap <= 0:
+                    return
+                # 高水位 → 次バッチを半分に（最低 8）
+                if q > cap * HI and current_batch > BMIN:
+                    current_batch = max(BMIN, current_batch // 2)
+                # 低水位が続く → 少し戻す（最大は起動時バッチ）
+                elif q < cap * LO and current_batch < BMAX:
+                    current_batch = min(BMAX, current_batch * 2)
 
             # ローダーワーカ
             def _loader():
@@ -923,6 +952,8 @@ def run_index_once(
 
                 # まず補充
                 _top_up()
+                # DBWriter の混雑具合に応じて次バッチを調整
+                _maybe_adjust_batch()
 
                 # current_batch ぶん集める（適度にブロック）
                 while len(batch_tensors) < current_batch:
@@ -974,19 +1005,24 @@ def run_index_once(
                     # キャンセル直後は enqueue しない
                     if not cancelled:
                         item = DBItem(rec.file_id, items, w, h, tagger_sig=tagger_sig, tagged_at=time.time())
-                        # ★ 満杯で推論を止めない：短いリトライで押し込む
-                        import queue
+                        # ★ 満杯で推論を止めない：短い非ブロッキング・リトライ
                         import time as _t
+                        from queue import Full
 
-                        for _ in range(4):  # 最大 ~20ms 程度だけ粘る
+                        retries = 6  # 6 * 5ms = 30ms だけ粘る
+                        while retries > 0:
                             try:
                                 dbw.put(item, block=False)
                                 break
-                            except queue.Full:
+                            except Full:
                                 _t.sleep(0.005)
+                                dbw.raise_if_failed()
+                                retries -= 1
+                                # 次の巡回で current_batch 調整がかかる
                         else:
-                            # どうしても満杯なら最後はブロッキングで必ず入れる（データは落とさない）
-                            dbw.put(item, block=True)
+                            # 最後は必ず入れるが、キャンセルは随時尊重
+                            if not cancelled and not _should_cancel():
+                                dbw.put(item, block=True)
 
                     # UI統計のための反映だけ即時更新
                     prev = rec.stored_tagger_sig
@@ -1056,6 +1092,7 @@ def run_index_once(
         _emit(IndexProgress(phase=IndexPhase.EMBED, done=0, total=len(embed_records)), force=True)
 
         if embed_records and not cancelled:
+            print("start embed_records")
             try:
                 embedder = embedder_override or _resolve_embedder(settings)
             except Exception as exc:
@@ -1181,6 +1218,8 @@ def run_index_once(
                     force=True,
                 )
 
+        print("end embed_records")
+
         # メモリ解放
         for rec in records:
             rec.image = None
@@ -1282,14 +1321,17 @@ def retag_query(
 ) -> int:
     """Mark files matching the provided WHERE clause for re-tagging."""
 
-    predicate = where_sql.strip() or "1=1"
+    predicate = (where_sql or "").strip() or "1=1"
+    # 簡易サニタイズ（念のため）
+    if ";" in predicate:
+        raise ValueError("retag predicate must not contain ';'")
+
     arguments: tuple[object, ...] = tuple(params or ())
     conn = get_conn(db_path)
     try:
-        conn.execute(
-            f"UPDATE files SET tagger_sig = NULL, last_tagged_at = NULL WHERE {predicate}",
-            arguments,
-        )
+        # predicate 内で f.* を参照できるように、外側の UPDATE にもエイリアスを付ける
+        sql = "UPDATE files AS f " "SET tagger_sig = NULL, last_tagged_at = NULL " f"WHERE {predicate}"
+        conn.execute(sql, arguments)
         affected = conn.execute("SELECT changes()").fetchone()[0] or 0
         conn.commit()
         logger.info("Flagged %d file(s) for re-tagging (predicate=%s)", affected, predicate)

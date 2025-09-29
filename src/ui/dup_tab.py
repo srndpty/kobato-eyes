@@ -34,7 +34,7 @@ from send2trash import send2trash
 from core.config import load_settings
 from db.connection import get_conn
 from db.repository import iter_files_for_dup, mark_files_absent
-from dup.scanner import DuplicateCluster, DuplicateClusterEntry, DuplicateFile, DuplicateScanConfig, DuplicateScanner
+from dup.scanner import DuplicateCluster, DuplicateClusterEntry, DuplicateFile
 from utils.image_io import generate_thumbnail, get_thumbnail  # 既存ユーティリティを再利用
 from utils.paths import get_cache_dir, get_db_path
 
@@ -72,25 +72,92 @@ class DuplicateScanRunnable(QRunnable):
             model_name = settings.model_name
             conn = get_conn(self._db_path)
             try:
-                rows = list(iter_files_for_dup(conn, self._request.path_like, model_name=model_name))
+                # Path LIKE が空欄なら、settings.roots 全部を対象にする
+                if self._request.path_like:
+                    rows = list(iter_files_for_dup(conn, self._request.path_like, model_name=model_name))
+                else:
+                    # settings.roots から LIKE パターンを作成（ディレクトリは prefix%）
+                    from pathlib import Path as _P
+
+                    likes: list[str] = []
+                    for r in settings.roots or []:
+                        if not r:
+                            continue
+                        p = _P(r).expanduser()
+                        s = str(p)
+                        # ディレクトリなら末尾セパレータ + % を付ける
+                        if p.exists() and p.is_dir():
+                            if s.endswith(("/", "\\")):
+                                likes.append(f"{s}%")
+                            else:
+                                sep = "\\" if ("\\" in s and "/" not in s) else "/"
+                                likes.append(f"{s}{sep}%")
+                        else:
+                            # ファイル or 未存在はリテラル一致
+                            likes.append(s)
+                    print(f"likes:{likes}")
+                    # どれも取れない場合は全体
+                    if not likes:
+                        rows = list(iter_files_for_dup(conn, None, model_name=model_name))
+                    else:
+                        # 複数 LIKE を順に集約（id で重複排除）
+                        rows = []
+                        seen_ids: set[int] = set()
+                        for like in likes:
+                            print(f"iter_files_for_dup for: {like}")
+                            for row in iter_files_for_dup(conn, like, model_name=model_name):
+                                fid = int(row["id"])
+                                if fid in seen_ids:
+                                    continue
+                                seen_ids.add(fid)
+                                rows.append(row)
             finally:
                 conn.close()
             total = len(rows)
             self.signals.progress.emit(0, total)
+
+            # 旧実装
+            # files: list[DuplicateFile] = []
+            # for index, row in enumerate(rows, start=1):
+            #     try:
+            #         files.append(DuplicateFile.from_row(row))
+            #     except ValueError:
+            #         continue
+            #     self.signals.progress.emit(index, total)
+            # config = DuplicateScanConfig(
+            #     hamming_threshold=self._request.hamming_threshold,
+            #     size_ratio=self._request.size_ratio,
+            #     cosine_threshold=self._request.cosine_threshold,
+            # )
+            # clusters = DuplicateScanner(config).build_clusters(files)
+            # self.signals.finished.emit(clusters)
+
             files: list[DuplicateFile] = []
             for index, row in enumerate(rows, start=1):
                 try:
-                    files.append(DuplicateFile.from_row(row))
+                    f = DuplicateFile.from_row(row)
                 except ValueError:
                     continue
+                files.append(f)
                 self.signals.progress.emit(index, total)
-            config = DuplicateScanConfig(
-                hamming_threshold=self._request.hamming_threshold,
-                size_ratio=self._request.size_ratio,
-                cosine_threshold=self._request.cosine_threshold,
-            )
-            clusters = DuplicateScanner(config).build_clusters(files)
-            self.signals.finished.emit(clusters)
+
+            # --- Cosine が有効なら「ベクトル無し」は足切り（keeper がベクトル無しで全落ちする事故の予防）---
+            if (self._request.cosine_threshold is not None) and (self._request.cosine_threshold > 0):
+
+                def _has_vec(x: "DuplicateFile") -> bool:
+                    # DuplicateFile 側の属性名の揺れに配慮
+                    return bool(
+                        getattr(x, "has_vector", False)
+                        or getattr(x, "has_embedding", False)
+                        or (getattr(x, "vector_dim", 0) or 0) > 0
+                    )
+
+                # before = len(files)
+                files = [x for x in files if _has_vec(x)]
+                if not files:
+                    self.signals.finished.emit([])  # 何も比較できない
+                    return
+
         except Exception as exc:  # pragma: no cover - surfaced via UI
             try:
                 self.signals.error.emit(str(exc))
@@ -102,7 +169,7 @@ class DuplicateScanRunnable(QRunnable):
 
 
 class _ThumbSignals(QObject):
-    done = pyqtSignal(str)  # path(str) 単位で完了通知
+    done = pyqtSignal(int, str)
 
 
 class _ThumbJob(QRunnable):
@@ -111,12 +178,13 @@ class _ThumbJob(QRunnable):
     QPixmapはGUIスレッドで作るので、ここでは使わない。
     """
 
-    def __init__(self, path: Path, size: tuple[int, int], cache_dir: Path, signals: _ThumbSignals) -> None:
+    def __init__(self, path: Path, size: tuple[int, int], cache_dir: Path, signals: _ThumbSignals, gen: int) -> None:
         super().__init__()
         self._path = path
         self._size = size
         self._cache_dir = cache_dir
         self._signals = signals
+        self._gen = gen
 
     def run(self) -> None:
         # 生成済みなら generate_thumbnail が即return。未生成なら作ってくれる。
@@ -125,7 +193,7 @@ class _ThumbJob(QRunnable):
         except Exception:
             # 作れなくてもGUI側でプレースホルダを維持するだけ
             pass
-        self._signals.done.emit(str(self._path))
+        self._signals.done.emit(self._gen, str(self._path))
 
 
 class DupTab(QWidget):
@@ -234,9 +302,20 @@ class DupTab(QWidget):
         # ★ 進行中ジョブの重複投げ防止
         self._thumb_inflight: set[str] = set()
 
-        # ★ サムネワーカー通信用シグナル
-        self._thumb_signals = _ThumbSignals()
+        self._thumb_signals = _ThumbSignals(self)
+        # 遅延安全に（別スレッド→GUI）
         self._thumb_signals.done.connect(self._on_thumb_done)
+
+        # ★ サムネ通知の世代。スキャンごと/ツリー再構成ごとにインクリメント
+        self._thumb_gen = 0
+
+        # ★ サムネワーカーの並列度（必要なら調整）
+        try:
+            import os
+
+            self._pool.setMaxThreadCount(max(2, min(8, (os.cpu_count() or 4) // 2)))
+        except Exception:
+            pass
 
         # ★ QThreadPool は既存の self._pool を使い回す（QRunnableをstartでOK）
 
@@ -244,6 +323,17 @@ class DupTab(QWidget):
         self._placeholder_icon = self._make_placeholder_icon(self._icon_size)
 
         self._update_action_states()
+
+    def _reset_thumb_state(self) -> None:
+        """ツリーを作り直す前に呼ぶ。古い通知を無効化し、未実行タスクも破棄。"""
+        self._thumb_gen += 1
+        self._thumb_bindings.clear()
+        self._thumb_inflight.clear()
+        try:
+            # 未開始の QRunnable を捨てる（実行中はそのまま完了させる）
+            self._pool.clear()
+        except Exception:
+            pass
 
     def _cluster_hamming_score(self, cluster: "DuplicateCluster") -> int:
         """
@@ -282,14 +372,24 @@ class DupTab(QWidget):
             return
         self._thumb_inflight.add(key)
         cache_dir = get_cache_dir() / "thumbs"  # image_io と同じ場所
-        job = _ThumbJob(path, (self._icon_size.width(), self._icon_size.height()), cache_dir, self._thumb_signals)
+        job = _ThumbJob(
+            path,
+            (self._icon_size.width(), self._icon_size.height()),
+            cache_dir,
+            self._thumb_signals,
+            self._thumb_gen,
+        )
         self._pool.start(job)
 
-    def _on_thumb_done(self, path_str: str) -> None:
+    def _on_thumb_done(self, gen: int, path_str: str) -> None:
         """
         ワーカー完了後にGUIスレッドで呼ばれる。ここで QPixmap を作って setIcon。
         image_io.get_thumbnail は QPixmap を返す（GUIスレッドOK）。
         """
+        # 古い世代（スキャン前の残り）なら捨てる
+        if gen != self._thumb_gen:
+            return
+
         self._thumb_inflight.discard(path_str)
         items = self._thumb_bindings.get(path_str)
         if not items:
@@ -299,8 +399,15 @@ class DupTab(QWidget):
             icon = QIcon(pix)
         except Exception:
             icon = self._placeholder_icon
-        for it in items:
-            it.setIcon(0, icon)
+        # 破棄済みアイテムに触れても落ちないように防御
+        for it in list(items):
+            try:
+                # ツリーから外れている/破棄済みの可能性がある
+                _ = it.treeWidget()  # ここで RuntimeError が出ることもある
+                it.setIcon(0, icon)
+            except RuntimeError:
+                # すでに C++ 側が破棄済み。スキップ
+                continue
 
     def _update_action_states(self) -> None:
         has_clusters = bool(self._clusters)
@@ -312,6 +419,9 @@ class DupTab(QWidget):
     def _on_scan_clicked(self) -> None:
         if self._active_scan is not None:
             return
+
+        # 先に古いサムネ要求を無効化してからツリーを空にする
+        self._reset_thumb_state()
         self._clusters.clear()
         self._tree.clear()
         self._update_action_states()
@@ -379,7 +489,10 @@ class DupTab(QWidget):
         )
 
     def _populate_tree(self) -> None:
+        # ツリーを作り直すたびに古いサムネ通知を無効化
+        self._reset_thumb_state()
         self._block_item_changed = True
+
         try:
             self._tree.clear()
             for group_index, cluster in enumerate(self._clusters, start=1):
