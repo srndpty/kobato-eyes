@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Iterable, TYPE_CHECKING
+from typing import TYPE_CHECKING, Iterable
 
 from PyQt6.QtCore import pyqtSignal
 from PyQt6.QtWidgets import (
@@ -12,12 +12,12 @@ from PyQt6.QtWidgets import (
     QComboBox,
     QDialog,
     QDialogButtonBox,
-    QFileDialog,
-    QHBoxLayout,
     QDoubleSpinBox,
+    QFileDialog,
     QFormLayout,
-    QLineEdit,
+    QHBoxLayout,
     QLabel,
+    QLineEdit,
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
@@ -86,14 +86,10 @@ class ResetDatabaseDialog(QDialog):
             )
         )
 
-        self._backup_check = QCheckBox(
-            "Backup .db / -wal / -shm before deleting (recommended)", self
-        )
+        self._backup_check = QCheckBox("Backup .db / -wal / -shm before deleting (recommended)", self)
         self._backup_check.setChecked(True)
 
-        self._purge_check = QCheckBox(
-            "Delete HNSW index file (hnsw_cosine.bin) as well", self
-        )
+        self._purge_check = QCheckBox("Delete HNSW index file (hnsw_cosine.bin) as well", self)
         self._purge_check.setChecked(True)
 
         self._rescan_check = QCheckBox("Start indexing immediately after reset", self)
@@ -287,7 +283,7 @@ class SettingsTab(QWidget):
                 pretrained=self._pretrained_edit.text().strip(),
                 device=str(self._device_combo.currentData()),
             ),
-            auto_index=self._auto_index_check.isChecked(),
+            auto_index=False,
             tagger=tagger_settings,
         )
         save_settings(settings)
@@ -350,10 +346,7 @@ class SettingsTab(QWidget):
             QMessageBox.critical(
                 self,
                 "Reset failed",
-                (
-                    "Database reset failed. Ensure no other process is accessing the database.\n"
-                    f"Details: {exc}"
-                ),
+                ("Database reset failed. Ensure no other process is accessing the database.\n" f"Details: {exc}"),
             )
             return
 

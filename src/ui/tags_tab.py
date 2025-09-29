@@ -490,7 +490,12 @@ class IndexRunnable(QRunnable):
         label = progress.phase.name.title()
         if progress.total < 0 and progress.message:
             label = progress.message
-        self.signals.progress.emit(progress.done, progress.total, label)
+
+        try:
+            self.signals.progress.emit(progress.done, progress.total, label)
+        except RuntimeError:
+            # ウィジェット/Signalsが破棄済み。静かに無視。
+            return
 
     def run(self) -> None:  # noqa: D401
         try:

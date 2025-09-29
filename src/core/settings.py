@@ -154,7 +154,7 @@ class PipelineSettings:
         allow_exts = _normalise_exts(data.get("allow_exts"), defaults.allow_exts)
 
         batch_size = _coerce_int(data.get("batch_size"), defaults.batch_size)
-        auto_index = _coerce_bool(data.get("auto_index"), defaults.auto_index)
+        # auto_index = _coerce_bool(data.get("auto_index"), defaults.auto_index)
         hamming_threshold = _coerce_int(data.get("hamming_threshold"), defaults.hamming_threshold)
         cosine_threshold = _coerce_float(data.get("cosine_threshold"), defaults.cosine_threshold)
         ssim_threshold = _coerce_float(data.get("ssim_threshold"), defaults.ssim_threshold)
@@ -197,7 +197,7 @@ class PipelineSettings:
             roots=roots,
             excluded=excluded,
             allow_exts=allow_exts,
-            auto_index=auto_index,
+            auto_index=False,
             batch_size=batch_size,
             hamming_threshold=hamming_threshold,
             cosine_threshold=cosine_threshold,

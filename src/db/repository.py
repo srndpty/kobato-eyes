@@ -4,7 +4,11 @@ from __future__ import annotations
 
 import sqlite3
 from collections.abc import Iterable, Mapping, Sequence
-from typing import Any, Dict, Iterator, Optional
+from typing import Any, Dict, Iterator, List, Optional, Tuple
+
+# ----------------------------------------
+# 定数・ユーティリティ
+# ----------------------------------------
 
 _CATEGORY_KEY_LOOKUP = {
     "0": 0,
@@ -22,9 +26,9 @@ _CATEGORY_KEY_LOOKUP = {
 }
 
 _DEFAULT_CATEGORY_THRESHOLDS = {
-    0: 0.35,
-    1: 0.25,
-    3: 0.25,
+    0: 0.35,  # general
+    1: 0.25,  # character
+    3: 0.25,  # copyright
 }
 
 
@@ -78,31 +82,166 @@ def _load_tag_thresholds(conn: sqlite3.Connection) -> dict[int, float]:
     return thresholds
 
 
-def _ensure_file_columns(conn: sqlite3.Connection) -> None:
-    """Make sure optional columns exist on the files table."""
-    rows = conn.execute("PRAGMA table_info(files)").fetchall()
-    columns = {row[1] for row in rows}
-    alterations: list[str] = []
-    if "is_present" not in columns:
-        alterations.append("ALTER TABLE files ADD COLUMN is_present INTEGER NOT NULL DEFAULT 1")
-    if "width" not in columns:
-        alterations.append("ALTER TABLE files ADD COLUMN width INTEGER")
-    if "height" not in columns:
-        alterations.append("ALTER TABLE files ADD COLUMN height INTEGER")
-    if "indexed_at" not in columns:
-        alterations.append("ALTER TABLE files ADD COLUMN indexed_at REAL")
-    if "tagger_sig" not in columns:
-        alterations.append("ALTER TABLE files ADD COLUMN tagger_sig TEXT")
-    if "last_tagged_at" not in columns:
-        alterations.append("ALTER TABLE files ADD COLUMN last_tagged_at REAL")
-    if "is_present" not in columns:
-        alterations.append("ALTER TABLE files ADD COLUMN is_present INTEGER NOT NULL DEFAULT 1")
-    if "deleted_at" not in columns:
-        alterations.append("ALTER TABLE files ADD COLUMN deleted_at TEXT")
-    for statement in alterations:
-        conn.execute(statement)
-    if alterations:
-        conn.commit()
+# db/repository.py（抜粋・追加）
+
+
+def _chunk(seq, n):
+    for i in range(0, len(seq), n):
+        yield seq[i : i + n]
+
+
+def _fts_is_contentless(conn: sqlite3.Connection) -> bool:
+    # 既存の実装を使っているはず。なければ簡易版：
+    try:
+        row = conn.execute("SELECT value FROM pragma_fts5('fts_files','content')").fetchone()
+        val = row[0] if row else None
+        return not val  # None or '' → contentless
+    except sqlite3.Error:
+        # 取得できない場合は contentless とみなさない
+        return False
+
+
+# db/repository.py に追加（既存の _chunk / _fts_is_contentless の下あたり）
+
+
+def bulk_upsert_files_meta(
+    conn: sqlite3.Connection,
+    rows: Sequence[tuple[int, object, object, str, float]],
+    *,
+    coalesce_wh: bool = True,
+    chunk: int = 400,
+) -> None:
+    """
+    files(id, width, height, tagger_sig, last_tagged_at) を一括置換。
+    - rows: (id, width_or_None, height_or_None, tagger_sig, last_tagged_at)
+    - width/height は None を渡せば既存値維持（COALESCE）
+    - 1 ステートメント n 行の multi-VALUES を複数回に分けて出す
+    - トランザクション開始/終了は呼び出し側に任せる
+    """
+    if not rows:
+        return
+    for chunk_rows in (rows[i : i + chunk] for i in range(0, len(rows), chunk)):
+        flat: list[object] = []
+        for fid, w, h, sig, ts in chunk_rows:
+            flat.extend((int(fid), w, h, sig, float(ts)))
+        values = ",".join(["(?, ?, ?, ?, ?)"] * (len(flat) // 5))
+        if coalesce_wh:
+            sql = (
+                "INSERT INTO files (id, width, height, tagger_sig, last_tagged_at) "
+                f"VALUES {values} "
+                "ON CONFLICT(id) DO UPDATE SET "
+                "  width        = COALESCE(excluded.width,  files.width), "
+                "  height       = COALESCE(excluded.height, files.height), "
+                "  tagger_sig   = excluded.tagger_sig, "
+                "  last_tagged_at = excluded.last_tagged_at"
+            )
+        else:
+            sql = (
+                "INSERT INTO files (id, width, height, tagger_sig, last_tagged_at) "
+                f"VALUES {values} "
+                "ON CONFLICT(id) DO UPDATE SET "
+                "  width        = excluded.width, "
+                "  height       = excluded.height, "
+                "  tagger_sig   = excluded.tagger_sig, "
+                "  last_tagged_at = excluded.last_tagged_at"
+            )
+        conn.execute(sql, flat)
+
+
+# db/repository.py に追加
+
+
+def bulk_update_files_meta_by_id(
+    conn: sqlite3.Connection,
+    rows: Sequence[tuple[int | None, int | None, str | None, float | None, int]],
+    *,
+    coalesce_wh: bool = True,
+) -> None:
+    """
+    files を id でまとめて UPDATE する。
+    rows: (width, height, tagger_sig, last_tagged_at, file_id) のタプル列。
+
+    coalesce_wh=True のとき:
+      width/height が None の場合は既存値を保持（COALESCE）
+    """
+    if not rows:
+        return
+
+    if coalesce_wh:
+        sql = (
+            "UPDATE files "
+            "SET width = COALESCE(?, width), "
+            "    height = COALESCE(?, height), "
+            "    tagger_sig = COALESCE(?, tagger_sig), "
+            "    last_tagged_at = COALESCE(?, last_tagged_at) "
+            "WHERE id = ?"
+        )
+    else:
+        sql = "UPDATE files " "SET width = ?, height = ?, tagger_sig = ?, last_tagged_at = ? " "WHERE id = ?"
+
+    with conn:
+        conn.executemany(sql, rows)
+
+
+def fts_delete_rows(conn: sqlite3.Connection, ids: Sequence[int]) -> None:
+    """
+    fts_files から rowid ∈ ids を削除。
+    - ここではトランザクションを開始/終了しない（呼び出し側に任せる）
+    - contentless の場合は特殊INSERT ('delete', rowid) を multi-VALUES でまとめて投げる
+    """
+    ids = [int(x) for x in ids]
+    if not ids:
+        return
+
+    if _fts_is_contentless(conn):
+        # 1 ステートメント内に複数 VALUES を詰める（プレースホルダ上限を避けて分割）
+        # SQLite の既定は 999 個までなので、少し余裕を見て ~300 件/ステートメント
+        for chunk in _chunk(ids, 300):
+            values = ",".join(["('delete', ?)"] * len(chunk))
+            sql = f"INSERT INTO fts_files(fts_files, rowid) VALUES {values}"
+            conn.execute(sql, chunk)
+    else:
+        for chunk in _chunk(ids, 900):
+            placeholders = ",".join(["?"] * len(chunk))
+            conn.execute(f"DELETE FROM fts_files WHERE rowid IN ({placeholders})", chunk)
+
+
+def fts_replace_rows(conn: sqlite3.Connection, rows: Sequence[tuple[int, str]]) -> None:
+    """
+    rowid → text を「置換」する（=古い index を消して新しい index を入れる）。
+    - トランザクションは呼び出し側に任せる
+    - contentless: 'delete' の multi-VALUES → INSERT の multi-VALUES
+    - 非 contentless: INSERT OR REPLACE の multi-VALUES 1発
+    """
+    if not rows:
+        return
+
+    if _fts_is_contentless(conn):
+        # 先に delete をまとめて
+        for chunk in _chunk(rows, 300):
+            ids = [rid for rid, _ in chunk]
+            values = ",".join(["('delete', ?)"] * len(ids))
+            conn.execute(f"INSERT INTO fts_files(fts_files, rowid) VALUES {values}", ids)
+        # 続けて insert
+        for chunk in _chunk(rows, 400):
+            flat: list[object] = []
+            for rid, text in chunk:
+                flat.extend((int(rid), str(text)))
+            values = ",".join(["(?, ?)"] * (len(flat) // 2))
+            conn.execute(f"INSERT INTO fts_files(rowid, text) VALUES {values}", flat)
+    else:
+        # 非 contentless は置換 1 回で済む
+        for chunk in _chunk(rows, 400):
+            flat: list[object] = []
+            for rid, text in chunk:
+                flat.extend((int(rid), str(text)))
+            values = ",".join(["(?, ?)"] * (len(flat) // 2))
+            conn.execute(f"INSERT OR REPLACE INTO fts_files(rowid, text) VALUES {values}", flat)
+
+
+# ----------------------------------------
+# files テーブル
+# ----------------------------------------
 
 
 def upsert_file(
@@ -120,8 +259,13 @@ def upsert_file(
     is_present: bool | int = True,
     deleted_at: object | None = None,
 ) -> int:
-    """Insert or update a file record and return its identifier."""
-    _ensure_file_columns(conn)
+    """
+    Insert or update a file record and return its identifier.
+
+    NOTE:
+      - スキーマは INTEGER PRIMARY KEY（AUTOINCREMENT なし）想定。
+      - 戻り値の id は RETURNING を使って取得。
+    """
     query = """
         INSERT INTO files (
             path,
@@ -173,6 +317,61 @@ def upsert_file(
     return int(file_id)
 
 
+def update_files_metadata_bulk(
+    conn: sqlite3.Connection,
+    rows: Iterable[
+        Tuple[
+            int,
+            Optional[int],
+            Optional[float],
+            Optional[str],
+            Optional[int],
+            Optional[int],
+            Optional[str],
+            Optional[float],
+        ]
+    ],
+) -> int:
+    """
+    files のメタデータを複数行まとめて更新する。
+    rows: Iterable of (file_id, size, mtime, sha256, width, height, tagger_sig, last_tagged_at)
+    """
+    sql = """
+        UPDATE files
+           SET size = ?,
+               mtime = ?,
+               sha256 = ?,
+               width = COALESCE(?, width),
+               height = COALESCE(?, height),
+               tagger_sig = COALESCE(?, tagger_sig),
+               last_tagged_at = COALESCE(?, last_tagged_at),
+               is_present = 1
+         WHERE id = ?
+    """
+
+    # executemany 用に順序を合わせる（? の並びに注意）
+    def _adapt(
+        it: Iterable[
+            Tuple[
+                int,
+                Optional[int],
+                Optional[float],
+                Optional[str],
+                Optional[int],
+                Optional[int],
+                Optional[str],
+                Optional[float],
+            ]
+        ],
+    ):
+        for file_id, size, mtime, sha256, width, height, tagger_sig, last_tagged_at in it:
+            yield (size, mtime, sha256, width, height, tagger_sig, last_tagged_at, file_id)
+
+    with conn:
+        cur = conn.executemany(sql, _adapt(rows))
+        return cur.rowcount
+
+
 def get_file_by_path(conn: sqlite3.Connection, path: str) -> sqlite3.Row | None:
     cursor = conn.execute("SELECT * FROM files WHERE path = ?", (path,))
     return cursor.fetchone()
@@ -180,7 +379,6 @@ def get_file_by_path(conn: sqlite3.Connection, path: str) -> sqlite3.Row | None:
 
 def list_tag_names(conn: sqlite3.Connection, limit: int = 0) -> list[str]:
     """Return tag names ordered alphabetically, optionally limited."""
-
     sql = "SELECT name FROM tags ORDER BY name ASC"
     params: tuple[object, ...] = ()
     if limit > 0:
@@ -192,7 +390,6 @@ def list_tag_names(conn: sqlite3.Connection, limit: int = 0) -> list[str]:
 
 def list_untagged_under_path(conn: sqlite3.Connection, root_like: str) -> list[tuple[int, str]]:
     """Return untagged file identifiers and paths under the provided LIKE pattern."""
-
     query = """
         SELECT f.id, f.path
         FROM files AS f
@@ -209,62 +406,23 @@ def list_untagged_under_path(conn: sqlite3.Connection, root_like: str) -> list[t
         cursor.close()
 
 
-def iter_files_for_dup(
+def mark_indexed_at(
     conn: sqlite3.Connection,
-    path_like: Optional[str],
+    file_id: int,
     *,
-    model_name: Optional[str] = None,  # 使わない場合はそのまま None でOK（将来のcosine用）
-) -> Iterator[Dict[str, Any]]:
-    """
-    Duplicatesスキャン用に、必ず **plain dict** を返す。
-    DuplicateFile.from_row() が dict.get を使っても落ちないようにする。
-
-    返すキー（DuplicateFile.from_row が期待する名前に合わせる）:
-      - file_id, path, size, width, height, phash_u64, embedding
-    embedding は重いので基本 None を返す（将来必要になったらJOIN）。
-    """
-    sql = """
-      SELECT
-        f.id         AS file_id,
-        f.path       AS path,
-        COALESCE(f.size, 0)    AS size,
-        f.width      AS width,
-        f.height     AS height,
-        s.phash_u64  AS phash_u64
-      FROM files f
-      LEFT JOIN signatures s ON s.file_id = f.id
-      WHERE f.is_present = 1
-    """
-    params: list[Any] = []
-    if path_like:
-        sql += " AND f.path LIKE ? ESCAPE '\\' "
-        params.append(path_like)
-    sql += " ORDER BY f.id"
-
-    cur = conn.execute(sql, params)
-    for r in cur:
-        # ★ sqlite3.Row → 必ず plain dict に変換（.get が使える形）
-        yield {
-            "file_id": r["file_id"],
-            "path": r["path"],
-            "size": r["size"],
-            "width": r["width"],
-            "height": r["height"],
-            "phash_u64": r["phash_u64"],
-            "embedding": None,  # 将来 embeddings JOIN するならここで埋める
-        }
-
-
-def mark_files_absent(conn: sqlite3.Connection, file_ids: Sequence[int]) -> int:
-    """Set ``is_present`` to ``0`` for the provided ``file_ids``."""
-
-    if not file_ids:
-        return 0
-    placeholders = ", ".join("?" for _ in file_ids)
-    sql = f"UPDATE files SET is_present = 0 WHERE id IN ({placeholders})"
+    indexed_at: float | None = None,
+) -> None:
+    """Update the ``indexed_at`` timestamp for the specified file."""
     with conn:
-        cursor = conn.execute(sql, tuple(int(file_id) for file_id in file_ids))
-        return cursor.rowcount
+        conn.execute(
+            "UPDATE files SET indexed_at = ? WHERE id = ?",
+            (indexed_at, file_id),
+        )
+
+
+# ----------------------------------------
+# タグ／スコア
+# ----------------------------------------
 
 
 def upsert_tags(conn: sqlite3.Connection, tags: Sequence[Mapping[str, Any]]) -> dict[str, int]:
@@ -299,15 +457,76 @@ def replace_file_tags(conn: sqlite3.Connection, file_id: int, tag_scores: Iterab
             )
 
 
-def update_fts(conn: sqlite3.Connection, file_id: int, text: str | None) -> None:
-    """Update the FTS5 index row for a given file."""
+def replace_file_tags_many(
+    conn: sqlite3.Connection,
+    mapping: Mapping[int, Iterable[tuple[int, float]]],
+) -> None:
+    """
+    複数 file_id のタグを一括置換。
+    mapping: {file_id: [(tag_id, score), ...], ...}
+    """
+    # DELETE をまとめて
+    delete_rows = [(fid,) for fid in mapping.keys()]
+    # INSERT 用にフラット化
+    insert_rows: list[tuple[int, int, float]] = []
+    for fid, pairs in mapping.items():
+        for tag_id, score in pairs:
+            insert_rows.append((fid, int(tag_id), float(score)))
+
     with conn:
-        conn.execute("DELETE FROM fts_files WHERE rowid = ?", (file_id,))
+        if delete_rows:
+            conn.executemany("DELETE FROM file_tags WHERE file_id = ?", delete_rows)
+        if insert_rows:
+            conn.executemany(
+                "INSERT INTO file_tags (file_id, tag_id, score) VALUES (?, ?, ?)",
+                insert_rows,
+            )
+
+
+# ----------------------------------------
+# FTS（contentless/detail=none 想定）
+# ----------------------------------------
+
+
+def update_fts(conn: sqlite3.Connection, file_id: int, text: str | None) -> None:
+    with conn:
+        # ここを置き換え
+        # conn.execute("DELETE FROM fts_files WHERE rowid = ?", (file_id,))
+        fts_delete_rows(conn, [file_id])
         if text:
+            # contentless でも OK：rowid とインデックス対象の列（text）を挿入
             conn.execute(
                 "INSERT INTO fts_files (rowid, file_id, text) VALUES (?, ?, ?)",
                 (file_id, file_id, text),
             )
+
+
+def update_fts_bulk(conn: sqlite3.Connection, entries: Iterable[tuple[int, Optional[str]]]) -> None:
+    """
+    FTS エントリの一括更新。
+    entries: Iterable[(file_id, text_or_None)]
+    """
+    delete_rows: list[tuple[int]] = []
+    insert_rows: list[tuple[int, str]] = []
+    for fid, text in entries:
+        delete_rows.append((fid,))
+        if text:
+            insert_rows.append((fid, text))
+
+    with conn:
+        if delete_rows:
+            # conn.executemany("DELETE FROM fts_files WHERE rowid = ?", delete_rows)
+            fts_delete_rows(conn, delete_rows)
+        if insert_rows:
+            conn.executemany(
+                "INSERT INTO fts_files (rowid, text) VALUES (?, ?)",
+                insert_rows,
+            )
+
+
+# ----------------------------------------
+# シグネチャ／埋め込み
+# ----------------------------------------
 
 
 def upsert_signatures(conn: sqlite3.Connection, *, file_id: int, phash_u64: int, dhash_u64: int) -> None:
@@ -344,6 +563,11 @@ def upsert_embedding(
         conn.execute(query, (file_id, model, int(dim), payload))
 
 
+# ----------------------------------------
+# 検索
+# ----------------------------------------
+
+
 def _resolve_relevance_thresholds(
     thresholds: Mapping[int, float] | None,
 ) -> tuple[float, float, float, float]:
@@ -377,8 +601,6 @@ def search_files(
     offset: int = 0,
 ) -> list[dict[str, object]]:
     """Search files using a prebuilt WHERE clause and return enriched rows."""
-    _ensure_file_columns(conn)
-
     limit = max(0, int(limit))
     offset = max(0, int(offset))
 
@@ -471,18 +693,59 @@ def search_files(
     return results
 
 
-def mark_indexed_at(
+# ----------------------------------------
+# Duplicate Scan 用
+# ----------------------------------------
+
+
+def iter_files_for_dup(
     conn: sqlite3.Connection,
-    file_id: int,
+    path_like: Optional[str],
     *,
-    indexed_at: float | None = None,
-) -> None:
-    """Update the ``indexed_at`` timestamp for the specified file."""
-    with conn:
-        conn.execute(
-            "UPDATE files SET indexed_at = ? WHERE id = ?",
-            (indexed_at, file_id),
-        )
+    model_name: Optional[str] = None,  # 使わない場合はそのまま None でOK（将来のcosine用）
+) -> Iterator[Dict[str, Any]]:
+    """
+    Duplicatesスキャン用に、必ず **plain dict** を返す。
+    DuplicateFile.from_row() が dict.get を使っても落ちないようにする。
+
+    返すキー（DuplicateFile.from_row が期待する名前に合わせる）:
+      - file_id, path, size, width, height, phash_u64, embedding
+    embedding は重いので基本 None を返す（将来必要になったらJOIN）。
+    """
+    sql = """
+      SELECT
+        f.id         AS file_id,
+        f.path       AS path,
+        COALESCE(f.size, 0)    AS size,
+        f.width      AS width,
+        f.height     AS height,
+        s.phash_u64  AS phash_u64
+      FROM files f
+      LEFT JOIN signatures s ON s.file_id = f.id
+      WHERE f.is_present = 1
+    """
+    params: list[Any] = []
+    if path_like:
+        sql += " AND f.path LIKE ? ESCAPE '\\' "
+        params.append(path_like)
+    sql += " ORDER BY f.id"
+
+    cur = conn.execute(sql, params)
+    for r in cur:
+        yield {
+            "file_id": r["file_id"],
+            "path": r["path"],
+            "size": r["size"],
+            "width": r["width"],
+            "height": r["height"],
+            "phash_u64": r["phash_u64"],
+            "embedding": None,
+        }
+
+
+# ----------------------------------------
+# クエリ構築ヘルパ
+# ----------------------------------------
 
 
 def build_where_and_params_for_query(
@@ -496,7 +759,7 @@ def build_where_and_params_for_query(
     - DBに保存されたタグしきい値(_load_tag_thresholds)を使う
     - core.query.translate_query を呼んで SQL 断片を得る
     """
-    from core.query import translate_query  # ここでimportして循環回避
+    from core.query import translate_query  # 循環回避のためここで import
 
     try:
         thresholds = _load_tag_thresholds(conn)  # dict[int,float] を想定
@@ -516,8 +779,105 @@ def iter_paths_for_search(conn: sqlite3.Connection, query: str) -> Iterator[str]
     sql = f"SELECT f.path FROM files f WHERE f.is_present = 1 AND ({where}) ORDER BY f.id"
     cur = conn.execute(sql, params)
     for row in cur:
-        # conn.row_factory = sqlite3.Row 前提。tupleでも動くように両対応
         yield (row["path"] if isinstance(row, sqlite3.Row) else row[0])
+
+
+# ----------------------------------------
+# バッチ書き込み（タグ付け）高速化 API（任意利用）
+# ----------------------------------------
+
+
+def write_tagging_batch(
+    conn: sqlite3.Connection,
+    items: Iterable[dict[str, Any]],
+) -> int:
+    """
+    タグ付け一括書き込み。
+    items の各要素は以下のキーを想定:
+
+      {
+        "file_id": int,                     # 必須
+        "file_meta": {                      # 任意（更新したい場合）
+            "size": int | None,
+            "mtime": float | None,
+            "sha256": str | None,
+            "width": int | None,
+            "height": int | None,
+            "tagger_sig": str | None,
+            "last_tagged_at": float | None,
+        },
+        "tags": list[(tag_id:int, score:float)],  # 置換するタグ一覧（空なら全削除）
+        "fts_text": str | None,                    # FTS に入れるテキスト
+      }
+
+    戻り値: 処理したファイル件数
+    """
+    # files 更新
+    meta_rows: List[
+        Tuple[
+            int,
+            Optional[int],
+            Optional[float],
+            Optional[str],
+            Optional[int],
+            Optional[int],
+            Optional[str],
+            Optional[float],
+        ]
+    ] = []
+    tag_map: Dict[int, List[Tuple[int, float]]] = {}
+    fts_rows: List[Tuple[int, Optional[str]]] = []
+
+    count = 0
+    for it in items:
+        fid = int(it["file_id"])
+        count += 1
+
+        meta = dict(it.get("file_meta") or {})
+        meta_rows.append(
+            (
+                fid,
+                meta.get("size"),
+                meta.get("mtime"),
+                meta.get("sha256"),
+                meta.get("width"),
+                meta.get("height"),
+                meta.get("tagger_sig"),
+                meta.get("last_tagged_at"),
+            )
+        )
+
+        tags = [(int(tid), float(sc)) for (tid, sc) in (it.get("tags") or [])]
+        tag_map[fid] = tags
+
+        fts_rows.append((fid, (it.get("fts_text") or None)))
+
+    # 1トランザクションで一気に流す
+    with conn:
+        if meta_rows:
+            update_files_metadata_bulk(conn, meta_rows)
+        if tag_map:
+            replace_file_tags_many(conn, tag_map)
+        if fts_rows:
+            update_fts_bulk(conn, fts_rows)
+
+    return count
+
+
+def mark_files_absent(conn: sqlite3.Connection, file_ids: Sequence[int]) -> int:
+    ids = [int(fid) for fid in file_ids if fid is not None]
+    if not ids:
+        return 0
+    with conn:
+        cur = conn.execute(
+            f"UPDATE files SET is_present = 0, deleted_at = CURRENT_TIMESTAMP "
+            f"WHERE id IN ({', '.join('?' for _ in ids)})",
+            ids,
+        )
+        # ここを置き換え
+        # conn.execute(f"DELETE FROM fts_files WHERE rowid IN ({placeholders})", ids)
+        fts_delete_rows(conn, ids)
+        return int(cur.rowcount or 0)
 
 
 __all__ = [
@@ -526,12 +886,22 @@ __all__ = [
     "iter_files_for_dup",
     "upsert_tags",
     "replace_file_tags",
+    "replace_file_tags_many",
     "update_fts",
+    "update_fts_bulk",
     "upsert_signatures",
     "upsert_embedding",
     "search_files",
-    "mark_files_absent",
     "mark_indexed_at",
     "list_tag_names",
     "list_untagged_under_path",
+    "build_where_and_params_for_query",
+    "iter_paths_for_search",
+    "update_files_metadata_bulk",
+    "write_tagging_batch",
+    "mark_files_absent",
+    "fts_delete_rows",
+    "fts_replace_rows",
+    "bulk_upsert_files_meta",
+    "bulk_update_files_meta_by_id",
 ]
