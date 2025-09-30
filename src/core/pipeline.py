@@ -13,6 +13,7 @@ from typing import Callable, Iterable, Iterator, Mapping, Optional, Sequence, Se
 import numpy as np
 from PIL import Image
 
+from core.db_writer import DBWriter
 from utils.env import is_headless
 
 if is_headless():
@@ -674,6 +675,7 @@ def run_index_once(
         db_literal if (db_literal.startswith("file:") or db_literal == ":memory:") else Path(db_path).expanduser()
     )
     cancelled = False
+    dbw: "DBWriter | None" = None
 
     try:
         logger.info("Scanning %d root(s) for eligible images", len(roots))
@@ -834,124 +836,141 @@ def run_index_once(
                 db_path,
                 flush_chunk=getattr(settings, "db_flush_chunk", 1024),
                 fts_topk=getattr(settings, "fts_topk", 128),
+                default_tagger_sig=tagger_sig,
             )
             dbw.start()
 
             start = time.perf_counter()
 
-            while idx < len(tag_records):
-                if cancelled or _should_cancel():
-                    cancelled = True
-                    break
+            try:
+                while idx < len(tag_records):
+                    if cancelled or _should_cancel():
+                        cancelled = True
+                        break
 
-                if idx >= 2000:
-                    print(f"time elapsed for the first 2000 images: {time.perf_counter() - start}")
+                    if idx >= 2000:
+                        print(f"time elapsed for the first 2000 images: {time.perf_counter() - start}")
 
-                current_batch = max(1, current_batch)
-                batch_slice = tag_records[idx : idx + current_batch]
+                    current_batch = max(1, current_batch)
+                    batch_slice = tag_records[idx : idx + current_batch]
 
-                images: list[Image.Image] = []
-                batch_valid: list[_FileRecord] = []
-                for rec in batch_slice:
-                    if ensure_image_loaded(rec) and rec.image is not None:
-                        images.append(rec.image)
-                        batch_valid.append(rec)
+                    images: list[Image.Image] = []
+                    batch_valid: list[_FileRecord] = []
+                    for rec in batch_slice:
+                        if ensure_image_loaded(rec) and rec.image is not None:
+                            images.append(rec.image)
+                            batch_valid.append(rec)
 
-                if not images:
-                    idx += len(batch_slice)
-                    continue
-
-                try:
-                    results = tagger.infer_batch(
-                        images,
-                        thresholds=thresholds or None,
-                        max_tags=max_tags_map or None,
-                    )
-                except Exception as exc:  # pragma: no cover - defensive logging
-                    if current_batch > 1:
-                        current_batch = max(1, current_batch // 2)
-                        logger.warning("Tagger batch failed (%s); reducing batch size to %d", exc, current_batch)
+                    if not images:
+                        idx += len(batch_slice)
                         continue
-                    logger.exception("Tagger failed for batch starting with %s", batch_valid[0].path)
-                    idx += len(batch_slice)
-                    continue
 
-                # 推論結果 → DBWriter に投げる形へ変換
-                per_file_items: list[DBItem] = []
-
-                for rec, result in zip(batch_valid, results):
-                    merged: dict[str, tuple[float, TagCategory]] = {}
-                    for pred in result.tags:
-                        name = pred.name.strip()
-                        if not name:
-                            continue
-                        score = float(pred.score)
-                        cur = merged.get(name)
-                        if (cur is None) or (score > cur[0]):
-                            merged[name] = (score, pred.category)
-
-                    items = [(n, s, int(c)) for n, (s, c) in merged.items()]
-                    w = rec.width if (rec.is_new or rec.changed or rec.width is None or rec.height is None) else None
-                    h = rec.height if (rec.is_new or rec.changed or rec.width is None or rec.height is None) else None
-                    per_file_items.append(
-                        DBItem(rec.file_id, items, w, h, tagger_sig=tagger_sig, tagged_at=time.time())
-                    )
-
-                    # UI統計用フラグはここで反映（DBはフラッシュ時に書く）
-                    previous_sig = rec.stored_tagger_sig
-                    rec.needs_tagging = False
-                    rec.tag_exists = True
-                    rec.stored_tagger_sig = tagger_sig
-                    rec.current_tagger_sig = tagger_sig
-                    rec.last_tagged_at = time.time()
-                    if (not rec.is_new) and (not rec.changed) and (previous_sig != tagger_sig):
-                        stats["retagged"] = int(stats.get("retagged", 0)) + 1
-
-                # ここで即 enqueue（DBWriter がまとめる）
-                for it in per_file_items:
-                    dbw.put(it)
-
-                # 進捗（推論完了ベース）
-                done_now = len(per_file_items)
-                processed_tags += done_now
-                fts_processed += done_now
-                last_logged = log_progress("Tagging", processed_tags, len(tag_records), last_logged)
-                _emit(IndexProgress(phase=IndexPhase.TAG, done=processed_tags, total=len(tag_records)))
-                _emit(IndexProgress(phase=IndexPhase.FTS, done=fts_processed, total=len(tag_records)))
-
-                # ⭐ ここから “このバッチ分の” メモリ開放（PIL画像・結果配列）
-                for rec in batch_valid:
-                    img = rec.image
-                    rec.image = None
                     try:
-                        if img is not None:
-                            img.close()
+                        results = tagger.infer_batch(
+                            images,
+                            thresholds=thresholds or None,
+                            max_tags=max_tags_map or None,
+                        )
+                    except Exception as exc:  # pragma: no cover - defensive logging
+                        if current_batch > 1:
+                            current_batch = max(1, current_batch // 2)
+                            logger.warning("Tagger batch failed (%s); reducing batch size to %d", exc, current_batch)
+                            continue
+                        logger.exception("Tagger failed for batch starting with %s", batch_valid[0].path)
+                        idx += len(batch_slice)
+                        continue
+
+                    # 推論結果 → DBWriter に投げる形へ変換
+                    per_file_items: list[DBItem] = []
+
+                    for rec, result in zip(batch_valid, results):
+                        merged: dict[str, tuple[float, TagCategory]] = {}
+                        for pred in result.tags:
+                            name = pred.name.strip()
+                            if not name:
+                                continue
+                            score = float(pred.score)
+                            cur = merged.get(name)
+                            if (cur is None) or (score > cur[0]):
+                                merged[name] = (score, pred.category)
+
+                        items = [(n, s, int(c)) for n, (s, c) in merged.items()]
+                        w = (
+                            rec.width
+                            if (rec.is_new or rec.changed or rec.width is None or rec.height is None)
+                            else None
+                        )
+                        h = (
+                            rec.height
+                            if (rec.is_new or rec.changed or rec.width is None or rec.height is None)
+                            else None
+                        )
+                        per_file_items.append(
+                            DBItem(rec.file_id, items, w, h, tagger_sig=tagger_sig, tagged_at=time.time())
+                        )
+
+                        # UI統計用フラグはここで反映（DBはフラッシュ時に書く）
+                        previous_sig = rec.stored_tagger_sig
+                        rec.needs_tagging = False
+                        rec.tag_exists = True
+                        rec.stored_tagger_sig = tagger_sig
+                        rec.current_tagger_sig = tagger_sig
+                        rec.last_tagged_at = time.time()
+                        if (not rec.is_new) and (not rec.changed) and (previous_sig != tagger_sig):
+                            stats["retagged"] = int(stats.get("retagged", 0)) + 1
+
+                    # ここで即 enqueue（DBWriter がまとめる）
+                    for it in per_file_items:
+                        dbw.put(it)
+
+                    # 進捗（推論完了ベース）
+                    done_now = len(per_file_items)
+                    processed_tags += done_now
+                    fts_processed += done_now
+                    last_logged = log_progress("Tagging", processed_tags, len(tag_records), last_logged)
+                    _emit(IndexProgress(phase=IndexPhase.TAG, done=processed_tags, total=len(tag_records)))
+                    _emit(IndexProgress(phase=IndexPhase.FTS, done=fts_processed, total=len(tag_records)))
+
+                    # ⭐ ここから “このバッチ分の” メモリ開放（PIL画像・結果配列）
+                    for rec in batch_valid:
+                        img = rec.image
+                        rec.image = None
+                        try:
+                            if img is not None:
+                                img.close()
+                        except Exception:
+                            pass
+                        del img
+
+                    # リストの参照も切る（できるだけ早く）
+                    try:
+                        images.clear()
+                        per_file_items.clear()
                     except Exception:
                         pass
-                    del img
+                    del images
+                    del per_file_items
+                    del results
 
-                # リストの参照も切る（できるだけ早く）
-                try:
-                    images.clear()
-                    per_file_items.clear()
-                except Exception:
-                    pass
-                del images
-                del per_file_items
-                del results
+                    # 数千枚に一回だけ軽くGC（断片化対策）
+                    if (processed_tags % 4096) == 0:
+                        import gc
 
-                # 数千枚に一回だけ軽くGC（断片化対策）
-                if (processed_tags % 4096) == 0:
-                    import gc
+                        gc.collect()
 
-                    gc.collect()
-
-                idx += len(batch_slice)
-
+                    idx += len(batch_slice)
+            finally:
+                # ここで必ず止める（タグ付けが例外で落ちても確実に解放）
+                if dbw is not None:
+                    try:
+                        dbw.stop(flush=True, timeout=30.0)
+                    finally:
+                        dbw = None
             # DBWriter を停止・待機
             dbw.put(DBStop())
             dbw.join()
-            dbw.raise_if_failed()
+            # （上の finally で止め済み。ここは呼ばない or 保険で None チェック）
+            # dbw.raise_if_failed()
 
             stats["tagged"] = processed_tags
             logger.info("Tagging complete: %d image(s) processed", processed_tags)
@@ -962,7 +981,7 @@ def run_index_once(
         embed_records = [r for r in records if r.needs_embedding and not r.load_failed]
         _emit(IndexProgress(phase=IndexPhase.EMBED, done=0, total=len(embed_records)), force=True)
 
-        if embed_records and not cancelled:
+        if False and embed_records and not cancelled:
             try:
                 embedder = embedder_override or _resolve_embedder(settings)
             except Exception as exc:
@@ -1127,6 +1146,8 @@ def run_index_once(
                 dbw.stop(flush=not cancelled, timeout=30.0)
         except Exception:
             logger.exception("dbwriter stop failed")
+        finally:
+            dbw = None
 
     # ===== HNSW 追記 =====
     _emit(IndexProgress(phase=IndexPhase.HNSW, done=0, total=len(hnsw_additions)), force=True)

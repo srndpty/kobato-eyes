@@ -170,7 +170,8 @@ def generate_thumbnail(
     if thumb_path.exists():
         return thumb_path
 
-    image = safe_load_image(source, mode)
+    image = safe_load_image(source)
+    # image = safe_load_image(source, mode)
     if image is None:
         return None
 

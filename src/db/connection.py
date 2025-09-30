@@ -36,10 +36,11 @@ def _ensure_indexes(conn: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_embeddings_model         ON embeddings(model);
         """
     )
-    try:
-        conn.execute("ANALYZE")
-    except sqlite3.DatabaseError:
-        pass
+    # 遅いので除外、別途どこかでやりたい
+    # try:
+    #     conn.execute("ANALYZE")
+    # except sqlite3.DatabaseError:
+    #     pass
 
 
 def _resolve_db_target(db_path: str | Path) -> tuple[str, bool, bool, str, Path | None]:
