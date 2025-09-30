@@ -808,7 +808,7 @@ def run_index_once(
         _emit(IndexProgress(phase=IndexPhase.TAG, done=0, total=len(tag_records)), force=True)
         _emit(IndexProgress(phase=IndexPhase.FTS, done=0, total=len(tag_records)), force=True)
 
-        if False and tag_records and not cancelled:
+        if tag_records and not cancelled:
             try:
                 tagger = _resolve_tagger(
                     settings,
@@ -840,16 +840,11 @@ def run_index_once(
             )
             dbw.start()
 
-            start = time.perf_counter()
-
             try:
                 while idx < len(tag_records):
                     if cancelled or _should_cancel():
                         cancelled = True
                         break
-
-                    if idx >= 2000:
-                        print(f"time elapsed for the first 2000 images: {time.perf_counter() - start}")
 
                     current_batch = max(1, current_batch)
                     batch_slice = tag_records[idx : idx + current_batch]

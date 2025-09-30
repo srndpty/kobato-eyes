@@ -181,6 +181,33 @@ def _pick_highlight_colors(palette) -> tuple[str, str]:
 _TAG_LIST_ROLE = Qt.ItemDataRole.UserRole + 128
 
 
+class _ElidingLabel(QLabel):
+    """幅に収まらないテキストを…で中間省略し、フルテキストはツールチップに出す。"""
+
+    def __init__(self, text: str = "", *, mode=Qt.TextElideMode.ElideMiddle, parent: QWidget | None = None):
+        super().__init__(text, parent)
+        self._full = text
+        self._mode = mode
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.setMinimumWidth(480)  # ダイアログ幅の目安（お好みで）
+        self.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+
+    def set_full_text(self, text: str) -> None:
+        self._full = text or ""
+        self.setToolTip(self._full)
+        self._apply_elide()
+
+    def resizeEvent(self, ev):  # type: ignore[override]
+        super().resizeEvent(ev)
+        self._apply_elide()
+
+    def _apply_elide(self) -> None:
+        w = max(50, self.width())
+        fm = self.fontMetrics()
+        elided = fm.elidedText(self._full, self._mode, w)
+        super().setText(elided)
+
+
 # --- ワーカーシグナル ---------------------------------------------------
 class _CopySignals(QObject):
     progress = pyqtSignal(int, int)  # current, total
@@ -878,6 +905,7 @@ class TagsTab(QWidget):
 
         self._query_edit.installEventFilter(self)
         self._suppress_return_once = False  # Enter誤発火抑止フラグ
+        self._progress_label: _ElidingLabel | None = None
 
         self._on_debug_toggled(False)
         self._show_placeholder(True)
@@ -1464,6 +1492,16 @@ class TagsTab(QWidget):
         dialog.setAutoReset(False)
         dialog.setAutoClose(False)
         dialog.canceled.connect(self._cancel_indexing)
+
+        # ★ カスタムラベル（中間省略）を組み込む
+        lbl = _ElidingLabel("Preparing…", parent=dialog)
+        lbl.set_full_text("Preparing…")
+        dialog.setLabel(lbl)
+        self._progress_label = lbl
+
+        # ★ 幅の暴れを抑えるため最低幅を決めておく
+        dialog.setMinimumWidth(560)
+
         dialog.show()
         return dialog
 
@@ -1473,7 +1511,10 @@ class TagsTab(QWidget):
         prefix = "Retagging" if self._retag_active else "Indexing"
         self._status_label.setText(f"{prefix} cancelling…")
         if self._progress_dialog is not None:
-            self._progress_dialog.setLabelText("Cancelling…")
+            if self._progress_label is not None:
+                self._progress_label.set_full_text("Cancelling…")
+            else:
+                self._progress_dialog.setLabelText("Cancelling…")
 
     def _handle_index_progress(self, done: int, total: int, label: str) -> None:
         dlg = self._progress_dialog
@@ -1483,7 +1524,10 @@ class TagsTab(QWidget):
         try:
             if total < 0:
                 dlg.setRange(0, 0)
-                dlg.setLabelText(label)
+                if self._progress_label is not None:
+                    self._progress_label.set_full_text(label)
+                else:
+                    dlg.setLabelText(label)
                 return
 
             maximum = max(total, 0)
@@ -1505,6 +1549,7 @@ class TagsTab(QWidget):
             self._progress_dialog.deleteLater()
             self._progress_dialog = None
         self._current_index_task = None
+        self._progress_label = None
 
     def _on_table_toggled(self, checked: bool) -> None:
         if checked:
