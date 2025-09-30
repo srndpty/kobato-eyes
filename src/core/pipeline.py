@@ -13,6 +13,7 @@ from typing import Callable, Iterable, Iterator, Mapping, Optional, Sequence, Se
 import numpy as np
 from PIL import Image
 
+from core.db_writer import DBWriter
 from utils.env import is_headless
 
 if is_headless():
@@ -37,23 +38,12 @@ from core.settings import PipelineSettings
 from core.tag_job import TagJobConfig, run_tag_job
 from core.watcher import DirectoryWatcher
 from db.connection import bootstrap_if_needed, get_conn
-from db.repository import (
-    get_file_by_path,
-    list_untagged_under_path,
-    mark_indexed_at,
-    replace_file_tags,
-    update_fts,
-    upsert_embedding,
-    upsert_file,
-    upsert_signatures,
-    upsert_tags,
-)
+from db.repository import fts_delete_rows, get_file_by_path, list_untagged_under_path, mark_indexed_at, upsert_file
 from dup.indexer import DuplicateIndexer, EmbedderProtocol, add_embeddings_to_hnsw, load_hnsw_index, save_hnsw_index
 from index.hnsw import HNSWIndex
 from sig.phash import dhash, phash
 from tagger.base import ITagger, TagCategory
 from utils.hash import compute_sha256
-from utils.image_io import safe_load_image
 from utils.paths import ensure_dirs, get_db_path, get_index_dir
 
 logger = logging.getLogger(__name__)
@@ -438,9 +428,7 @@ def scan_and_tag(
         soft_deleted = 0
         hard_deleted_count = 0
         if missing_ids:
-            logger.info(
-                "Manual tag refresh: marking %d missing file(s) under %s", missing_count, resolved_root
-            )
+            logger.info("Manual tag refresh: marking %d missing file(s) under %s", missing_count, resolved_root)
             if hard_delete_missing:
                 with conn:
                     for chunk in _chunked(missing_ids):
@@ -457,10 +445,12 @@ def scan_and_tag(
                             f"DELETE FROM signatures WHERE file_id IN ({placeholders})",
                             chunk,
                         )
-                        conn.execute(
-                            f"DELETE FROM fts_files WHERE rowid IN ({placeholders})",
-                            chunk,
-                        )
+                        # conn.execute(
+                        #     f"DELETE FROM fts_files WHERE rowid IN ({placeholders})",
+                        #     chunk,
+                        # )
+                        # countless対応版
+                        fts_delete_rows(conn, chunk)
                         conn.execute(
                             f"DELETE FROM files WHERE id IN ({placeholders})",
                             chunk,
@@ -471,14 +461,15 @@ def scan_and_tag(
                     for chunk in _chunked(missing_ids):
                         placeholders = ", ".join("?" for _ in chunk)
                         conn.execute(
-                            f"UPDATE files SET is_present = 0, deleted_at = CURRENT_TIMESTAMP "
-                            f"WHERE id IN ({placeholders})",
-                            chunk,
+                            f"UPDATE files SET is_present = 0, deleted_at = CURRENT_TIMESTAMP WHERE id IN ({', '.join('?' for _ in chunk)})",
+                            tuple(chunk),
                         )
-                        conn.execute(
-                            f"DELETE FROM fts_files WHERE rowid IN ({placeholders})",
-                            chunk,
-                        )
+                        # conn.execute(
+                        #     f"DELETE FROM fts_files WHERE rowid IN ({placeholders})",
+                        #     chunk,
+                        # )
+                        # countless対応
+                        fts_delete_rows(conn, chunk)
                 soft_deleted = missing_count
         stats_out["soft_deleted"] = soft_deleted
         stats_out["hard_deleted"] = hard_deleted_count
@@ -595,20 +586,13 @@ def run_index_once(
     progress_cb: Callable[[IndexProgress], None] | None = None,
     is_cancelled: Callable[[], bool] | None = None,
 ) -> dict[str, object]:
-    """Perform a full indexing pass across all configured roots.
+    """Perform a full indexing pass across all configured roots (fast batched version)."""
 
-    Returns:
-        dict[str, object]: Summary statistics about the run. The dictionary
-            always includes at least the following keys used by the UI layer:
-            ``scanned`` (int, total files visited), ``tagged`` (int, files
-            tagged during the run), ``embedded`` (int, files embedded), and
-            ``elapsed_sec`` (float, total elapsed seconds). Additional keys may
-            be provided for more granular diagnostics.
-    """
     start_time = time.perf_counter()
     settings = settings or load_settings()
     bootstrap_if_needed(db_path)
     ensure_dirs()
+
     stats: dict[str, object] = {
         "scanned": 0,
         "new_or_changed": 0,
@@ -624,117 +608,112 @@ def run_index_once(
 
     thresholds = _build_threshold_map(settings.tagger.thresholds)
     max_tags_map = _build_max_tags_map(getattr(settings.tagger, "max_tags", None))
-    tagger_sig = current_tagger_sig(
-        settings,
-        thresholds=thresholds,
-        max_tags=max_tags_map,
-    )
-    serialised_thresholds = _serialise_thresholds(thresholds)
-    serialised_max_tags = _serialise_max_tags(max_tags_map)
+    tagger_sig = current_tagger_sig(settings, thresholds=thresholds, max_tags=max_tags_map)
+    # serialised_thresholds = _serialise_thresholds(thresholds)
+    # serialised_max_tags = _serialise_max_tags(max_tags_map)
     stats["tagger_sig"] = tagger_sig
 
     last_emit: dict[IndexPhase, tuple[int, float]] = {}
-    last_messages: dict[IndexPhase, str | None] = {}
+    # last_messages: dict[IndexPhase, str | None] = {}
+    progress_sink = progress_cb
 
     def _emit(progress: IndexProgress, *, force: bool = False) -> None:
-        if progress_cb is None:
+        nonlocal progress_sink
+        if progress_sink is None:
             return
         now = time.perf_counter()
         last = last_emit.get(progress.phase)
-        should_emit = force or last is None
-        if not should_emit and last is not None:
+        should = force or last is None
+        if not should and last is not None:
             last_done, last_time = last
-            delta = progress.done - last_done
-            percent_reached = False
             if progress.total > 0:
-                threshold = max(1, progress.total // 100)
-                percent_reached = progress.done >= progress.total or delta >= threshold
-            time_elapsed = now - last_time >= 0.1
-            should_emit = percent_reached or time_elapsed
-        if should_emit:
+                step = max(1, progress.total // 100)
+                should = (progress.done >= progress.total) or ((progress.done - last_done) >= step)
+            should = should or ((now - last_time) >= 0.1)
+        if should:
             last_emit[progress.phase] = (progress.done, now)
-            last_messages[progress.phase] = progress.message
-            progress_cb(progress)
+            try:
+                progress_sink(progress)
+            except RuntimeError as e:
+                # PyQt側QObject破棄後など。以後emit無効化
+                logger.warning("Progress callback is gone: %s; stop emitting further updates.", e)
+                progress_sink = None
+            except Exception:
+                # 予期せぬ例外も“以後emitしない”で安全側に
+                logger.exception("Progress callback raised; disabling further updates.")
+                progress_sink = None
 
     def _should_cancel() -> bool:
         if is_cancelled is None:
             return False
         try:
             return bool(is_cancelled())
-        except Exception:  # pragma: no cover - defensive logging
+        except Exception:
             logger.exception("Cancellation callback failed")
             return False
 
     roots = [Path(root).expanduser() for root in settings.roots if root]
-    roots = [root for root in roots if root.exists()]
+    roots = [r for r in roots if r.exists()]
     if not roots:
         logger.info("No valid roots configured; skipping indexing run.")
         stats["elapsed_sec"] = time.perf_counter() - start_time
         return stats
 
-    excluded_paths = [Path(path).expanduser() for path in settings.excluded if path]
+    excluded_paths = [Path(p).expanduser() for p in settings.excluded if p]
     allow_exts = {ext.lower() for ext in (settings.allow_exts or DEFAULT_EXTENSIONS)}
-    batch_size = max(1, settings.batch_size)
+    batch_size = max(1, 32)
+    # batch_size = max(1, settings.batch_size)
+    # commit_every = max(1, getattr(settings, "commit_every", 512))  # 追加: バッチ書き込み閾値
 
-    # ここからスキャン開始することを UI/テストに明示するため、
-    # 必ず最初に“不確定”イベントを1回送る
-    _emit(
-        IndexProgress(
-            phase=IndexPhase.SCAN,
-            done=0,
-            total=-1,
-            message="start",
-        ),
-        force=True,
-    )
+    _emit(IndexProgress(phase=IndexPhase.SCAN, done=0, total=-1, message="start"), force=True)
 
     records: list[_FileRecord] = []
     hnsw_additions: list[tuple[int, np.ndarray]] = []
 
     db_literal = str(db_path)
-    if db_literal.startswith("file:") or db_literal == ":memory:":
-        conn = get_conn(db_literal)
-    else:
-        resolved_db = Path(db_path).expanduser()
-        resolved_db.parent.mkdir(parents=True, exist_ok=True)
-        conn = get_conn(resolved_db)
+    conn = get_conn(
+        db_literal if (db_literal.startswith("file:") or db_literal == ":memory:") else Path(db_path).expanduser()
+    )
     cancelled = False
+    dbw: "DBWriter | None" = None
 
     try:
         logger.info("Scanning %d root(s) for eligible images", len(roots))
+        # より速い「変更判定」: size/mtime が一致なら SHA を計算しない
         for image_path in iter_images(roots, excluded=excluded_paths, extensions=allow_exts):
             if cancelled or _should_cancel():
                 cancelled = True
                 break
             stats["scanned"] += 1
-            _emit(
-                IndexProgress(
-                    phase=IndexPhase.SCAN,
-                    done=stats["scanned"],
-                    total=-1,
-                    message=str(image_path),
-                )
-            )
+            _emit(IndexProgress(phase=IndexPhase.SCAN, done=stats["scanned"], total=-1, message=str(image_path)))
+
             try:
                 stat = image_path.stat()
             except OSError as exc:
                 logger.warning("Failed to stat %s: %s", image_path, exc)
                 continue
-            try:
-                sha = compute_sha256(image_path)
-            except OSError as exc:
-                logger.warning("Failed to hash %s: %s", image_path, exc)
-                continue
 
             row = get_file_by_path(conn, str(image_path))
             is_new = row is None
-            changed = True
+
+            # size/mtime が一致していれば changed=False とみなして SHA 計算スキップ
             if row is not None:
-                changed = (
-                    row["sha256"] != sha
-                    or float(row["mtime"] or 0.0) != stat.st_mtime
-                    or int(row["size"] or 0) != stat.st_size
-                )
+                size_changed = int(row["size"] or 0) != stat.st_size
+                mtime_changed = float(row["mtime"] or 0.0) != stat.st_mtime
+            else:
+                size_changed = True
+                mtime_changed = True
+
+            if is_new or size_changed or mtime_changed:
+                try:
+                    sha = compute_sha256(image_path)
+                except OSError as exc:
+                    logger.warning("Failed to hash %s: %s", image_path, exc)
+                    continue
+                changed = True if is_new else (str(row["sha256"] or "") != sha)  # type: ignore[index]
+            else:
+                sha = str(row["sha256"] or "")  # type: ignore[index]
+                changed = False
 
             indexed_at = None if changed else (row["indexed_at"] if row else None)
             file_id = upsert_file(
@@ -746,12 +725,9 @@ def run_index_once(
                 indexed_at=indexed_at,
             )
 
+            # 既存フラグの取得は軽量クエリで
             tag_exists = (
-                conn.execute(
-                    "SELECT 1 FROM file_tags WHERE file_id = ? LIMIT 1",
-                    (file_id,),
-                ).fetchone()
-                is not None
+                conn.execute("SELECT 1 FROM file_tags WHERE file_id = ? LIMIT 1", (file_id,)).fetchone() is not None
             )
             embed_exists = (
                 conn.execute(
@@ -761,62 +737,61 @@ def run_index_once(
                 is not None
             )
 
-            stored_sig = row["tagger_sig"] if row is not None else None
-            stored_sig = str(stored_sig) if stored_sig is not None else None
+            stored_sig = str(row["tagger_sig"]) if (row is not None and row["tagger_sig"] is not None) else None
             stored_tagged_at = row["last_tagged_at"] if row is not None else None
             last_tagged_at = float(stored_tagged_at) if stored_tagged_at is not None else None
-            needs_tagging = is_new or changed or not tag_exists or stored_sig != tagger_sig
+            needs_tagging = is_new or changed or (not tag_exists) or (stored_sig != tagger_sig)
 
-            record = _FileRecord(
-                file_id=file_id,
-                path=image_path,
-                size=stat.st_size,
-                mtime=stat.st_mtime,
-                sha=sha,
-                is_new=is_new,
-                changed=changed,
-                tag_exists=tag_exists,
-                embed_exists=embed_exists,
-                needs_tagging=needs_tagging,
-                needs_embedding=is_new or changed or not embed_exists,
-                stored_tagger_sig=stored_sig,
-                current_tagger_sig=tagger_sig,
-                last_tagged_at=last_tagged_at,
+            records.append(
+                _FileRecord(
+                    file_id=file_id,
+                    path=image_path,
+                    size=stat.st_size,
+                    mtime=stat.st_mtime,
+                    sha=sha,
+                    is_new=is_new,
+                    changed=changed,
+                    tag_exists=tag_exists,
+                    embed_exists=embed_exists,
+                    needs_tagging=needs_tagging,
+                    needs_embedding=is_new or changed or not embed_exists,
+                    stored_tagger_sig=stored_sig,
+                    current_tagger_sig=tagger_sig,
+                    last_tagged_at=last_tagged_at,
+                )
             )
-            records.append(record)
+
             if _should_cancel():
                 cancelled = True
                 break
+
         conn.commit()
 
-        stats["new_or_changed"] = sum(1 for record in records if record.is_new or record.changed)
-        logger.info(
-            "Scan complete: %d file(s) seen, %d new or changed",
-            stats["scanned"],
-            stats["new_or_changed"],
-        )
+        stats["new_or_changed"] = sum(1 for r in records if r.is_new or r.changed)
+        logger.info("Scan complete: %d file(s) seen, %d new or changed", stats["scanned"], stats["new_or_changed"])
         if not cancelled:
-            _emit(
-                IndexProgress(
-                    phase=IndexPhase.SCAN,
-                    done=stats["scanned"],
-                    total=stats["scanned"],
-                ),
-                force=True,
-            )
+            _emit(IndexProgress(phase=IndexPhase.SCAN, done=stats["scanned"], total=stats["scanned"]), force=True)
 
-        def ensure_image_loaded(record: _FileRecord) -> bool:
-            if record.load_failed:
+        # --- 画像ロードヘルパ ---
+        def ensure_image_loaded(rec: _FileRecord) -> bool:
+            if rec.load_failed:
                 return False
-            if record.image is None:
-                image = safe_load_image(record.path)
+            if rec.image is None:
+                from utils.image_io import safe_load_image
+
+                image = safe_load_image(
+                    rec.path,
+                    max_side=4096,
+                    bomb_pixel_cap=350_000_000,
+                    hard_skip_pixels=220_000_000,  # ← これが効く
+                    skip_on_bomb=True,  # ← 爆弾判定はスキップ
+                )
                 if image is None:
-                    record.load_failed = True
-                    logger.warning("Skipping unreadable image %s", record.path)
+                    rec.load_failed = True
                     return False
-                record.image = image
-                record.width = image.width
-                record.height = image.height
+                rec.image = image
+                rec.width = image.width
+                rec.height = image.height
             return True
 
         def log_progress(stage: str, processed: int, total: int, last_value: int) -> int:
@@ -828,17 +803,10 @@ def run_index_once(
                 return processed
             return last_value
 
-        tag_records = [record for record in records if record.needs_tagging]
-
-        # ▼ 追加: 件数0でも必ず「TAG開始」を通知
-        _emit(
-            IndexProgress(phase=IndexPhase.TAG, done=0, total=len(tag_records)),
-            force=True,
-        )
-        _emit(
-            IndexProgress(phase=IndexPhase.FTS, done=0, total=len(tag_records)),
-            force=True,
-        )
+        # ===== TAGGING =====
+        tag_records = [r for r in records if r.needs_tagging and not r.load_failed]
+        _emit(IndexProgress(phase=IndexPhase.TAG, done=0, total=len(tag_records)), force=True)
+        _emit(IndexProgress(phase=IndexPhase.FTS, done=0, total=len(tag_records)), force=True)
 
         if tag_records and not cancelled:
             try:
@@ -848,166 +816,170 @@ def run_index_once(
                     thresholds=thresholds or None,
                     max_tags=max_tags_map or None,
                 )
-            except Exception as exc:  # pragma: no cover - defensive logging
+            except Exception as exc:
                 logger.warning("Failed to instantiate tagger: %s", exc)
                 raise
+
             stats["tagger_name"] = type(tagger).__name__ if tagger_override is not None else settings.tagger.name
             logger.info("Tagging %d image(s)", len(tag_records))
+
             processed_tags = 0
             fts_processed = 0
             last_logged = 0
             idx = 0
             current_batch = batch_size
-            while idx < len(tag_records):
-                if cancelled or _should_cancel():
-                    cancelled = True
-                    break
-                current_batch = max(1, current_batch)
-                batch_slice = tag_records[idx : idx + current_batch]
-                images: list[Image.Image] = []
-                valid_records: list[_FileRecord] = []
-                for record in batch_slice:
-                    if ensure_image_loaded(record) and record.image is not None:
-                        images.append(record.image)
-                        valid_records.append(record)
-                if not images:
-                    idx += len(batch_slice)
-                    continue
-                try:
-                    results = tagger.infer_batch(
-                        images,
-                        thresholds=thresholds or None,
-                        max_tags=max_tags_map or None,
-                    )
-                except Exception as exc:  # pragma: no cover - defensive logging
-                    if current_batch > 1:
-                        current_batch = max(1, current_batch // 2)
-                        logger.warning(
-                            "Tagger batch failed (%s); reducing batch size to %d",
-                            exc,
-                            current_batch,
-                        )
-                        continue
-                    logger.exception("Tagger failed for batch starting with %s", valid_records[0].path)
-                    idx += len(batch_slice)
-                    continue
-                for record, image, result in zip(valid_records, images, results):
+
+            # --- DB ライター起動 ---
+            from core.db_writer import DBItem, DBStop, DBWriter
+
+            dbw = DBWriter(
+                db_path,
+                flush_chunk=getattr(settings, "db_flush_chunk", 1024),
+                fts_topk=getattr(settings, "fts_topk", 128),
+                default_tagger_sig=tagger_sig,
+            )
+            dbw.start()
+
+            try:
+                while idx < len(tag_records):
                     if cancelled or _should_cancel():
                         cancelled = True
                         break
-                    total_predictions = len(result.tags)
-                    merged: dict[str, float] = {}
-                    categories: dict[str, TagCategory] = {}
-                    for prediction in result.tags:
-                        name = prediction.name.strip()
-                        if not name:
+
+                    current_batch = max(1, current_batch)
+                    batch_slice = tag_records[idx : idx + current_batch]
+
+                    images: list[Image.Image] = []
+                    batch_valid: list[_FileRecord] = []
+                    for rec in batch_slice:
+                        if ensure_image_loaded(rec) and rec.image is not None:
+                            images.append(rec.image)
+                            batch_valid.append(rec)
+
+                    if not images:
+                        idx += len(batch_slice)
+                        continue
+
+                    try:
+                        results = tagger.infer_batch(
+                            images,
+                            thresholds=thresholds or None,
+                            max_tags=max_tags_map or None,
+                        )
+                    except Exception as exc:  # pragma: no cover - defensive logging
+                        if current_batch > 1:
+                            current_batch = max(1, current_batch // 2)
+                            logger.warning("Tagger batch failed (%s); reducing batch size to %d", exc, current_batch)
                             continue
-                        score = float(prediction.score)
-                        existing = merged.get(name)
-                        if existing is None or score > existing:
-                            merged[name] = score
-                            categories[name] = prediction.category
-                    if merged:
-                        tag_defs = [{"name": name, "category": int(categories[name])} for name in merged]
-                        tag_id_map = upsert_tags(conn, tag_defs)
-                        tag_scores = [
-                            (tag_id_map[name], merged[name]) for name in sorted(merged, key=merged.get, reverse=True)
-                        ]
-                        replace_file_tags(conn, record.file_id, tag_scores)
-                        update_fts(conn, record.file_id, " ".join(merged.keys()))
-                    else:
-                        replace_file_tags(conn, record.file_id, [])
-                        update_fts(conn, record.file_id, None)
-                    previous_sig = record.stored_tagger_sig
-                    tagged_at = time.time()
-                    upsert_file(
-                        conn,
-                        path=str(record.path),
-                        size=record.size,
-                        mtime=record.mtime,
-                        sha256=record.sha,
-                        width=image.width,
-                        height=image.height,
-                        tagger_sig=tagger_sig,
-                        last_tagged_at=tagged_at,
-                    )
-                    record.needs_tagging = False
-                    record.tag_exists = True
-                    record.stored_tagger_sig = tagger_sig
-                    record.current_tagger_sig = tagger_sig
-                    record.last_tagged_at = tagged_at
-                    if not record.is_new and not record.changed and previous_sig != tagger_sig:
-                        stats["retagged"] = int(stats.get("retagged", 0)) + 1
-                    logger.debug(
-                        "kept %d/%d tags (max_tags=%s, thresholds=%s) for %s",
-                        len(merged),
-                        total_predictions,
-                        serialised_max_tags,
-                        serialised_thresholds,
-                        record.path,
-                    )
-                    processed_tags += 1
-                    last_logged = log_progress(
-                        "Tagging",
-                        processed_tags,
-                        len(tag_records),
-                        last_logged,
-                    )
-                    fts_processed += 1
-                    _emit(
-                        IndexProgress(
-                            phase=IndexPhase.TAG,
-                            done=processed_tags,
-                            total=len(tag_records),
+                        logger.exception("Tagger failed for batch starting with %s", batch_valid[0].path)
+                        idx += len(batch_slice)
+                        continue
+
+                    # 推論結果 → DBWriter に投げる形へ変換
+                    per_file_items: list[DBItem] = []
+
+                    for rec, result in zip(batch_valid, results):
+                        merged: dict[str, tuple[float, TagCategory]] = {}
+                        for pred in result.tags:
+                            name = pred.name.strip()
+                            if not name:
+                                continue
+                            score = float(pred.score)
+                            cur = merged.get(name)
+                            if (cur is None) or (score > cur[0]):
+                                merged[name] = (score, pred.category)
+
+                        items = [(n, s, int(c)) for n, (s, c) in merged.items()]
+                        w = (
+                            rec.width
+                            if (rec.is_new or rec.changed or rec.width is None or rec.height is None)
+                            else None
                         )
-                    )
-                    _emit(
-                        IndexProgress(
-                            phase=IndexPhase.FTS,
-                            done=fts_processed,
-                            total=len(tag_records),
+                        h = (
+                            rec.height
+                            if (rec.is_new or rec.changed or rec.width is None or rec.height is None)
+                            else None
                         )
-                    )
-                if cancelled:
-                    break
-                idx += len(batch_slice)
-            conn.commit()
+                        per_file_items.append(
+                            DBItem(rec.file_id, items, w, h, tagger_sig=tagger_sig, tagged_at=time.time())
+                        )
+
+                        # UI統計用フラグはここで反映（DBはフラッシュ時に書く）
+                        previous_sig = rec.stored_tagger_sig
+                        rec.needs_tagging = False
+                        rec.tag_exists = True
+                        rec.stored_tagger_sig = tagger_sig
+                        rec.current_tagger_sig = tagger_sig
+                        rec.last_tagged_at = time.time()
+                        if (not rec.is_new) and (not rec.changed) and (previous_sig != tagger_sig):
+                            stats["retagged"] = int(stats.get("retagged", 0)) + 1
+
+                    # ここで即 enqueue（DBWriter がまとめる）
+                    for it in per_file_items:
+                        dbw.put(it)
+
+                    # 進捗（推論完了ベース）
+                    done_now = len(per_file_items)
+                    processed_tags += done_now
+                    fts_processed += done_now
+                    last_logged = log_progress("Tagging", processed_tags, len(tag_records), last_logged)
+                    _emit(IndexProgress(phase=IndexPhase.TAG, done=processed_tags, total=len(tag_records)))
+                    _emit(IndexProgress(phase=IndexPhase.FTS, done=fts_processed, total=len(tag_records)))
+
+                    # ⭐ ここから “このバッチ分の” メモリ開放（PIL画像・結果配列）
+                    for rec in batch_valid:
+                        img = rec.image
+                        rec.image = None
+                        try:
+                            if img is not None:
+                                img.close()
+                        except Exception:
+                            pass
+                        del img
+
+                    # リストの参照も切る（できるだけ早く）
+                    try:
+                        images.clear()
+                        per_file_items.clear()
+                    except Exception:
+                        pass
+                    del images
+                    del per_file_items
+                    del results
+
+                    # 数千枚に一回だけ軽くGC（断片化対策）
+                    if (processed_tags % 4096) == 0:
+                        import gc
+
+                        gc.collect()
+
+                    idx += len(batch_slice)
+            finally:
+                # ここで必ず止める（タグ付けが例外で落ちても確実に解放）
+                if dbw is not None:
+                    try:
+                        dbw.stop(flush=True, timeout=30.0)
+                    finally:
+                        dbw = None
+            # DBWriter を停止・待機
+            dbw.put(DBStop())
+            dbw.join()
+            # （上の finally で止め済み。ここは呼ばない or 保険で None チェック）
+            # dbw.raise_if_failed()
+
             stats["tagged"] = processed_tags
             logger.info("Tagging complete: %d image(s) processed", processed_tags)
-            if cancelled:
-                logger.info("Tagging cancelled after %d image(s)", processed_tags)
-            _emit(
-                IndexProgress(
-                    phase=IndexPhase.TAG,
-                    done=processed_tags,
-                    total=len(tag_records),
-                ),
-                force=True,
-            )
-            _emit(
-                IndexProgress(
-                    phase=IndexPhase.FTS,
-                    done=fts_processed,
-                    total=len(tag_records),
-                ),
-                force=True,
-            )
+            _emit(IndexProgress(phase=IndexPhase.TAG, done=processed_tags, total=len(tag_records)), force=True)
+            _emit(IndexProgress(phase=IndexPhase.FTS, done=fts_processed, total=len(tag_records)), force=True)
 
-        embed_records = [record for record in records if record.needs_embedding and not record.load_failed]
+        # ===== EMBEDDING =====（ここは従来どおりでOKだが、必要なら同様に一括 executemany 化できる）
+        embed_records = [r for r in records if r.needs_embedding and not r.load_failed]
+        _emit(IndexProgress(phase=IndexPhase.EMBED, done=0, total=len(embed_records)), force=True)
 
-        _emit(
-            IndexProgress(
-                phase=IndexPhase.EMBED,
-                done=0,
-                total=len(embed_records),
-            ),
-            force=True,
-        )
-
-        if embed_records and not cancelled:
+        if False and embed_records and not cancelled:
             try:
                 embedder = embedder_override or _resolve_embedder(settings)
-            except Exception as exc:  # pragma: no cover - defensive logging
+            except Exception as exc:
                 logger.exception("Failed to instantiate embedder: %s", exc)
             else:
                 logger.info("Embedding %d image(s)", len(embed_records))
@@ -1015,139 +987,169 @@ def run_index_once(
                 last_logged = 0
                 idx = 0
                 current_batch = batch_size
+
                 while idx < len(embed_records):
                     if cancelled or _should_cancel():
                         cancelled = True
                         break
-                    current_batch = max(1, current_batch)
                     batch_slice = embed_records[idx : idx + current_batch]
+
                     images: list[Image.Image] = []
-                    valid_records: list[_FileRecord] = []
-                    for record in batch_slice:
-                        if ensure_image_loaded(record) and record.image is not None:
-                            images.append(record.image)
-                            valid_records.append(record)
+                    valid: list[_FileRecord] = []
+                    for rec in batch_slice:
+                        if ensure_image_loaded(rec) and rec.image is not None:
+                            images.append(rec.image)
+                            valid.append(rec)
                     if not images:
                         idx += len(batch_slice)
                         continue
+
                     try:
                         vectors = embedder.embed_images(images)
-                    except Exception as exc:  # pragma: no cover - defensive logging
+                    except Exception as exc:
                         if current_batch > 1:
                             current_batch = max(1, current_batch // 2)
-                            logger.warning(
-                                "Embedding batch failed (%s); reducing batch size to %d",
-                                exc,
-                                current_batch,
-                            )
+                            logger.warning("Embedding batch failed (%s); reducing batch size to %d", exc, current_batch)
                             continue
-                        logger.exception("Embedding failed for batch starting with %s", valid_records[0].path)
+                        logger.exception("Embedding failed for batch starting with %s", valid[0].path)
                         idx += len(batch_slice)
                         continue
-                    if len(vectors) != len(valid_records):
+
+                    if len(vectors) != len(valid):
                         logger.error(
-                            "Embedder returned %d vectors for %d images; skipping batch",
-                            len(vectors),
-                            len(valid_records),
+                            "Embedder returned %d vectors for %d images; skipping batch", len(vectors), len(valid)
                         )
                         idx += len(batch_slice)
                         continue
-                    for record, image, vector in zip(valid_records, images, vectors):
-                        if cancelled or _should_cancel():
-                            cancelled = True
-                            break
-                        array = np.asarray(vector, dtype=np.float32)
-                        if array.ndim != 1:
-                            array = np.reshape(array, (-1,))
-                        if not array.flags.c_contiguous:
-                            array = np.ascontiguousarray(array, dtype=np.float32)
-                        else:
-                            array = array.astype(np.float32, copy=True)
-                        norm = float(np.linalg.norm(array))
-                        if norm > 0:
-                            array /= norm
-                        upsert_file(
-                            conn,
-                            path=str(record.path),
-                            size=record.size,
-                            mtime=record.mtime,
-                            sha256=record.sha,
-                            width=image.width,
-                            height=image.height,
-                        )
-                        upsert_signatures(
-                            conn,
-                            file_id=record.file_id,
-                            phash_u64=phash(image),
-                            dhash_u64=dhash(image),
-                        )
-                        upsert_embedding(
-                            conn,
-                            file_id=record.file_id,
-                            model=settings.embed_model.name,
-                            dim=array.shape[0],
-                            vector=array.tobytes(),
-                        )
-                        was_missing = not record.embed_exists
-                        mark_indexed_at(conn, record.file_id, indexed_at=time.time())
-                        record.needs_embedding = False
-                        record.embed_exists = True
-                        processed_embeddings += 1
-                        if record.is_new or was_missing:
-                            hnsw_additions.append((record.file_id, array.copy()))
-                        last_logged = log_progress(
-                            "Embedding",
-                            processed_embeddings,
-                            len(embed_records),
-                            last_logged,
-                        )
-                        _emit(
-                            IndexProgress(
-                                phase=IndexPhase.EMBED,
-                                done=processed_embeddings,
-                                total=len(embed_records),
+
+                    conn.execute("BEGIN IMMEDIATE")
+                    try:
+                        up_rows_embed: list[tuple[int, str, int, memoryview]] = []
+                        up_rows_file: list[tuple[int, int, float, str, int, int]] = []
+                        sig_rows: list[tuple[int, int, int]] = []
+
+                        for rec, image, vector in zip(valid, images, vectors):
+                            # 使う属性は先に取り出してからクローズできるようにする  # ← 追加
+                            _w, _h = getattr(image, "width", None), getattr(image, "height", None)  # ← 追加
+
+                            array = np.asarray(vector, dtype=np.float32)
+                            if array.ndim != 1:
+                                array = np.reshape(array, (-1,))
+                            if not array.flags.c_contiguous:
+                                array = np.ascontiguousarray(array, dtype=np.float32)
+                            else:
+                                array = array.astype(np.float32, copy=True)
+                            norm = float(np.linalg.norm(array))
+                            if norm > 0:
+                                array /= norm
+
+                            # files の基本属性更新（念のため）
+                            up_rows_file.append(  # ← 変更: image.width/height をローカルにした値で
+                                (rec.size, rec.mtime, rec.sha, str(rec.path), _w or 0, _h or 0)
                             )
-                        )
-                    if cancelled:
-                        break
+                            # signatures
+                            sig_rows.append((rec.file_id, int(phash(image)), int(dhash(image))))
+                            # embeddings
+                            up_rows_embed.append(
+                                (
+                                    rec.file_id,
+                                    settings.embed_model.name,
+                                    int(array.shape[0]),
+                                    memoryview(array.tobytes()),
+                                )
+                            )
+
+                            was_missing = not rec.embed_exists
+                            mark_indexed_at(conn, rec.file_id, indexed_at=time.time())
+                            rec.needs_embedding = False
+                            rec.embed_exists = True
+                            if rec.is_new or was_missing:
+                                hnsw_additions.append((rec.file_id, array.copy()))
+                            processed_embeddings += 1
+
+                            # ここで画像を即解放し、参照も切る  # ← 追加
+                            try:
+                                if image is not None:
+                                    image.close()
+                            except Exception:
+                                pass
+                            rec.image = None
+                            del array  # ベクトル一時配列も解放しやすく  # ← 追加
+                        # bulk upserts
+                        if up_rows_file:
+                            conn.executemany(
+                                "UPDATE files SET size=?, mtime=?, sha256=? , width=?, height=? WHERE path=?",
+                                # ↑順番間違い注意: 下のタプルと合わせる
+                                [(sz, mt, sha, w, h, p) for (sz, mt, sha, p, w, h) in up_rows_file],
+                            )
+                        if sig_rows:
+                            conn.executemany(
+                                "INSERT INTO signatures (file_id, phash_u64, dhash_u64) VALUES (?, ?, ?) "
+                                "ON CONFLICT(file_id) DO UPDATE SET phash_u64=excluded.phash_u64, dhash_u64=excluded.dhash_u64",
+                                sig_rows,
+                            )
+                        if up_rows_embed:
+                            conn.executemany(
+                                "INSERT INTO embeddings (file_id, model, dim, vector) VALUES (?, ?, ?, ?) "
+                                "ON CONFLICT(file_id, model) DO UPDATE SET dim=excluded.dim, vector=excluded.vector",
+                                up_rows_embed,
+                            )
+                        conn.commit()
+                    except Exception:
+                        conn.rollback()
+                        raise
+
+                    # バッチ終了時にリスト参照を切って早めに回収  # ← 追加
+                    try:
+                        images.clear()
+                    except Exception:
+                        pass
+                    del images
+                    try:
+                        vectors.clear()
+                    except Exception:
+                        pass
+                    del vectors
+
+                    # 数千件ごとに軽くGCして断片化を抑える  # ← 追加
+                    if (processed_embeddings % 4096) == 0:
+                        import gc
+
+                        gc.collect()
+                    last_logged = log_progress("Embedding", processed_embeddings, len(embed_records), last_logged)
+                    _emit(IndexProgress(phase=IndexPhase.EMBED, done=processed_embeddings, total=len(embed_records)))
+
                     idx += len(batch_slice)
+
                 conn.commit()
                 stats["signatures"] = processed_embeddings
                 stats["embedded"] = processed_embeddings
                 logger.info("Embedding complete: %d image(s) processed", processed_embeddings)
-                if cancelled:
-                    logger.info("Embedding cancelled after %d image(s)", processed_embeddings)
                 _emit(
-                    IndexProgress(
-                        phase=IndexPhase.EMBED,
-                        done=processed_embeddings,
-                        total=len(embed_records),
-                    ),
+                    IndexProgress(phase=IndexPhase.EMBED, done=processed_embeddings, total=len(embed_records)),
                     force=True,
                 )
 
-        for record in records:
-            record.image = None
+        # メモリ解放
+        for rec in records:
+            rec.image = None
 
     finally:
         conn.close()
+        try:
+            if dbw is not None:
+                dbw.stop(flush=not cancelled, timeout=30.0)
+        except Exception:
+            logger.exception("dbwriter stop failed")
+        finally:
+            dbw = None
 
-    _emit(
-        IndexProgress(
-            phase=IndexPhase.HNSW,
-            done=0,
-            total=len(hnsw_additions),
-        ),
-        force=True,
-    )
-
+    # ===== HNSW 追記 =====
+    _emit(IndexProgress(phase=IndexPhase.HNSW, done=0, total=len(hnsw_additions)), force=True)
     if hnsw_additions and not cancelled:
         dim = hnsw_additions[0][1].shape[0]
         ensure_dirs()
-        if settings.index_dir:
-            index_dir = Path(settings.index_dir).expanduser()
-        else:
-            index_dir = get_index_dir()
+        index_dir = Path(settings.index_dir).expanduser() if settings.index_dir else get_index_dir()
         index_dir.mkdir(parents=True, exist_ok=True)
         index_path = index_dir / "hnsw_cosine.bin"
         try:
@@ -1157,28 +1159,13 @@ def run_index_once(
                 save_hnsw_index(index, index_path)
             stats["hnsw_added"] = added
             logger.info("HNSW index updated with %d new vector(s)", added)
-            _emit(
-                IndexProgress(
-                    phase=IndexPhase.HNSW,
-                    done=added,
-                    total=len(hnsw_additions),
-                ),
-                force=True,
-            )
-        except Exception as exc:  # pragma: no cover - defensive logging
+            _emit(IndexProgress(phase=IndexPhase.HNSW, done=added, total=len(hnsw_additions)), force=True)
+        except Exception as exc:
             logger.exception("Failed to update HNSW index: %s", exc)
 
     stats["elapsed_sec"] = time.perf_counter() - start_time
     stats["cancelled"] = cancelled
-    _emit(
-        IndexProgress(
-            phase=IndexPhase.DONE,
-            done=1,
-            total=1,
-            message="cancelled" if cancelled else None,
-        ),
-        force=True,
-    )
+    _emit(IndexProgress(phase=IndexPhase.DONE, done=1, total=1, message="cancelled" if cancelled else None), force=True)
     logger.info(
         "Indexing complete: scanned=%d, new=%d, tagged=%d, embedded=%d, hnsw_added=%d (%.2fs)",
         stats["scanned"],
@@ -1226,10 +1213,9 @@ def retag_query(
     arguments: tuple[object, ...] = tuple(params or ())
     conn = get_conn(db_path)
     try:
-        conn.execute(
-            f"UPDATE files SET tagger_sig = NULL, last_tagged_at = NULL WHERE {predicate}",
-            arguments,
-        )
+        # predicate 内で f.* を参照できるように、外側の UPDATE にもエイリアスを付ける
+        sql = "UPDATE files AS f " "SET tagger_sig = NULL, last_tagged_at = NULL " f"WHERE {predicate}"
+        conn.execute(sql, arguments)
         affected = conn.execute("SELECT changes()").fetchone()[0] or 0
         conn.commit()
         logger.info("Flagged %d file(s) for re-tagging (predicate=%s)", affected, predicate)

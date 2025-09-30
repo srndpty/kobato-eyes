@@ -24,7 +24,7 @@ DEFAULT_ALLOW_EXTS = {
     ".webp",
     ".bmp",
     ".tiff",
-    ".gif",
+    # ".gif",
 }
 DEFAULT_TAG_THRESHOLDS = {
     "general": 0.35,

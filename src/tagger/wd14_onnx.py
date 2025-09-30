@@ -159,11 +159,34 @@ class WD14Tagger(ITagger):
         self._input_name = self._session.get_inputs()[0].name
         self._output_names = [output.name for output in self._session.get_outputs()]
 
+        # ==== 追加: ベクトル化用の前計算（名前/カテゴリ/カテゴリ→index配列） ====
+        # Python ループ削減のため、一度だけ NumPy 配列化して保持
+        self._label_names = np.array([lab.name for lab in self._labels], dtype=object)
+        self._label_cats = np.fromiter(
+            (int(lab.category) for lab in self._labels), dtype=np.int16, count=len(self._labels)
+        )
+        self._cat_to_idx: dict[int, np.ndarray] = {
+            int(cat): np.nonzero(self._label_cats == int(cat))[0] for cat in sorted(set(self._label_cats.tolist()))
+        }
+        # デフォルトしきい値ベクトルはキャッシュしておく（可変のときは都度生成）
+        self._default_thr_vec = self._build_threshold_vector(self._default_thresholds)
+
         _log_provider_details(self._session, chosen_providers)
         _ACTIVE_TAGGERS.add(self)
 
         if len(self._output_names) != 1:
             raise RuntimeError("Expected a single output tensor from WD14 ONNX model, got " f"{self._output_names}")
+
+    # ==== 追加: しきい値ベクトルを作る ====
+    def _build_threshold_vector(self, thresholds: dict[TagCategory | int, float]) -> np.ndarray:
+        # 未指定カテゴリは 0.0（=無制限）
+        vec = np.zeros((len(self._labels),), dtype=np.float32)
+        for k, v in thresholds.items():
+            cat = int(k)
+            idx = self._cat_to_idx.get(cat)
+            if idx is not None and len(idx) > 0:
+                vec[idx] = float(v)
+        return vec
 
     def _resolve_labels_path(self, explicit: str | Path | None) -> Path:
         if explicit is not None:
@@ -302,58 +325,71 @@ class WD14Tagger(ITagger):
             )
 
         post_start = perf_counter()
-        # probabilities = _sigmoid(logits)
-        # Auto-detect: if the tensor already looks like probabilities in [0,1],
-        # skip sigmoid; otherwise apply sigmoid to logits.
+        # --- ベクトル化: ロジット→確率（またはそのまま） ---
         minv = float(np.min(logits))
         maxv = float(np.max(logits))
-        if logger.isEnabledFor(logging.DEBUG):
-            logger.debug("WD14 LOGITS: min=%.4f max=%.4f", minv, maxv)
-
         if 0.0 <= minv <= 1.0 and 0.0 <= maxv <= 1.0:
-            probabilities = logits.astype(np.float32, copy=False)  # already probs
+            probs = logits.astype(np.float32, copy=False)
         else:
-            probabilities = _sigmoid(logits)
+            probs = _sigmoid(logits).astype(np.float32, copy=False)
 
-        # --- DEBUG: dump raw top-k (before thresholds) for the 1st image in this batch ---
-        # try:
-        #     p0 = probabilities[0]
-        #     topk_n = 20
-        #     idx = np.argpartition(-p0, topk_n)[:topk_n]
-        #     idx = idx[np.argsort(-p0[idx])]
-        #     dump = []
-        #     for i in idx:
-        #         lab = self._labels[int(i)]
-        #         dump.append(f"{lab.name}({lab.category.name})={p0[i]:.3f}")
-        #     print("WD14 RAW top20: %s", ", ".join(dump))
-        # except Exception as _e:  # 失敗しても推論自体は続行
-        #     print("top-k debug dump failed: %r", _e)
-        # --- DEBUG end ---
-
+        # しきい値: 辞書を解決 → ベクトル（既定と同じならキャッシュを再利用）
         resolved_thresholds = self._resolve_thresholds(self._default_thresholds, thresholds)
+        thr_vec = (
+            self._default_thr_vec
+            if resolved_thresholds == self._default_thresholds
+            else self._build_threshold_vector(resolved_thresholds)
+        )
+        # マスク（B,C）
+        mask = probs >= thr_vec  # broadcast
+
+        # スコア降順の index を一括で取る（B,C）
+        # マスク外は -inf に落として並べ替え対象から外す
+        masked_scores = np.where(mask, probs, -np.inf)
+        order = np.argsort(-masked_scores, axis=1, kind="stable")  # 降順
+
+        # カテゴリごとの上限
         resolved_limits = self._resolve_max_tags(self._default_max_tags, max_tags)
 
         results: list[TagResult] = []
-        for probs in probabilities:
-            predictions: list[TagPrediction] = []
-            by_category: dict[TagCategory, list[TagPrediction]] = {}
-            for label, score in zip(self._labels, probs):
-                probability = float(score)
-                threshold = resolved_thresholds.get(label.category, 0.0)
-                if probability < threshold:
+        # 画像ごとに「並び済みインデックス」を舐めて、カテゴリ上限を満たす分だけ収集
+        # しきい値通過していない要素は -inf になっているので break
+        for b in range(order.shape[0]):
+            picks_idx: list[int] = []
+            picks_score: list[float] = []
+            # カテゴリ別の残数（dictより固定長の配列が速い）
+            remaining = np.full(8, np.iinfo(np.int32).max, dtype=np.int32)  # 0..7 くらいを想定
+            for cat, lim in resolved_limits.items():
+                if lim is not None:
+                    c = int(cat)
+                    if 0 <= c < remaining.size:
+                        remaining[c] = max(0, int(lim))
+            # 並び済みを先頭から見る（高スコア順）
+            row = order[b]
+            scores_b = masked_scores[b]
+            cats = self._label_cats
+            for j in row:
+                s = scores_b[j]
+                if not np.isfinite(s):  # -inf になったら以降は全部 -inf
+                    break
+                c = cats[j]
+                if remaining[c] <= 0:
                     continue
-                prediction = TagPrediction(name=label.name, score=probability, category=label.category)
-                by_category.setdefault(label.category, []).append(prediction)
+                picks_idx.append(int(j))
+                picks_score.append(float(s))
+                remaining[c] -= 1
+            # 最後に、選ばれたものを TagResult に詰める
+            # ここだけ軽い Python 生成だが、数はしきい値通過分だけ
+            preds = [
+                TagPrediction(
+                    name=str(self._label_names[i]),
+                    score=picks_score[k],
+                    category=TagCategory(int(self._label_cats[i])),
+                )
+                for k, i in enumerate(picks_idx)
+            ]
+            results.append(TagResult(tags=preds))
 
-            for category, preds in by_category.items():
-                preds.sort(key=lambda item: item.score, reverse=True)
-                limit = resolved_limits.get(category)
-                if limit is not None:
-                    preds = preds[: max(limit, 0)]
-                predictions.extend(preds)
-
-            predictions.sort(key=lambda item: item.score, reverse=True)
-            results.append(TagResult(tags=predictions))
         post_ms = (perf_counter() - post_start) * 1000.0
         total_ms = (perf_counter() - total_start) * 1000.0
 
@@ -402,12 +438,15 @@ def _configure_session_options(options: "ort.SessionOptions") -> None:
     """Apply default optimisation, logging, and profiling settings."""
 
     options.graph_optimization_level = getattr(ort.GraphOptimizationLevel, "ORT_ENABLE_ALL", 99)
-    options.enable_profiling = True
+    import os
+
+    options.enable_profiling = bool(int(os.getenv("KE_ORT_PROFILE", "0")))
     options.log_severity_level = 2
     profile_dir = _resolve_profile_dir()
     profile_dir.mkdir(parents=True, exist_ok=True)
     options.profile_file_prefix = str(profile_dir / "wd14")
-    logger.info("WD14: profiling enabled (prefix=%s)", options.profile_file_prefix)
+    if options.enable_profiling:
+        logger.info("WD14: profiling enabled (prefix=%s)", options.profile_file_prefix)
 
 
 def _log_provider_details(session: "ort.InferenceSession", chosen: Sequence[str]) -> None:

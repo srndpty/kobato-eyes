@@ -75,7 +75,6 @@ if HEADLESS:
         def __init__(self, *args, **kwargs) -> None:  # noqa: D401 - Qt-compatible signature
             raise RuntimeError("kobato-eyes UI is unavailable in headless mode")
 
-
     def run() -> None:
         """Headless environments cannot launch the GUI."""
 
@@ -89,11 +88,31 @@ else:
 
     QGuiApplication.setAttribute(Qt.ApplicationAttribute.AA_UseSoftwareOpenGL)
 
-    from db.connection import bootstrap_if_needed
     from core.settings import PipelineSettings
+    from db.connection import bootstrap_if_needed, get_conn
     from ui.dup_tab import DupTab
     from ui.settings_tab import SettingsTab
     from ui.tags_tab import TagsTab
+
+    def _quick_settle_sqlite(db_path: str | os.PathLike) -> None:
+        try:
+            conn = get_conn(db_path)
+            try:
+                conn.execute("PRAGMA journal_mode=WAL")
+                conn.execute("PRAGMA busy_timeout=2000")
+                # まず PASSIVE で消化
+                conn.execute("PRAGMA wal_checkpoint(PASSIVE)")
+                # アイドルなら一気に 0 に（ダメでも害なし）
+                conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+                # FTS があれば軽く最適化（速い）
+                conn.execute("PRAGMA optimize")
+            finally:
+                conn.close()
+        except Exception:
+            # 起動ブロックは避けたいのでログだけで継続
+            import logging
+
+            logging.getLogger(__name__).exception("quick_settle_sqlite failed")
 
     class MainWindow(QMainWindow):
         """Main window presenting basic navigation tabs."""
@@ -104,6 +123,7 @@ else:
             ensure_dirs()
             db_path = get_db_path()
             logger.info("DB at %s", db_path)
+            _quick_settle_sqlite(db_path)
             bootstrap_if_needed(db_path)
             self.setWindowTitle("kobato-eyes")
             self._tabs = QTabWidget()
@@ -131,7 +151,6 @@ else:
 
         def _on_settings_applied(self, settings: PipelineSettings) -> None:
             self._tags_tab.reload_autocomplete(settings)
-
 
     def run() -> None:
         """Launch the kobato-eyes GUI application."""
