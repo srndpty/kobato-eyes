@@ -37,7 +37,7 @@ from core.scanner import DEFAULT_EXTENSIONS, iter_images
 from core.settings import PipelineSettings
 from core.tag_job import TagJobConfig, run_tag_job
 from core.watcher import DirectoryWatcher
-from db.connection import bootstrap_if_needed, get_conn
+from db.connection import begin_quiesce, bootstrap_if_needed, end_quiesce, get_conn
 from db.repository import fts_delete_rows, get_file_by_path, list_untagged_under_path, mark_indexed_at, upsert_file
 from dup.indexer import DuplicateIndexer, EmbedderProtocol, add_embeddings_to_hnsw, load_hnsw_index, save_hnsw_index
 from index.hnsw import HNSWIndex
@@ -651,7 +651,7 @@ class ScanStage:
         self.cancel = cancel
 
     def run(self, roots: list[Path]) -> list[_FileRecord]:
-        conn = get_conn(self.db_path)
+        conn = get_conn(self.db_path, allow_when_quiesced=True)
         try:
             records: list[_FileRecord] = []
             scanned = 0
@@ -765,6 +765,7 @@ class TagStage:
 
     def run(self, records: list[_FileRecord]) -> int:
         import gc
+        import os
 
         thresholds = _build_threshold_map(self.settings.tagger.thresholds)
         max_tags_map = _build_max_tags_map(getattr(self.settings.tagger, "max_tags", None))
@@ -774,29 +775,94 @@ class TagStage:
         self.reporter.emit(IndexPhase.FTS, 0, total, force=True)
         if total == 0:
             return 0
+
+        print("dbw = DBWriter")
         dbw = DBWriter(
             self.db_path,
-            flush_chunk=getattr(self.settings, "db_flush_chunk", 1024),
-            fts_topk=getattr(self.settings, "fts_topk", 128),
+            flush_chunk=getattr(self.settings, "db_flush_chunk", 256),
+            fts_topk=getattr(self.settings, "fts_topk", 32),
+            queue_size=getattr(self.settings, "dbwriter_queue", 4096),
             default_tagger_sig=self.tagger_sig,
+            sub_txn_size=getattr(self.settings, "dbwriter_sub_txn_size", 128),
+            defer_fts=getattr(self.settings, "dbwriter_defer_fts", True),
+            fts_batch=getattr(self.settings, "dbwriter_fts_batch", 512),
+            fts_interval=getattr(self.settings, "dbwriter_fts_interval", 2.0),
+            unsafe_fastmode=getattr(self.settings, "dbwriter_unsafe_fast", True),
+            skip_fts=bool(getattr(self.settings, "unsafe_fast", True)),
         )
+
         dbw.start()
         processed = 0
         i = 0
         try:
             while i < total and not self.cancel.is_set():
+                # バックプレッシャ：キューが高水位のとき少し待つ
+                hi = int(getattr(self.settings, "dbwriter_hi_watermark", 2048))
+                while not self.cancel.is_set() and dbw.snapshot().get("qsize", 0) > hi:
+                    time.sleep(0.03)
                 batch = tag_recs[i : i + self.batch_size]
+
                 images: list[Image.Image] = []
                 valids: list[_FileRecord] = []
+
+                # -------- 画像ロード計測 --------
+                t_load0 = time.perf_counter()
+                slow_items: list[tuple[Path, float, int]] = []  # (path, sec, size_bytes)
+
                 for r in batch:
+                    t0 = time.perf_counter()
                     if self._ensure_image_loaded(r) and r.image is not None:
                         images.append(r.image)
                         valids.append(r)
+                        dt = time.perf_counter() - t0
+                        if dt >= 1.0:  # 1秒超をスローヒットとして記録
+                            try:
+                                fsz = os.path.getsize(r.path)
+                            except Exception:
+                                fsz = -1
+                            slow_items.append((r.path, dt, fsz))
                 if not images:
                     i += len(batch)
                     continue
+                t_load = time.perf_counter() - t_load0
+
+                # -------- 推論計測（ウォッチドッグ付き）--------
                 try:
+                    t_inf0 = time.perf_counter()
+                    waiting = True
+
+                    def _wd():
+                        # 5秒ごとに状況を出す
+                        n = 0
+                        while waiting:
+                            time.sleep(5.0)
+                            n += 5
+                            try:
+                                snap = dbw.snapshot()  # qsize / wal_mb / in_flush / last_flush
+                            except Exception:
+                                snap = None
+                            if snap:
+                                lf = snap.get("last_flush", {})
+                                logger.info(
+                                    "tag.watch: infer_wait=%ds q=%s wal=%sMB in_flush=%s last_total=%ss last_del=%ss last_ins=%ss",
+                                    n,
+                                    snap.get("qsize"),
+                                    snap.get("wal_mb"),
+                                    snap.get("in_flush"),
+                                    lf.get("total"),
+                                    lf.get("del"),
+                                    lf.get("ins"),
+                                )
+                            else:
+                                logger.info("tag.watch: infer_wait=%ds (no snapshot)", n)
+
+                    import threading
+
+                    th = threading.Thread(target=_wd, name="infer-watch", daemon=True)
+                    th.start()
                     res = self.tagger.infer_batch(images, thresholds=thresholds or None, max_tags=max_tags_map or None)
+                    waiting = False
+                    t_infer = time.perf_counter() - t_inf0
                 except Exception as exc:
                     logger.warning("Tagger batch failed (%s); shrinking.", exc)
                     if self.batch_size > 1:
@@ -804,6 +870,10 @@ class TagStage:
                         continue
                     i += len(batch)
                     continue
+                # -------- DB投入（作成+put）計測 --------
+                t_build0 = time.perf_counter()
+                put_sum = 0.0
+                put_max = 0.0
                 for rec, result in zip(valids, res):
                     merged: dict[str, tuple[float, TagCategory]] = {}
                     for pred in result.tags:
@@ -818,12 +888,39 @@ class TagStage:
                     need_wh = rec.is_new or rec.changed or (rec.width is None or rec.height is None)
                     w = rec.width if need_wh else None
                     h = rec.height if need_wh else None
+                    # --- DBWriter への投入がブロックしていないか計測 ---
+                    t_put0 = time.perf_counter()
                     dbw.put(DBItem(rec.file_id, items, w, h, self.tagger_sig, time.time()))
+                    tw = time.perf_counter() - t_put0
+                    put_sum += tw
+                    if tw > put_max:
+                        put_max = tw
                     rec.needs_tagging = False
                     rec.tag_exists = True
                     rec.stored_tagger_sig = self.tagger_sig
                     rec.current_tagger_sig = self.tagger_sig
                     rec.last_tagged_at = time.time()
+
+                t_build = time.perf_counter() - t_build0
+
+                # -------- バッチサマリを閾値付きで出力 --------
+                if (t_load >= 2.0) or (t_infer >= 2.0) or (t_build >= 2.0) or (put_sum >= 0.5) or slow_items:
+                    # スロー上位5件だけ短く表示
+                    top = ", ".join(
+                        f"{p.name} {dt:.2f}s {sz/1024/1024:.1f}MB" if sz >= 0 else f"{p.name} {dt:.2f}s ?MB"
+                        for (p, dt, sz) in slow_items[:5]
+                    )
+                    logger.info(
+                        "tag.batch: load=%.3fs infer=%.3fs build=%.3fs put_sum=%.3fs put_max=%.3fs n=%d slow=%d %s",
+                        t_load,
+                        t_infer,
+                        t_build,
+                        put_sum,
+                        put_max,
+                        len(valids),
+                        len(slow_items),
+                        top,
+                    )
                 processed += len(valids)
                 self.reporter.emit(IndexPhase.TAG, processed, total)
                 self.reporter.emit(IndexPhase.FTS, processed, total)
@@ -1053,7 +1150,28 @@ def run_index_once(
         tag = TagStage(
             Path(db_path), settings, reporter, cancel, tagger, tagger_sig, batch_size=max(1, settings.batch_size)
         )
-        stats.tagged = tag.run(records)
+        # pipeline.py（run_index_once 内の TAG 部分の例）
+
+        quiesced = False
+        dropped_indexes = False
+        try:
+            if getattr(settings, "unsafe_fast", True):
+                quiesced = begin_quiesce(timeout=30.0)
+                logger.info("db.quiesce begin: %s", quiesced)
+                if quiesced:
+                    # 短命接続（許可付き）で DROP INDEX（バックグラウンド・スレッド内）
+                    _fast_drop_indexes_if_needed(get_db_path())
+                    dropped_indexes = True
+
+            stats.tagged = tag.run(records)
+
+        finally:
+            # 終了時に索引を戻す（失敗しても続行）
+            if dropped_indexes:
+                _fast_recreate_indexes(get_db_path())
+            if quiesced:
+                end_quiesce()
+                logger.info("db.quiesce end")
 
     # 3) EMBED
     additions: list[tuple[int, np.ndarray]] = []
@@ -1085,6 +1203,35 @@ def run_index_once(
         stats.elapsed_sec,
     )
     return stats.__dict__
+
+
+def _fast_drop_indexes_if_needed(db_path: str | Path) -> None:
+    try:
+        with get_conn(db_path, allow_when_quiesced=True) as conn:
+            conn.execute("PRAGMA busy_timeout=5000;")
+            conn.executescript("""
+                DROP INDEX IF EXISTS idx_file_tags_tag_score;
+                DROP INDEX IF EXISTS idx_file_tags_tag_id;
+            """)
+        logger.warning("fast: dropped write-heavy indexes on file_tags.")
+    except Exception as e:
+        logger.warning("fast: drop indexes failed: %s", e)
+
+
+def _fast_recreate_indexes(db_path: str | Path) -> None:
+    try:
+        with get_conn(db_path, allow_when_quiesced=True) as conn:
+            conn.execute("PRAGMA busy_timeout=5000;")
+            conn.executescript("""
+                CREATE INDEX IF NOT EXISTS idx_file_tags_tag_id
+                  ON file_tags(tag_id);
+                CREATE INDEX IF NOT EXISTS idx_file_tags_tag_score
+                  ON file_tags(tag_id, score);
+                PRAGMA optimize;
+            """)
+        logger.info("fast: indexes recreated.")
+    except Exception as e:
+        logger.error("fast: recreate indexes failed: %s", e)
 
 
 # =================== ここまで新しい軽量ステージ実装 ===================
@@ -1123,7 +1270,7 @@ def retag_query(
 
     predicate = where_sql.strip() or "1=1"
     arguments: tuple[object, ...] = tuple(params or ())
-    conn = get_conn(db_path)
+    conn = get_conn(db_path, allow_when_quiesced=True)
     try:
         # predicate 内で f.* を参照できるように、外側の UPDATE にもエイリアスを付ける
         sql = "UPDATE files AS f " "SET tagger_sig = NULL, last_tagged_at = NULL " f"WHERE {predicate}"

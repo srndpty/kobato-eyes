@@ -207,6 +207,7 @@ def fts_delete_rows(conn: sqlite3.Connection, ids: Sequence[int]) -> None:
 
 
 def fts_replace_rows(conn: sqlite3.Connection, rows: Sequence[tuple[int, str]]) -> None:
+    print("repository.fts_replace_rows")
     """
     rowid → text を「置換」する（=古い index を消して新しい index を入れる）。
     - トランザクションは呼び出し側に任せる
@@ -426,6 +427,8 @@ def mark_indexed_at(
 
 
 def upsert_tags(conn: sqlite3.Connection, tags: Sequence[Mapping[str, Any]]) -> dict[str, int]:
+    print("repository.upsert_tags")
+
     """Ensure tags exist and return a mapping from tag name to identifier."""
     results: dict[str, int] = {}
     query = """
