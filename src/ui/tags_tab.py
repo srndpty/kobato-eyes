@@ -70,7 +70,7 @@ from core.config import load_settings
 from core.pipeline import IndexProgress, retag_all, retag_query, run_index_once, scan_and_tag
 from core.query import extract_positive_tag_terms, translate_query
 from core.settings import PipelineSettings
-from db.connection import get_conn
+from db.connection import begin_quiesce, debug_dump_active_conns, end_quiesce, get_conn
 from db.repository import _load_tag_thresholds, iter_paths_for_search, list_tag_names, search_files
 from tagger import labels_util
 from tagger.base import TagCategory
@@ -666,6 +666,7 @@ class TagsTab(QWidget):
         QApplication.instance().installEventFilter(self)
 
         self._suppress_return_once = False  # 直後の Enter を1回だけ無効化したい時用
+        self._quiesced = False  # ← 追加：UIがDBを離している最中か
 
         # Tab で補完確定（未選択なら第1候補）
         self._shortcut_tab = QShortcut(QKeySequence(Qt.Key.Key_Tab), self)
@@ -912,6 +913,25 @@ class TagsTab(QWidget):
         self._update_control_states()
         QTimer.singleShot(0, self._initialise_autocomplete)
         QTimer.singleShot(0, self._bootstrap_results_if_any)
+
+    def _enter_quiesce(self, timeout: float = 60.0) -> bool:
+        """UNSAFE 用に UI 側の DB を完全に手放す（UI は軽い処理だけ）"""
+        self._close_connection()  # 長寿命接続を閉じる
+        ok = begin_quiesce(timeout=timeout)
+        logger.info("ui.quiesce begin: %s", ok)
+        if not ok:
+            logger.error("ui.quiesce failed; open conns:\n%s", debug_dump_active_conns())
+        self._quiesced = ok
+        return ok
+
+    def _exit_quiesce(self) -> None:
+        """インデックス終了後に通常状態へ戻す（UI は軽い処理だけ）"""
+        if self._quiesced:
+            end_quiesce()
+            logger.info("ui.quiesce end")
+            self._quiesced = False
+        self._open_connection()
+        self._db_path = self._resolve_db_path()
 
     def _on_copy_results_clicked(self) -> None:
         # 現在の検索が確定していることを確認
@@ -1476,6 +1496,13 @@ class TagsTab(QWidget):
         self._update_control_states()
 
     def _start_indexing_task(self, task: IndexRunnable) -> None:
+        # ここで UI 側接続を閉じ、quiesce を開始（UNSAFE に必要）
+        ok = self._enter_quiesce(timeout=60.0)
+        if not ok:
+            # ここで止めるか、WALフォールバックで続けるかはお好みで。
+            # とりあえず続行（DBWriter 側が WAL 相当で動く）にしておく：
+            logger.warning("Proceeding without UNSAFE (WAL fallback).")
+
         self._current_index_task = task
         task.signals.progress.connect(self._handle_index_progress)
         task.signals.finished.connect(self._handle_index_finished)
@@ -1515,6 +1542,7 @@ class TagsTab(QWidget):
                 self._progress_label.set_full_text("Cancelling…")
             else:
                 self._progress_dialog.setLabelText("Cancelling…")
+        QTimer.singleShot(0, self._exit_quiesce)
 
     def _handle_index_progress(self, done: int, total: int, label: str) -> None:
         dlg = self._progress_dialog
@@ -1926,68 +1954,76 @@ class TagsTab(QWidget):
         self._update_control_states()
 
     def _handle_index_finished(self, stats: dict[str, object]) -> None:
-        task = self._current_index_task
-        if task is not None:
-            try:
-                task.signals.progress.disconnect(self._handle_index_progress)
-            except TypeError:
-                pass
+        try:
+            task = self._current_index_task
+            if task is not None:
+                try:
+                    task.signals.progress.disconnect(self._handle_index_progress)
+                except TypeError:
+                    pass
 
-        self._close_progress_dialog()
-        self._indexing_active = False
-        elapsed = float(stats.get("elapsed_sec", 0.0) or 0.0)
-        cancelled = bool(stats.get("cancelled", False))
-        prefix = "Retagging" if self._retag_active else "Indexing"
-        if cancelled:
-            self._status_label.setText(f"{prefix} cancelled after {elapsed:.2f}s.")
-            self._show_toast(f"{prefix} cancelled.")
+            self._close_progress_dialog()
+            self._indexing_active = False
+            elapsed = float(stats.get("elapsed_sec", 0.0) or 0.0)
+            cancelled = bool(stats.get("cancelled", False))
+            prefix = "Retagging" if self._retag_active else "Indexing"
+            if cancelled:
+                self._status_label.setText(f"{prefix} cancelled after {elapsed:.2f}s.")
+                self._show_toast(f"{prefix} cancelled.")
+                self._retag_active = False
+                self._update_control_states()
+                return
+            if self._retag_active:
+                self._status_label.setText(f"Retagging complete in {elapsed:.2f}s.")
+            else:
+                self._status_label.setText(f"Indexing complete in {elapsed:.2f}s.")
+            tagger_name = str(stats.get("tagger_name") or "unknown")
+            message = (
+                f"Indexed: {int(stats.get('scanned', 0))} files / "
+                f"Tagged: {int(stats.get('tagged', 0))} / "
+                f"Embedded: {int(stats.get('embedded', 0))}"
+            )
+            retagged = int(stats.get("retagged", 0) or 0)
+            requested = int(stats.get("retagged_marked", retagged) or 0)
+            if self._retag_active:
+                if requested and requested != retagged:
+                    message += f" / Retagged: {retagged}/{requested}"
+                else:
+                    message += f" / Retagged: {retagged}"
+            elif retagged:
+                message += f" / Retagged: {retagged}"
+            message += f" (tagger: {tagger_name})"
+            self._show_toast(message)
             self._retag_active = False
             self._update_control_states()
-            return
-        if self._retag_active:
-            self._status_label.setText(f"Retagging complete in {elapsed:.2f}s.")
-        else:
-            self._status_label.setText(f"Indexing complete in {elapsed:.2f}s.")
-        tagger_name = str(stats.get("tagger_name") or "unknown")
-        message = (
-            f"Indexed: {int(stats.get('scanned', 0))} files / "
-            f"Tagged: {int(stats.get('tagged', 0))} / "
-            f"Embedded: {int(stats.get('embedded', 0))}"
-        )
-        retagged = int(stats.get("retagged", 0) or 0)
-        requested = int(stats.get("retagged_marked", retagged) or 0)
-        if self._retag_active:
-            if requested and requested != retagged:
-                message += f" / Retagged: {retagged}/{requested}"
-            else:
-                message += f" / Retagged: {retagged}"
-        elif retagged:
-            message += f" / Retagged: {retagged}"
-        message += f" (tagger: {tagger_name})"
-        self._show_toast(message)
-        self._retag_active = False
-        self._update_control_states()
-        QTimer.singleShot(0, self._on_search_clicked)
+            QTimer.singleShot(0, self._on_search_clicked)
+        finally:
+            # ← 絶対に復帰
+            self._exit_quiesce()
 
     def _handle_index_failed(self, message: str) -> None:
-        task = self._current_index_task
-        if task is not None:
-            try:
-                task.signals.progress.disconnect(self._handle_index_progress)
-            except TypeError:
-                pass
+        try:
+            task = self._current_index_task
+            if task is not None:
+                try:
+                    task.signals.progress.disconnect(self._handle_index_progress)
+                except TypeError:
+                    pass
 
-        self._close_progress_dialog()
-        self._indexing_active = False
-        if message == ONNXRUNTIME_MISSING_MESSAGE:
-            error_text = message
-        else:
-            prefix = "Retagging" if self._retag_active else "Indexing"
-            error_text = f"{prefix} failed (DB: {self._db_display}): {message}"
-        self._status_label.setText(error_text)
-        self._show_toast(error_text)
-        self._retag_active = False
-        self._update_control_states()
+            self._close_progress_dialog()
+            self._indexing_active = False
+            if message == ONNXRUNTIME_MISSING_MESSAGE:
+                error_text = message
+            else:
+                prefix = "Retagging" if self._retag_active else "Indexing"
+                error_text = f"{prefix} failed (DB: {self._db_display}): {message}"
+            self._status_label.setText(error_text)
+            self._show_toast(error_text)
+            self._retag_active = False
+            self._update_control_states()
+        finally:
+            # ← 絶対に復帰
+            self._exit_quiesce()
 
     def _resolve_db_path(self) -> Path:
         if self._conn is None:

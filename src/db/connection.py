@@ -5,8 +5,11 @@ from __future__ import annotations
 import logging
 import os
 import sqlite3
+import threading
+import time
+import traceback
 from pathlib import Path
-from threading import Lock
+from threading import Lock, RLock
 
 from db.schema import ensure_schema
 
@@ -14,6 +17,71 @@ logger = logging.getLogger(__name__)
 
 _BOOTSTRAP_LOCK = Lock()
 _BOOTSTRAPPED: set[str] = set()
+
+# ==== 接続トラッキング / 静穏化ゲート ====
+_QUIESCE = threading.Event()  # True の間は新規 get_conn をブロック
+_ACTIVE_LOCK = RLock()
+_ACTIVE_COUNT = 0
+_ACTIVE_CONNS: dict[int, dict] = {}  # id(conn) -> {thread, target, created_at, stack}
+
+
+def _register_conn(conn: sqlite3.Connection, target: str) -> None:
+    global _ACTIVE_COUNT
+    info = {
+        "thread": threading.current_thread().name,
+        "target": target,
+        "created_at": time.time(),
+        "stack": "".join(traceback.format_stack(limit=12)),
+    }
+    with _ACTIVE_LOCK:
+        _ACTIVE_COUNT += 1
+        _ACTIVE_CONNS[id(conn)] = info
+
+
+def _unregister_conn(conn: sqlite3.Connection) -> None:
+    global _ACTIVE_COUNT
+    with _ACTIVE_LOCK:
+        _ACTIVE_COUNT = max(0, _ACTIVE_COUNT - 1)
+        _ACTIVE_CONNS.pop(id(conn), None)
+
+
+class _TrackedConnection(sqlite3.Connection):
+    def close(self):  # type: ignore[override]
+        try:
+            super().close()
+        finally:
+            _unregister_conn(self)
+
+
+def begin_quiesce(timeout: float = 15.0) -> bool:
+    """新規接続を止め、既存接続が 0 になるのを待つ。"""
+    _QUIESCE.set()
+    t0 = time.time()
+    while True:
+        with _ACTIVE_LOCK:
+            if _ACTIVE_COUNT == 0:
+                return True
+        if time.time() - t0 >= timeout:
+            return False
+        time.sleep(0.05)
+
+
+def end_quiesce() -> None:
+    _QUIESCE.clear()
+
+
+def debug_dump_active_conns() -> str:
+    with _ACTIVE_LOCK:
+        lines = [f"QUIESCE={_QUIESCE.is_set()} active={_ACTIVE_COUNT}"]
+        now = time.time()
+        for cid, meta in _ACTIVE_CONNS.items():
+            age = now - meta["created_at"]
+            lines.append(f"- conn_id={cid} thr={meta['thread']} age={age:.1f}s")
+            # スタックは先頭数行だけ
+            stack_lines = meta["stack"].splitlines()
+            for sl in stack_lines[-6:]:
+                lines.append(f"    {sl}")
+        return "\n".join(lines)
 
 
 def _ensure_indexes(conn: sqlite3.Connection) -> None:
@@ -108,12 +176,12 @@ def _apply_runtime_pragmas(conn: sqlite3.Connection, *, is_memory: bool) -> None
             pass
 
 
-def _apply_pragmas(conn: sqlite3.Connection, *, is_memory: bool) -> None:
+def _apply_pragmas(conn: sqlite3.Connection, *, is_memory: bool, force_wal: bool = True) -> None:
     cur = conn.cursor()
     try:
         # 既存
         cur.execute("PRAGMA foreign_keys=ON;")
-        if not is_memory:
+        if not is_memory and force_wal:
             # WAL はDBに永続化される
             cur.execute("PRAGMA journal_mode=WAL;")
         # ★ここから毎接続で効く高速化系（永続ではない）
@@ -137,20 +205,29 @@ def _connect_to_target(
     timeout: float,
     uri: bool,
     is_memory: bool,
+    force_wal: bool = True,
+    allow_when_quiesced: bool = False,
 ) -> sqlite3.Connection:
+    # 静穏期間中は原則ブロック（DBWriterなど例外のみ通す）
+    if _QUIESCE.is_set() and not allow_when_quiesced:
+        # quiesce解除まで待機
+        while _QUIESCE.is_set():
+            time.sleep(0.05)
     conn = sqlite3.connect(
         target,
         detect_types=sqlite3.PARSE_DECLTYPES,
         timeout=timeout,  # busy_timeout 互換
         uri=uri,
+        factory=_TrackedConnection,
     )
     # _apply_runtime_pragmas(conn, is_memory=is_memory)
     conn.row_factory = sqlite3.Row
-    _apply_pragmas(conn, is_memory=is_memory)  # ★追加
+    _apply_pragmas(conn, is_memory=is_memory, force_wal=force_wal)  # ★追加
+    _register_conn(conn, target)
     return conn
 
 
-def bootstrap_if_needed(db_path: str | Path, *, timeout: float = 30.0) -> None:
+def bootstrap_if_needed(db_path: str | Path, *, timeout: float = 30.0, force_wal: bool = False) -> None:
     """Create the database file and ensure the schema exists for the given path."""
     target, is_memory, uri, display_path, fs_path = _resolve_db_target(db_path)
 
@@ -168,7 +245,8 @@ def bootstrap_if_needed(db_path: str | Path, *, timeout: float = 30.0) -> None:
             fs_path.parent.mkdir(parents=True, exist_ok=True)
             is_new = not fs_path.exists() or (fs_path.exists() and os.path.getsize(fs_path) == 0)
 
-        conn = _connect_to_target(target, timeout=timeout, uri=uri, is_memory=is_memory)
+        # ブートストラップ時は安全寄り（WALを有効）で OK
+        conn = _connect_to_target(target, timeout=timeout, uri=uri, is_memory=is_memory, force_wal=force_wal)
         try:
             logger.info("Bootstrapping schema at: %s", display_path)
 
@@ -194,11 +272,20 @@ def get_conn(
     db_path: str | Path,
     *,
     timeout: float = 30.0,
+    force_wal: bool = True,
+    allow_when_quiesced=False,
 ) -> sqlite3.Connection:
     """Create a SQLite connection with WAL and foreign-key support enabled."""
     target, is_memory, uri, _, _ = _resolve_db_target(db_path)
-    bootstrap_if_needed(db_path, timeout=timeout)
-    conn = _connect_to_target(target, timeout=timeout, uri=uri, is_memory=is_memory)
+    bootstrap_if_needed(db_path, timeout=timeout, force_wal=force_wal)
+    conn = _connect_to_target(
+        target,
+        timeout=timeout,
+        uri=uri,
+        is_memory=is_memory,
+        force_wal=force_wal,
+        allow_when_quiesced=allow_when_quiesced,
+    )
     # :memory: は都度スキーマ適用
     if is_memory:
         ensure_schema(conn)
@@ -206,4 +293,4 @@ def get_conn(
     return conn
 
 
-__all__ = ["bootstrap_if_needed", "get_conn"]
+__all__ = ["bootstrap_if_needed", "get_conn", "begin_quiesce", "end_quiesce"]
