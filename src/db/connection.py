@@ -158,21 +158,35 @@ def _apply_runtime_pragmas(conn: sqlite3.Connection, *, is_memory: bool) -> None
             pass
 
 
+def _exec_pragma_retry(cur: sqlite3.Cursor, sql: str, retries: int = 40, sleep_sec: float = 0.1):
+    last = None
+    for _ in range(retries):
+        try:
+            cur.execute(sql)
+            return
+        except sqlite3.OperationalError as e:
+            last = e
+            if "locked" not in str(e).lower() and "busy" not in str(e).lower():
+                raise
+            time.sleep(sleep_sec)
+    raise last
+
+
 def _apply_pragmas(conn: sqlite3.Connection, *, is_memory: bool) -> None:
     cur = conn.cursor()
     try:
         # 既存
-        cur.execute("PRAGMA foreign_keys=ON;")
+        _exec_pragma_retry(cur, "PRAGMA foreign_keys=ON;")
         if not is_memory:
             # WAL はDBに永続化される
-            cur.execute("PRAGMA journal_mode=WAL;")
+            _exec_pragma_retry(cur, "PRAGMA journal_mode=WAL;")
         # ★ここから毎接続で効く高速化系（永続ではない）
-        cur.execute("PRAGMA synchronous=NORMAL;")  # COMMIT の fsync を軽く
-        cur.execute("PRAGMA temp_store=MEMORY;")  # tempをメモリへ
-        cur.execute("PRAGMA cache_size=-200000;")  # 約200MBのページキャッシュ
-        cur.execute("PRAGMA wal_autocheckpoint=50000;")  # WAL約200MBで自動チェックポイント
+        _exec_pragma_retry(cur, "PRAGMA synchronous=NORMAL;")  # COMMIT の fsync を軽く
+        _exec_pragma_retry(cur, "PRAGMA temp_store=MEMORY;")  # tempをメモリへ
+        _exec_pragma_retry(cur, "PRAGMA cache_size=-200000;")  # 約200MBのページキャッシュ
+        _exec_pragma_retry(cur, "PRAGMA wal_autocheckpoint=50000;")  # WAL約200MBで自動チェックポイント
         try:
-            cur.execute("PRAGMA mmap_size=1073741824;")  # 1GBのmmap（対応環境のみ）
+            _exec_pragma_retry(cur, "PRAGMA mmap_size=1073741824;")  # 1GBのmmap（対応環境のみ）
         except sqlite3.DatabaseError:
             pass
         # さらに攻めるなら（任意）

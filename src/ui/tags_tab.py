@@ -2003,11 +2003,7 @@ class TagsTab(QWidget):
                 pass
 
         self._close_progress_dialog()
-        # ★ quiesce 終了後に UI 接続を即復旧（以降の検索などの前に必須）
-        try:
-            self.restore_connection()
-        except Exception:
-            pass
+
         self._indexing_active = False
         if message == ONNXRUNTIME_MISSING_MESSAGE:
             error_text = message
@@ -2018,10 +2014,31 @@ class TagsTab(QWidget):
         self._show_toast(error_text)
         self._retag_active = False
         self._update_control_states()
+        # ① まず quiesce を解除
         try:
             end_quiesce()
-        finally:
+        except Exception:
+            logger.exception("end_quiesce() failed in UI")
+
+        # ② 次に接続を復旧（ロックなら短いバックオフで何度か再試行）
+        self._restore_connection_with_retry()
+
+    def _restore_connection_with_retry(self, attempts: int = 20, delay_ms: int = 150) -> None:
+        try:
             self.restore_connection()
+            return
+        except Exception as e:
+            s = str(e).lower()
+            if "locked" not in s and "busy" not in s:
+                # 別原因ならそのまま再送出
+                raise
+            if attempts <= 1:
+                # 諦める（ユーザに手動再試行させる）
+                self._show_toast("DB reopen failed (locked). Please try again.")
+                return
+
+            # 次のタイマーで再試行
+            QTimer.singleShot(delay_ms, lambda: self._restore_connection_with_retry(attempts - 1, delay_ms))
 
     def _resolve_db_path(self) -> Path:
         if self._conn is None:
