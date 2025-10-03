@@ -4,16 +4,21 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import os
+import queue
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Callable, Iterable, Iterator, Mapping, Optional, Sequence, Set
+from typing import Callable, Iterable, Iterator, Mapping, Optional, Sequence, Set, Tuple
 
 import numpy as np
 from PIL import Image
 
 from core.db_writer import DBWriter
+from db.fts_offline import rebuild_fts_offline
 from utils.env import is_headless
 
 if is_headless():
@@ -42,11 +47,90 @@ from db.repository import fts_delete_rows, get_file_by_path, list_untagged_under
 from dup.indexer import DuplicateIndexer, EmbedderProtocol, add_embeddings_to_hnsw, load_hnsw_index, save_hnsw_index
 from index.hnsw import HNSWIndex
 from sig.phash import dhash, phash
-from tagger.base import ITagger, TagCategory
+from tagger.base import ITagger, TagCategory, TagResult
 from utils.hash import compute_sha256
 from utils.paths import ensure_dirs, get_db_path, get_index_dir
 
 logger = logging.getLogger(__name__)
+
+
+# ============================================================
+# PrefetchLoader: 画像パス列を「(paths, images)」のバッチにして先読み
+# ============================================================
+class PrefetchLoader:
+    def __init__(
+        self,
+        paths: Sequence[str],
+        *,
+        batch_size: int,
+        prefetch_batches: int = 2,
+        io_workers: int | None = None,
+    ) -> None:
+        self._paths = paths
+        self._B = int(batch_size)
+        self._depth = max(1, int(prefetch_batches))
+        cpu = os.cpu_count() or 4
+        self._workers = max(1, int(io_workers or min(8, cpu)))
+        self._q: "queue.Queue[Tuple[list[str], list[Image.Image]] | None]" = queue.Queue(self._depth)
+        self._stop = threading.Event()
+        self._th = threading.Thread(target=self._producer, name="ke-prefetch", daemon=True)
+        self._th.start()
+        logger.info("PrefetchLoader: start (B=%d, depth=%d, io_workers=%d)", self._B, self._depth, self._workers)
+
+    def _load_one(self, p: str) -> Image.Image | None:
+        try:
+            # ファイルハンドルは即クローズ。decode を完了させてRAMへ載せる
+            with Image.open(p) as im:
+                im.load()  # デコードをここで完了させる
+                return im.convert("RGB")  # 透明合成は tagger 側でも行うので RGBでOK
+        except Exception as e:
+            logger.warning("PrefetchLoader: failed to load %s: %s", p, e)
+            return None
+
+    def _producer(self) -> None:
+        try:
+            with ThreadPoolExecutor(max_workers=self._workers, thread_name_prefix="ke-io") as ex:
+                N = len(self._paths)
+                for i in range(0, N, self._B):
+                    if self._stop.is_set():
+                        break
+                    batch_paths = list(self._paths[i : i + self._B])
+                    # I/O を並列に投げる
+                    futs = {ex.submit(self._load_one, p): p for p in batch_paths}
+                    imgs: list[Image.Image] = []
+                    for fut in as_completed(futs):
+                        img = fut.result()
+                        if img is not None:
+                            imgs.append(img)
+                    # ここで順序は問いません（推論的に問題なし）。順序維持したい場合は gather 方式に変える
+                    self._q.put((batch_paths, imgs))
+                    if self._stop.is_set():
+                        break
+        finally:
+            # 終端マーカー
+            try:
+                self._q.put(None, timeout=1)
+            except Exception:
+                pass
+
+    def __iter__(self) -> Iterator[Tuple[list[str], list[Image.Image]]]:
+        while True:
+            item = self._q.get()
+            if item is None:
+                return
+            yield item
+
+    def close(self) -> None:
+        self._stop.set()
+        try:
+            # 早期終了時にキューを開放
+            while True:
+                self._q.get_nowait()
+        except Exception:
+            pass
+        if self._th.is_alive():
+            self._th.join(timeout=2.0)
+        logger.info("PrefetchLoader: stop")
 
 
 class IndexPhase(Enum):
@@ -313,7 +397,7 @@ def scan_and_tag(
     tagger_sig = current_tagger_sig(settings, thresholds=thresholds, max_tags=max_tags_map)
     db_path = get_db_path()
     bootstrap_if_needed(db_path)
-    conn = get_conn(db_path)
+    conn = get_conn(db_path, allow_when_quiesced=True)
     tagger: ITagger | None = None
 
     def _like_pattern(path: Path) -> str:
@@ -672,10 +756,12 @@ def run_index_once(
 
     db_literal = str(db_path)
     conn = get_conn(
-        db_literal if (db_literal.startswith("file:") or db_literal == ":memory:") else Path(db_path).expanduser()
+        db_literal if (db_literal.startswith("file:") or db_literal == ":memory:") else Path(db_path).expanduser(),
+        allow_when_quiesced=True,
     )
     cancelled = False
     dbw: "DBWriter | None" = None
+    quiesced = False
 
     try:
         logger.info("Scanning %d root(s) for eligible images", len(roots))
@@ -806,119 +892,192 @@ def run_index_once(
         # ===== TAGGING =====
         tag_records = [r for r in records if r.needs_tagging and not r.load_failed]
         _emit(IndexProgress(phase=IndexPhase.TAG, done=0, total=len(tag_records)), force=True)
+        # FTS はタグ付け中は止めるので、ここでの FTS 進捗はダミーのまま
         _emit(IndexProgress(phase=IndexPhase.FTS, done=0, total=len(tag_records)), force=True)
 
         if tag_records and not cancelled:
+            # ★ スキャナ用接続を閉じる → quiesce 開始 → DBWriter 起動
             try:
+                conn.close()
+            except Exception:
+                pass
+            finally:
+                conn = None
+            from db.connection import begin_quiesce, end_quiesce
+            from db.connection import get_conn as _get_conn
+
+            processed_tags = 0
+            fts_processed = 0
+            last_logged = 0
+
+            try:
+                dbw = None
+                quiesced = False
+                begin_quiesce()
+                quiesced = True
                 tagger = _resolve_tagger(
                     settings,
                     tagger_override,
                     thresholds=thresholds or None,
                     max_tags=max_tags_map or None,
                 )
-            except Exception as exc:
-                logger.warning("Failed to instantiate tagger: %s", exc)
-                raise
 
-            stats["tagger_name"] = type(tagger).__name__ if tagger_override is not None else settings.tagger.name
-            logger.info("Tagging %d image(s)", len(tag_records))
+                stats["tagger_name"] = type(tagger).__name__ if tagger_override is not None else settings.tagger.name
+                logger.info("Tagging %d image(s)", len(tag_records))
 
-            processed_tags = 0
-            fts_processed = 0
-            last_logged = 0
-            idx = 0
-            current_batch = batch_size
+                processed_tags = 0
+                fts_processed = 0
+                last_logged = 0
+                idx = 0
+                current_batch = batch_size
 
-            # --- DB ライター起動 ---
-            from core.db_writer import DBItem, DBStop, DBWriter
+                # --- DB ライター起動 ---
+                import os
+                import time as _time
 
-            dbw = DBWriter(
-                db_path,
-                flush_chunk=getattr(settings, "db_flush_chunk", 1024),
-                fts_topk=getattr(settings, "fts_topk", 128),
-                default_tagger_sig=tagger_sig,
-            )
-            dbw.start()
+                from core.db_writer import DBItem, DBWriter
 
-            try:
-                while idx < len(tag_records):
-                    if cancelled or _should_cancel():
-                        cancelled = True
-                        break
+                # ★ ここから UNSAFE 区間へ（UI は接続を閉じておくこと）
+                dbw = DBWriter(
+                    db_path,
+                    flush_chunk=getattr(settings, "db_flush_chunk", 1024),
+                    fts_topk=getattr(settings, "fts_topk", 128),
+                    queue_size=int(os.environ.get("KE_DB_QUEUE", "1024")),
+                    default_tagger_sig=tagger_sig,
+                    unsafe_fast=True,  # ← WAL を使わず MEMORY/EXCLUSIVE/OFF
+                    skip_fts=True,  # ← FTS 更新は完全停止
+                )
 
-                    current_batch = max(1, current_batch)
-                    batch_slice = tag_records[idx : idx + current_batch]
+                dbw.start()
+                _time.sleep(0.2)
+                dbw.raise_if_failed()
 
-                    images: list[Image.Image] = []
-                    batch_valid: list[_FileRecord] = []
-                    for rec in batch_slice:
-                        if ensure_image_loaded(rec) and rec.image is not None:
-                            images.append(rec.image)
-                            batch_valid.append(rec)
+                # ===== PrefetchLoader を使った重畳ループ =====
+                # 1) レコード ↔ パス対応
+                rec_by_path: dict[str, _FileRecord] = {str(r.path): r for r in tag_records}
+                tag_paths: list[str] = list(rec_by_path.keys())
 
-                    if not images:
-                        idx += len(batch_slice)
-                        continue
+                # 2) パラメータ
+                current_batch = int(batch_size)
+                prefetch_depth = int(os.environ.get("KE_PREFETCH_DEPTH", "2"))
+                io_workers = int(os.environ.get("KE_IO_WORKERS", "0") or "0")
+                if io_workers <= 0:
+                    io_workers = None  # 自動
 
+                # 3) PrefetchLoader 起動
+                loader = PrefetchLoader(
+                    tag_paths,
+                    batch_size=current_batch,
+                    prefetch_batches=prefetch_depth,
+                    io_workers=io_workers,
+                )
+
+                def _infer_with_retry(images: list[Image.Image]) -> list[TagResult]:
+                    """OOM などで落ちたバッチを半分に割って再実行（再帰）"""
                     try:
-                        results = tagger.infer_batch(
+                        return tagger.infer_batch(
                             images,
                             thresholds=thresholds or None,
                             max_tags=max_tags_map or None,
                         )
-                    except Exception as exc:  # pragma: no cover - defensive logging
-                        if current_batch > 1:
-                            current_batch = max(1, current_batch // 2)
-                            logger.warning("Tagger batch failed (%s); reducing batch size to %d", exc, current_batch)
+                    except Exception:
+                        if len(images) <= 1:
+                            raise
+                        mid = len(images) // 2
+                        left = _infer_with_retry(images[:mid])
+                        right = _infer_with_retry(images[mid:])
+                        return left + right
+
+                for batch in loader:
+                    if cancelled or _should_cancel():
+                        cancelled = True
+                        break
+
+                    # loader は (paths, images) を返す前提
+                    if not batch:
+                        continue
+                    try:
+                        batch_paths, batch_imgs = batch
+                    except Exception:
+                        logger.error("PrefetchLoader batch has unexpected shape: %r", type(batch))
+                        raise
+
+                    # 成功ロードだけ拾ってレコードに対応付け
+                    batch_images: list[Image.Image] = []
+                    batch_recs: list[_FileRecord] = []
+                    for p, im in zip(batch_paths, batch_imgs):
+                        if im is None:
                             continue
-                        logger.exception("Tagger failed for batch starting with %s", batch_valid[0].path)
-                        idx += len(batch_slice)
+                        rec = rec_by_path.get(p)
+                        if rec is None:
+                            continue
+                        batch_images.append(im)
+                        batch_recs.append(rec)
+
+                    if not batch_images:
                         continue
 
-                    # 推論結果 → DBWriter に投げる形へ変換
-                    per_file_items: list[DBItem] = []
+                    # --- 推論（失敗時はローカルで分割再試行） ---
+                    try:
+                        results = _infer_with_retry(batch_images)
+                    except Exception as exc:
+                        logger.exception("Tagger failed for a prefetch batch: %s", exc)
+                        # このバッチは捨てて次へ（ログだけ残し、全体は継続）
+                        # もしくは continue ではなく raise にして全停止したい場合は上を差し替え
+                        continue
 
-                    for rec, result in zip(batch_valid, results):
+                    # --- 推論結果 → DBWriter ---
+                    per_file_items: list[DBItem] = []
+                    now_ts = time.time()
+
+                    for rec, result, pil in zip(batch_recs, results, batch_images):
                         merged: dict[str, tuple[float, TagCategory]] = {}
                         for pred in result.tags:
                             name = pred.name.strip()
                             if not name:
                                 continue
-                            score = float(pred.score)
+                            s = float(pred.score)
                             cur = merged.get(name)
-                            if (cur is None) or (score > cur[0]):
-                                merged[name] = (score, pred.category)
+                            if (cur is None) or (s > cur[0]):
+                                merged[name] = (s, pred.category)
 
                         items = [(n, s, int(c)) for n, (s, c) in merged.items()]
-                        w = (
-                            rec.width
-                            if (rec.is_new or rec.changed or rec.width is None or rec.height is None)
-                            else None
-                        )
-                        h = (
-                            rec.height
-                            if (rec.is_new or rec.changed or rec.width is None or rec.height is None)
-                            else None
-                        )
-                        per_file_items.append(
-                            DBItem(rec.file_id, items, w, h, tagger_sig=tagger_sig, tagged_at=time.time())
-                        )
 
-                        # UI統計用フラグはここで反映（DBはフラッシュ時に書く）
-                        previous_sig = rec.stored_tagger_sig
+                        # width/height の埋め方：
+                        #   既存が無ければ PIL から拾う。既にDB側にあれば None のまま（coalesceで据置）
+                        need_wh = rec.is_new or rec.changed or rec.width is None or rec.height is None
+                        w = pil.width if need_wh else None
+                        h = pil.height if need_wh else None
+
+                        per_file_items.append(DBItem(rec.file_id, items, w, h, tagger_sig=tagger_sig, tagged_at=now_ts))
+
+                        # UI 統計更新
+                        prev_sig = rec.stored_tagger_sig
                         rec.needs_tagging = False
                         rec.tag_exists = True
                         rec.stored_tagger_sig = tagger_sig
                         rec.current_tagger_sig = tagger_sig
-                        rec.last_tagged_at = time.time()
-                        if (not rec.is_new) and (not rec.changed) and (previous_sig != tagger_sig):
+                        rec.last_tagged_at = now_ts
+                        if (not rec.is_new) and (not rec.changed) and (prev_sig != tagger_sig):
                             stats["retagged"] = int(stats.get("retagged", 0)) + 1
 
-                    # ここで即 enqueue（DBWriter がまとめる）
+                    # enqueue
                     for it in per_file_items:
                         dbw.put(it)
 
-                    # 進捗（推論完了ベース）
+                    # 健康チェック
+                    if (processed_tags % 128) == 0:
+                        try:
+                            dbw.raise_if_failed()
+                        except Exception:
+                            logger.exception("DBWriter died while tagging; processed=%d", processed_tags)
+                            raise
+                        try:
+                            logger.debug("DBWriter health: qsize=%d written=%d", dbw.qsize(), dbw.written)
+                        except Exception:
+                            pass
+
+                    # 進捗
                     done_now = len(per_file_items)
                     processed_tags += done_now
                     fts_processed += done_now
@@ -926,57 +1085,56 @@ def run_index_once(
                     _emit(IndexProgress(phase=IndexPhase.TAG, done=processed_tags, total=len(tag_records)))
                     _emit(IndexProgress(phase=IndexPhase.FTS, done=fts_processed, total=len(tag_records)))
 
-                    # ⭐ ここから “このバッチ分の” メモリ開放（PIL画像・結果配列）
-                    for rec in batch_valid:
-                        img = rec.image
-                        rec.image = None
+                    # メモリ開放（PIL）
+                    for _im in batch_images:
                         try:
-                            if img is not None:
-                                img.close()
+                            _im.close()
                         except Exception:
                             pass
-                        del img
+                    batch_images.clear()
+                    per_file_items.clear()
 
-                    # リストの参照も切る（できるだけ早く）
-                    try:
-                        images.clear()
-                        per_file_items.clear()
-                    except Exception:
-                        pass
-                    del images
-                    del per_file_items
-                    del results
-
-                    # 数千枚に一回だけ軽くGC（断片化対策）
+                    # 断片化対策でたまにGC
                     if (processed_tags % 4096) == 0:
                         import gc
 
                         gc.collect()
 
-                    idx += len(batch_slice)
             finally:
-                # ここで必ず止める（タグ付けが例外で落ちても確実に解放）
+                # Prefetch を必ず停止
+                try:
+                    loader.close()
+                except Exception:
+                    pass
+
                 if dbw is not None:
                     try:
                         dbw.stop(flush=True, timeout=30.0)
                     finally:
                         dbw = None
-            # DBWriter を停止・待機
-            dbw.put(DBStop())
-            dbw.join()
-            # （上の finally で止め済み。ここは呼ばない or 保険で None チェック）
-            # dbw.raise_if_failed()
+                # ★ 必ず quiesce を解除（例外やキャンセルでも）
+                if quiesced:
+                    try:
+                        end_quiesce()
+                    except Exception:
+                        logger.exception("end_quiesce failed")
+                    quiesced = False
 
+            # （以降は元の後処理と同じ）
             stats["tagged"] = processed_tags
             logger.info("Tagging complete: %d image(s) processed", processed_tags)
             _emit(IndexProgress(phase=IndexPhase.TAG, done=processed_tags, total=len(tag_records)), force=True)
             _emit(IndexProgress(phase=IndexPhase.FTS, done=fts_processed, total=len(tag_records)), force=True)
 
+        # ★ ここで安全接続を再オープン（以降の EMBED/HNSW/FTS 再構築で使用）
+        if conn is None:
+            conn = get_conn(db_path)
+
         # ===== EMBEDDING =====（ここは従来どおりでOKだが、必要なら同様に一括 executemany 化できる）
         embed_records = [r for r in records if r.needs_embedding and not r.load_failed]
         _emit(IndexProgress(phase=IndexPhase.EMBED, done=0, total=len(embed_records)), force=True)
 
-        if False and embed_records and not cancelled:
+        if embed_records and not cancelled:
             try:
                 embedder = embedder_override or _resolve_embedder(settings)
             except Exception as exc:
@@ -1135,14 +1293,28 @@ def run_index_once(
             rec.image = None
 
     finally:
-        conn.close()
         try:
+            if conn is not None:
+                conn.close()
             if dbw is not None:
                 dbw.stop(flush=not cancelled, timeout=30.0)
         except Exception:
             logger.exception("dbwriter stop failed")
         finally:
             dbw = None
+            conn = None
+        # ★ quiesce を解除し、安全接続に戻す（以降の埋め込み/HNSW/FTSは通常モード）
+        # ★ オフライン FTS 再構築（UNSAFE 区間内でやってしまう）
+        try:
+            if quiesced and not cancelled:
+                logger.info("rebuild_fts_offline: start")
+                rebuilt = rebuild_fts_offline(db_path, topk=int(getattr(settings, "fts_topk", 128) or 128))
+                logger.info("rebuild_fts_offline: done (%d rows)", rebuilt)
+        finally:
+            if quiesced:
+                end_quiesce()
+                conn = _get_conn(db_path)  # 安全(WAL)接続に戻す
+                quiesced = False
 
     # ===== HNSW 追記 =====
     _emit(IndexProgress(phase=IndexPhase.HNSW, done=0, total=len(hnsw_additions)), force=True)
@@ -1211,7 +1383,7 @@ def retag_query(
 
     predicate = where_sql.strip() or "1=1"
     arguments: tuple[object, ...] = tuple(params or ())
-    conn = get_conn(db_path)
+    conn = get_conn(db_path, allow_when_quiesced=True)
     try:
         # predicate 内で f.* を参照できるように、外側の UPDATE にもエイリアスを付ける
         sql = "UPDATE files AS f " "SET tagger_sig = NULL, last_tagged_at = NULL " f"WHERE {predicate}"

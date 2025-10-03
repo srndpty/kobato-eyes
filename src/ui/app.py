@@ -17,6 +17,9 @@ if HEADLESS:
     os.environ.setdefault("QT_OPENGL", "software")
 
 logger = logging.getLogger(__name__)
+# import faulthandler, threading
+# faulthandler.enable()
+# threading.Timer(60, faulthandler.dump_traceback).start()
 
 
 def _resolve_log_level(value: str | None) -> int:

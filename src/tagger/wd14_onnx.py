@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import os
 import weakref
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from time import perf_counter
@@ -174,8 +175,43 @@ class WD14Tagger(ITagger):
         _log_provider_details(self._session, chosen_providers)
         _ACTIVE_TAGGERS.add(self)
 
+        # ==== 並列前処理の設定 ====
+        try:
+            _cpu = os.cpu_count() or 4
+        except Exception:
+            _cpu = 4
+        self._pre_workers = int(os.getenv("KE_PREPROC_WORKERS", str(min(8, _cpu))))
+        # OpenCV の内部スレッドが暴れないように抑制（必要なら環境変数で上書き）
+        try:
+            cv2.setNumThreads(int(os.getenv("KE_CV2_THREADS", "1")))
+        except Exception:
+            pass
+        self._pre_exec: ThreadPoolExecutor | None = None
+        if self._pre_workers > 1:
+            # 注意: 終了時のクリーンアップは弱参照の finalizer やプロセス終了で開放される前提
+            self._pre_exec = ThreadPoolExecutor(max_workers=self._pre_workers, thread_name_prefix="ke-pre")
+
         if len(self._output_names) != 1:
             raise RuntimeError("Expected a single output tensor from WD14 ONNX model, got " f"{self._output_names}")
+
+    # 既存の _preprocess（1枚→(1,H,W,3)）は残しつつ、
+    # バッチ用の「1枚→(H,W,3) float32」を返す軽量版を追加
+    def _preprocess_np(self, image: Image.Image) -> np.ndarray:
+        """1枚ぶんを (H, W, 3) float32 (BGR, 0..255) で返す。"""
+        height = self._input_size
+
+        # alpha to white（PillowはC実装でGIL解放）
+        image = image.convert("RGBA")
+        new_image = Image.new("RGBA", image.size, "WHITE")
+        new_image.paste(image, mask=image)
+        image = new_image.convert("RGB")
+        rgb = np.asarray(image)  # HWC, uint8
+        bgr = rgb[:, :, ::-1]  # RGB -> BGR
+
+        bgr = self.make_square(bgr, height)
+        bgr = self.smart_resize(bgr, height)
+        # ここで float32 化。正規化はモデル仕様に合わせ 0..255 のまま（従来どおり）
+        return bgr.astype(np.float32, copy=False)
 
     # ==== 追加: しきい値ベクトルを作る ====
     def _build_threshold_vector(self, thresholds: dict[TagCategory | int, float]) -> np.ndarray:
@@ -310,10 +346,29 @@ class WD14Tagger(ITagger):
             return []
 
         total_start = perf_counter()
+        # ---------- 並列前処理 ----------
         preprocess_start = perf_counter()
-        batch = np.vstack([self._preprocess(image) for image in image_list])
+        B = len(image_list)
+        H = self._input_size
+        # 事前確保した一塊のバッファ（再利用はタグ付け側のバッチライフサイクル次第）
+        batch = np.empty((B, H, H, 3), dtype=np.float32)
+
+        if self._pre_exec is None or self._pre_workers <= 1 or B == 1:
+            # シングルスレッド（既定動作と同じ）
+            for i, im in enumerate(image_list):
+                batch[i] = self._preprocess_np(im)
+        else:
+            # 並列（Pillow/CV2 はC実装でGIL解放するので効果あり）
+            # enumerate を渡して index を保つ
+            def _work(pair):
+                i, im = pair
+                batch[i] = self._preprocess_np(im)
+
+            # map は順序維持、各タスクはC実装で実行
+            self._pre_exec.map(_work, enumerate(image_list), chunksize=max(1, B // (self._pre_workers * 2)))
         preprocess_ms = (perf_counter() - preprocess_start) * 1000.0
 
+        # ---------- 推論 ----------
         ort_start = perf_counter()
         outputs = self._session.run(self._output_names, {self._input_name: batch})
         ort_ms = (perf_counter() - ort_start) * 1000.0
