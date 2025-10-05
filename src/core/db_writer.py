@@ -106,24 +106,30 @@ class DBWriter(threading.Thread):
     def written(self) -> int:
         return self._written
 
-    def stop(self, *, flush: bool = True, timeout: float | None = 10.0) -> None:
-        """
-        キューを閉じ、残りを flush してから停止。join まで行う。
-        """
+    def stop(self, *, flush: bool = True, timeout: float | None = 10.0, wait_forever: bool = False) -> None:
+        """キューを閉じ、残りを flush してから停止。join まで行う。"""
+        print("DBWriter: stopping...")
         try:
             if flush:
-                # 先にフラッシュ要求を入れてから停止トークン
                 self._q.put(DBFlush())
             self._q.put(DBStop())
         except Exception:
-            # すでに終了/破棄されている等。join だけ試す。
             pass
         self._stop_evt.set()
-        try:
-            self.join(timeout=timeout)
-        except RuntimeError:
-            # すでに join 済みなど
-            pass
+
+        if wait_forever:
+            # 必ず止まるまで待つ（大規模マージ用）
+            while self.is_alive():
+                try:
+                    self.join(timeout=1.0)
+                except RuntimeError:
+                    break
+        else:
+            try:
+                self.join(timeout=timeout)
+            except RuntimeError:
+                pass
+
         # スレッド内例外をメイン側へ
         self.raise_if_failed()
 

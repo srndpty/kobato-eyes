@@ -6,6 +6,7 @@ import hashlib
 import logging
 import os
 import queue
+import sqlite3
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -780,47 +781,51 @@ class _FileRecord:
     load_failed: bool = False
 
 
-def _settle_after_quiesce(db_path: str, attempts: int = 10) -> None:
-    print("_settle_after_quiesce")
-    import sqlite3
-    import time
-
-    delay = 0.2
-    for i in range(attempts):
+def wait_for_unlock(db_path: str, timeout: float = 15.0) -> bool:
+    """短命接続で軽く叩き、ロックが抜けるのを待つ（最大 timeout 秒）。"""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
         try:
-            print(f"... attempt {i+1}/{attempts}")
-            conn = sqlite3.connect(db_path, timeout=60.0)
-            cur = conn.cursor()
-            # まずは待ち時間を長めに
-            cur.execute("PRAGMA busy_timeout=60000")
-            # 念のためNORMALへ
-            cur.execute("PRAGMA locking_mode=NORMAL")
-            # WALへ（ロック中だと失敗するので try/except でもう一段リトライ）
-            cur.execute("PRAGMA journal_mode=WAL")
-            # 残っている書き物を掃除
-            cur.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-            # 軽く最適化
-            cur.execute("PRAGMA optimize")
-            conn.commit()
-            conn.close()
-            print("... settled")
-            return  # 成功
-        except sqlite3.OperationalError:
-            # 他がまだ握っている場合は待って再試行
-            time.sleep(delay)
-            delay = min(delay * 1.5, 2.0)
-        except Exception:
-            time.sleep(delay)
-            delay = min(delay * 1.5, 2.0)
+            with sqlite3.connect(db_path, timeout=1.0) as c:
+                # 何か軽いクエリで OK（PRAGMA でも SELECT でも可）
+                c.execute("SELECT 1")
+                return True
+        except sqlite3.OperationalError as e:
+            if "locked" not in str(e).lower():
+                # ロック以外は待っても無意味
+                return True
+        time.sleep(0.25)
+    return False
 
-    # ここまで来ることは稀。最悪でも最後に一度だけ best-effort で掃除
+
+def _settle_after_quiesce(db_path: str, progress_cb=None) -> None:
+    logger.info("_settle_after_quiesce (best-effort)")
+    # 1) ロックが抜けるのを最大15秒だけ待つ（抜けなくても続行）
+    ok = wait_for_unlock(db_path, timeout=15.0)
+    if not ok:
+        logger.warning("settle: DB still locked; proceeding best-effort")
+
+    # 2) 掃除専用の短命接続で実行（既存接続に PRAGMA を当てない）
     try:
-        print("... final best-effort cleanup")
-        conn = sqlite3.connect(db_path, timeout=60.0)
-        conn.execute("PRAGMA wal_checkpoint(PASSIVE)")
-        conn.close()
-    except Exception:
-        pass
+        with sqlite3.connect(db_path, timeout=30.0) as conn:
+            cur = conn.cursor()
+            # 少し広めに
+            cur.execute("PRAGMA busy_timeout=30000")
+            # MEMORY→WAL への切替は強要しない。チェックポイント＆最適化だけ
+            try:
+                cur.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            except sqlite3.OperationalError as e:
+                logger.warning("settle: wal_checkpoint failed: %s", e)
+            try:
+                cur.execute("PRAGMA optimize")
+            except sqlite3.OperationalError as e:
+                logger.warning("settle: optimize failed: %s", e)
+            conn.commit()
+    except Exception as e:
+        logger.warning("settle: sweep connection failed: %s", e)
+
+    # 3) ほんの少しだけ間を空けると Windows だと安定することが多い
+    time.sleep(0.2)
 
 
 def run_index_once(
@@ -1140,8 +1145,8 @@ def run_index_once(
 
                 # 2) パラメータ
                 current_batch = int(batch_size)
-                prefetch_depth = int(os.environ.get("KE_PREFETCH_DEPTH", "2"))
-                io_workers = int(os.environ.get("KE_IO_WORKERS", "0") or "0")
+                prefetch_depth = int(os.environ.get("KE_PREFETCH_DEPTH", "12"))
+                io_workers = int(os.environ.get("KE_IO_WORKERS", "16") or "16")
                 if io_workers <= 0:
                     io_workers = None  # 自動
 
@@ -1283,7 +1288,7 @@ def run_index_once(
 
                 if dbw is not None:
                     try:
-                        dbw.stop(flush=True, timeout=30.0)
+                        dbw.stop(flush=True, wait_forever=True)
                     finally:
                         dbw = None
                 # ★ 必ず quiesce を解除（例外やキャンセルでも）

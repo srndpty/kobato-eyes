@@ -192,6 +192,7 @@ class WD14Tagger(ITagger):
             self._pre_exec = ThreadPoolExecutor(max_workers=self._pre_workers, thread_name_prefix="ke-pre")
 
         self._topk_cap = 128  # 上限256個まで
+        self._score_floor = float(os.getenv("KE_TAG_SCORE_FLOOR", "0.1"))
 
         if len(self._output_names) != 1:
             raise RuntimeError("Expected a single output tensor from WD14 ONNX model, got " f"{self._output_names}")
@@ -296,7 +297,8 @@ class WD14Tagger(ITagger):
         logits = outputs[0]
         # 以降は従来 infer_batch() の後半（post）と同じ処理へ
         post_start = perf_counter()
-        results = self._postprocess_logits(logits, thresholds, max_tags)
+        results = self._postprocess_logits_topk(logits=logits, thresholds=thresholds, max_tags=max_tags)
+        # results = self._postprocess_logits(logits, thresholds, max_tags)
         post_ms = (perf_counter() - post_start) * 1000.0
 
         # ログ（従来と同じ書式に揃える）
@@ -335,6 +337,10 @@ class WD14Tagger(ITagger):
             if resolved_thresholds == self._default_thresholds
             else self._build_threshold_vector(resolved_thresholds)
         )
+        # ★ 全カテゴリ共通の下限（例: 0.1）を合流
+        floor = getattr(self, "_score_floor", 0.0)
+        if floor > 0.0:
+            np.maximum(thr_vec, floor, out=thr_vec)  # in-place で底上げ
 
         mask = probs >= thr_vec
         masked = np.where(mask, probs, -np.inf)
@@ -682,6 +688,9 @@ class WD14Tagger(ITagger):
             if resolved_thresholds == self._default_thresholds
             else self._build_threshold_vector(resolved_thresholds)
         )
+        floor = getattr(self, "_score_floor", 0.0)
+        if floor > 0.0:
+            np.maximum(thr_vec, floor, out=thr_vec)
         # マスク（B,C）
         mask = probs >= thr_vec  # broadcast
 
