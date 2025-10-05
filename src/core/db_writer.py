@@ -175,6 +175,12 @@ class DBWriter(threading.Thread):
                 if self._unsafe_fast and self._stage_tags_in_temp:
                     self._merge_staging_into_persistent(conn)
             finally:
+                # ← ここを追加
+                if self._unsafe_fast:
+                    try:
+                        self._restore_normal_mode(conn)
+                    except Exception as e:
+                        self._log.warning("DBWriter: restore_normal_mode failed: %s", e)
                 conn.close()
         except BaseException as e:
             self._exc = e
@@ -184,6 +190,34 @@ class DBWriter(threading.Thread):
             finally:
                 self._exc = e
             self._stop_evt.set()
+
+    def _restore_normal_mode(self, conn: sqlite3.Connection) -> None:
+        # ここでは例外は潰す（best-effort）
+        try:
+            conn.execute("END")  # 念のためトランザクション強制終了
+        except Exception:
+            pass
+        try:
+            conn.execute("PRAGMA locking_mode=NORMAL")
+        except Exception:
+            pass
+        try:
+            # MEMORY は接続ローカルだが、いったんDELETEに戻してからWALへ
+            conn.execute("PRAGMA journal_mode=DELETE")
+        except Exception:
+            pass
+        try:
+            conn.execute("PRAGMA journal_mode=WAL")
+        except Exception:
+            pass
+        try:
+            conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        except Exception:
+            pass
+        try:
+            conn.execute("PRAGMA synchronous=NORMAL")
+        except Exception:
+            pass
 
     def _create_temp_staging(self, conn: sqlite3.Connection) -> None:
         # TEMP は temp_store=MEMORY ならRAM上。索引は後で作るのでここでは無し。
@@ -281,16 +315,19 @@ class DBWriter(threading.Thread):
         - それ以外(従来/WAL):
             └ これまで通り tags upsert → file_tags DELETE→INSERT → (必要なら)FTS → files更新
         """
+        print("_flush called with", len(items), "items")
         if not items:
             return
 
         # ---------- ① UNSAFE_FAST + TEMPステージング ----------
         if self._unsafe_fast and getattr(self, "_stage_tags_in_temp", False):
+            print("... using UNSAFE_FAST + TEMP staging path")
             # TEMP だけをまとめてコミット（BEGIN IMMEDIATE でもよいが、TEMPのみなので通常 BEGIN で十分）
             conn.execute("BEGIN")
             now = time.time()
 
             # a) タグ定義（name, category）だけを集約（重複は IGNORE）
+            print("... inserting tag definitions into temp.tmp_tag_defs")
             defs_set: set[tuple[str, int]] = set()
             for it in items:
                 for n, _s, c in it.tags:
@@ -302,6 +339,7 @@ class DBWriter(threading.Thread):
                 )
 
             # b) 画像ごとのタグ行（file_id, tag_name, score, category）
+            print("... inserting file tags into temp.tmp_file_tags")
             tag_rows: list[tuple[int, str, float, int]] = []
             for it in items:
                 for n, s, c in it.tags:
@@ -313,6 +351,7 @@ class DBWriter(threading.Thread):
                 )
 
             # c) files メタ（幅/高は None のときは据え置き。PK=file_id なので UPSERT）
+            print("... updating file metadata into temp.tmp_files_meta")
             metas: list[tuple[int, int | None, int | None, str, float]] = []
             for it in items:
                 sig = getattr(it, "tagger_sig", None) or self._default_tagger_sig
@@ -331,6 +370,7 @@ class DBWriter(threading.Thread):
                 )
 
             # d) FTS は完全スキップ（後段でオフライン再構築）
+            print("... skipping FTS update (to be done offline later)")
             conn.commit()
             self._written += len(items)
             if self._debug:
@@ -341,6 +381,7 @@ class DBWriter(threading.Thread):
 
         # ---------- ② 従来/WAL パス ----------
         conn.execute("BEGIN IMMEDIATE")
+        print("... using standard WAL path")
 
         # 1) tags upsert（新規だけ抽出）＋ cache 更新
         new_defs = []

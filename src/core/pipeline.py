@@ -12,7 +12,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Callable, Iterable, Iterator, Mapping, Optional, Sequence, Set, Tuple
+from typing import Callable, Iterable, Iterator, List, Mapping, Optional, Sequence, Set, Tuple
 
 import numpy as np
 from PIL import Image
@@ -131,6 +131,125 @@ class PrefetchLoader:
         if self._th.is_alive():
             self._th.join(timeout=2.0)
         logger.info("PrefetchLoader: stop")
+
+
+class PrefetchLoaderPrepared:
+    """
+    画像を並列ロードして前処理（PIL→RGB、正方形化＋リサイズ）まで済ませ、
+    (paths, np_batch, sizes) を事前に用意して供給するローダ。
+      - paths: List[str]（バッチ内のファイルパス。順序は元の順）
+      - np_batch: np.ndarray 形状 (B, H, W, 3), float32
+      - sizes: List[Tuple[int,int]] 元画像の (width, height)
+    """
+
+    def __init__(
+        self,
+        paths: List[str],
+        *,
+        tagger,  # WD14Tagger インスタンス（prepare_batch_pil を呼ぶ）
+        batch_size: int,
+        prefetch_batches: int = 2,
+        io_workers: int | None = None,
+    ) -> None:
+        self._paths = list(paths)
+        self._B = int(batch_size)
+        self._depth = max(1, int(prefetch_batches))
+        cpu = os.cpu_count() or 4
+        self._io_workers: int = max(1, int(io_workers or min(8, cpu)))  # ← int のまま保持
+        self._tagger = tagger
+
+        # (paths, np_batch, sizes) or None(sentinal)
+        self._q: "queue.Queue[tuple[list[str], np.ndarray, list[tuple[int,int]]] | None]" = queue.Queue(self._depth)
+        self._stop = threading.Event()
+        self._th = threading.Thread(target=self._producer, name="PL-Feeder", daemon=True)
+        self._th.start()
+        logger.info(
+            "PrefetchLoaderPrepared: start (B=%d, depth=%d, io_workers=%d)", self._B, self._depth, self._io_workers
+        )
+
+    # 個別ロード（PIL）
+    def _load_one(self, p: str) -> tuple[str, Image.Image | None, tuple[int, int] | None]:
+        try:
+            with Image.open(p) as im:
+                im.load()  # デコードを完了（ハンドル即解放）
+                w, h = im.size
+                rgb = im.convert("RGB")  # 透明合成は tagger 側でOKだが、簡便にRGBへ
+                return (p, rgb, (w, h))
+        except Exception as e:
+            logger.warning("PrefetchLoaderPrepared: failed to load %s: %s", p, e)
+            return (p, None, None)
+
+    def _producer(self) -> None:
+        try:
+            N = len(self._paths)
+            with ThreadPoolExecutor(max_workers=self._io_workers, thread_name_prefix="ke-io") as ex:
+                for i in range(0, N, self._B):
+                    if self._stop.is_set():
+                        break
+
+                    batch_paths = self._paths[i : i + self._B]
+                    # 並列ロード（順序は futures から辞書に集めて後で整える）
+                    futs = [ex.submit(self._load_one, p) for p in batch_paths]
+                    # 収集（まずは path -> (PIL or None, size or None)）
+                    tmp: dict[str, tuple[Image.Image | None, tuple[int, int] | None]] = {}
+                    for fut in as_completed(futs):
+                        p, pil, sz = fut.result()
+                        tmp[p] = (pil, sz)
+
+                    # 入力量産（順序を batch_paths で揃える）
+                    pil_list: list[Image.Image] = []
+                    sizes: list[tuple[int, int]] = []
+                    kept_paths: list[str] = []
+                    for p in batch_paths:
+                        pil, sz = tmp.get(p, (None, None))
+                        if pil is None or sz is None:
+                            continue
+                        pil_list.append(pil)
+                        sizes.append(sz)
+                        kept_paths.append(p)
+
+                    if not pil_list:
+                        # 空でも終端はまだ先なので継続
+                        continue
+
+                    # 前処理（PIL -> np.ndarray (B,H,W,3) float32）
+                    try:
+                        np_batch = self._tagger.prepare_batch_pil(pil_list)
+                    finally:
+                        # PIL バッファ解放（np_batchは tagger 側で確保済み）
+                        for im in pil_list:
+                            try:
+                                im.close()
+                            except Exception:
+                                pass
+
+                    # キューへ
+                    self._q.put((kept_paths, np_batch, sizes))
+                    if self._stop.is_set():
+                        break
+        finally:
+            try:
+                self._q.put(None, timeout=1)
+            except Exception:
+                pass
+
+    def __iter__(self) -> Iterator[Tuple[list[str], np.ndarray, list[tuple[int, int]]]]:
+        while True:
+            item = self._q.get()
+            if item is None:
+                return
+            yield item
+
+    def close(self) -> None:
+        self._stop.set()
+        try:
+            while True:
+                self._q.get_nowait()
+        except Exception:
+            pass
+        if self._th.is_alive():
+            self._th.join(timeout=2.0)
+        logger.info("PrefetchLoaderPrepared: stop")
 
 
 class IndexPhase(Enum):
@@ -661,6 +780,49 @@ class _FileRecord:
     load_failed: bool = False
 
 
+def _settle_after_quiesce(db_path: str, attempts: int = 10) -> None:
+    print("_settle_after_quiesce")
+    import sqlite3
+    import time
+
+    delay = 0.2
+    for i in range(attempts):
+        try:
+            print(f"... attempt {i+1}/{attempts}")
+            conn = sqlite3.connect(db_path, timeout=60.0)
+            cur = conn.cursor()
+            # まずは待ち時間を長めに
+            cur.execute("PRAGMA busy_timeout=60000")
+            # 念のためNORMALへ
+            cur.execute("PRAGMA locking_mode=NORMAL")
+            # WALへ（ロック中だと失敗するので try/except でもう一段リトライ）
+            cur.execute("PRAGMA journal_mode=WAL")
+            # 残っている書き物を掃除
+            cur.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            # 軽く最適化
+            cur.execute("PRAGMA optimize")
+            conn.commit()
+            conn.close()
+            print("... settled")
+            return  # 成功
+        except sqlite3.OperationalError:
+            # 他がまだ握っている場合は待って再試行
+            time.sleep(delay)
+            delay = min(delay * 1.5, 2.0)
+        except Exception:
+            time.sleep(delay)
+            delay = min(delay * 1.5, 2.0)
+
+    # ここまで来ることは稀。最悪でも最後に一度だけ best-effort で掃除
+    try:
+        print("... final best-effort cleanup")
+        conn = sqlite3.connect(db_path, timeout=60.0)
+        conn.execute("PRAGMA wal_checkpoint(PASSIVE)")
+        conn.close()
+    except Exception:
+        pass
+
+
 def run_index_once(
     db_path: str | Path,
     settings: PipelineSettings | None = None,
@@ -909,10 +1071,10 @@ def run_index_once(
             processed_tags = 0
             fts_processed = 0
             last_logged = 0
+            quiesced = False
 
             try:
                 dbw = None
-                quiesced = False
                 begin_quiesce()
                 quiesced = True
                 tagger = _resolve_tagger(
@@ -965,27 +1127,32 @@ def run_index_once(
                     io_workers = None  # 自動
 
                 # 3) PrefetchLoader 起動
-                loader = PrefetchLoader(
+                loader = PrefetchLoaderPrepared(
                     tag_paths,
                     batch_size=current_batch,
                     prefetch_batches=prefetch_depth,
                     io_workers=io_workers,
+                    tagger=tagger,
                 )
 
-                def _infer_with_retry(images: list[Image.Image]) -> list[TagResult]:
-                    """OOM などで落ちたバッチを半分に割って再実行（再帰）"""
+                def _infer_with_retry_np(rgb_list: list[np.ndarray]) -> list[TagResult]:
+                    """
+                    OOM 等で落ちたらバッチを分割して再試行（prepared 経路）。
+                    rgb_list: list of np.ndarray (H,W,3, uint8, RGB)
+                    """
                     try:
-                        return tagger.infer_batch(
-                            images,
+                        np_batch = tagger.prepare_batch_from_rgb_np(rgb_list)
+                        return tagger.infer_batch_prepared(
+                            np_batch,
                             thresholds=thresholds or None,
                             max_tags=max_tags_map or None,
                         )
                     except Exception:
-                        if len(images) <= 1:
+                        if len(rgb_list) <= 1:
                             raise
-                        mid = len(images) // 2
-                        left = _infer_with_retry(images[:mid])
-                        right = _infer_with_retry(images[mid:])
+                        mid = len(rgb_list) // 2
+                        left = _infer_with_retry_np(rgb_list[:mid])
+                        right = _infer_with_retry_np(rgb_list[mid:])
                         return left + right
 
                 for batch in loader:
@@ -993,44 +1160,48 @@ def run_index_once(
                         cancelled = True
                         break
 
-                    # loader は (paths, images) を返す前提
                     if not batch:
                         continue
                     try:
-                        batch_paths, batch_imgs = batch
+                        batch_paths, batch_np_rgb, sizes = batch  # list[str], list[np.ndarray | None]
                     except Exception:
-                        logger.error("PrefetchLoader batch has unexpected shape: %r", type(batch))
+                        logger.error("PrefetchLoaderPrepared batch has unexpected shape: %r", type(batch))
                         raise
 
                     # 成功ロードだけ拾ってレコードに対応付け
-                    batch_images: list[Image.Image] = []
                     batch_recs: list[_FileRecord] = []
-                    for p, im in zip(batch_paths, batch_imgs):
-                        if im is None:
+                    rgb_list: list[np.ndarray] = []
+                    wh_needed: list[tuple[int | None, int | None]] = []  # (w,h) or (None,None)
+                    for p, arr, (_w, _h) in zip(batch_paths, batch_np_rgb, sizes):
+                        if arr is None:
                             continue
                         rec = rec_by_path.get(p)
                         if rec is None:
                             continue
-                        batch_images.append(im)
                         batch_recs.append(rec)
+                        rgb_list.append(arr)
+                        # 幅・高さが必要なら np.shape から拾う（PIL 不要）
+                        need_wh = rec.is_new or rec.changed or rec.width is None or rec.height is None
+                        if need_wh:
+                            h, w = arr.shape[:2]
+                            wh_needed.append((int(w), int(h)))
+                        else:
+                            wh_needed.append((None, None))
 
-                    if not batch_images:
+                    if not rgb_list:
                         continue
 
-                    # --- 推論（失敗時はローカルで分割再試行） ---
+                    # --- 推論（prepared 経路） ---
                     try:
-                        results = _infer_with_retry(batch_images)
+                        results = _infer_with_retry_np(rgb_list)
                     except Exception as exc:
-                        logger.exception("Tagger failed for a prefetch batch: %s", exc)
-                        # このバッチは捨てて次へ（ログだけ残し、全体は継続）
-                        # もしくは continue ではなく raise にして全停止したい場合は上を差し替え
+                        logger.exception("Tagger failed for a prefetch-prepared batch: %s", exc)
                         continue
 
                     # --- 推論結果 → DBWriter ---
                     per_file_items: list[DBItem] = []
                     now_ts = time.time()
-
-                    for rec, result, pil in zip(batch_recs, results, batch_images):
+                    for rec, result, (w_opt, h_opt) in zip(batch_recs, results, wh_needed):
                         merged: dict[str, tuple[float, TagCategory]] = {}
                         for pred in result.tags:
                             name = pred.name.strip()
@@ -1042,16 +1213,11 @@ def run_index_once(
                                 merged[name] = (s, pred.category)
 
                         items = [(n, s, int(c)) for n, (s, c) in merged.items()]
+                        per_file_items.append(
+                            DBItem(rec.file_id, items, w_opt, h_opt, tagger_sig=tagger_sig, tagged_at=now_ts)
+                        )
 
-                        # width/height の埋め方：
-                        #   既存が無ければ PIL から拾う。既にDB側にあれば None のまま（coalesceで据置）
-                        need_wh = rec.is_new or rec.changed or rec.width is None or rec.height is None
-                        w = pil.width if need_wh else None
-                        h = pil.height if need_wh else None
-
-                        per_file_items.append(DBItem(rec.file_id, items, w, h, tagger_sig=tagger_sig, tagged_at=now_ts))
-
-                        # UI 統計更新
+                        # UI統計更新
                         prev_sig = rec.stored_tagger_sig
                         rec.needs_tagging = False
                         rec.tag_exists = True
@@ -1061,23 +1227,11 @@ def run_index_once(
                         if (not rec.is_new) and (not rec.changed) and (prev_sig != tagger_sig):
                             stats["retagged"] = int(stats.get("retagged", 0)) + 1
 
-                    # enqueue
+                    # enqueue（DBWriter がまとめる）
                     for it in per_file_items:
                         dbw.put(it)
 
-                    # 健康チェック
-                    if (processed_tags % 128) == 0:
-                        try:
-                            dbw.raise_if_failed()
-                        except Exception:
-                            logger.exception("DBWriter died while tagging; processed=%d", processed_tags)
-                            raise
-                        try:
-                            logger.debug("DBWriter health: qsize=%d written=%d", dbw.qsize(), dbw.written)
-                        except Exception:
-                            pass
-
-                    # 進捗
+                    # 進捗（推論完了ベース）
                     done_now = len(per_file_items)
                     processed_tags += done_now
                     fts_processed += done_now
@@ -1086,12 +1240,12 @@ def run_index_once(
                     _emit(IndexProgress(phase=IndexPhase.FTS, done=fts_processed, total=len(tag_records)))
 
                     # メモリ開放（PIL）
-                    for _im in batch_images:
+                    for _im in rgb_list:
                         try:
                             _im.close()
                         except Exception:
                             pass
-                    batch_images.clear()
+                    rgb_list.clear()
                     per_file_items.clear()
 
                     # 断片化対策でたまにGC
@@ -1101,6 +1255,7 @@ def run_index_once(
                         gc.collect()
 
             finally:
+                print("finalizing tagging phase...")
                 # Prefetch を必ず停止
                 try:
                     loader.close()
@@ -1120,11 +1275,18 @@ def run_index_once(
                         logger.exception("end_quiesce failed")
                     quiesced = False
 
+                # ★ ここで“整地”を実行
+                try:
+                    _settle_after_quiesce(db_path)
+                except Exception:
+                    logger.warning("settle_after_quiesce failed; continuing")
+
             # （以降は元の後処理と同じ）
             stats["tagged"] = processed_tags
             logger.info("Tagging complete: %d image(s) processed", processed_tags)
             _emit(IndexProgress(phase=IndexPhase.TAG, done=processed_tags, total=len(tag_records)), force=True)
             _emit(IndexProgress(phase=IndexPhase.FTS, done=fts_processed, total=len(tag_records)), force=True)
+            print("... tagging phase finalized")
 
         # ★ ここで安全接続を再オープン（以降の EMBED/HNSW/FTS 再構築で使用）
         if conn is None:
