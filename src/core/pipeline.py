@@ -1072,6 +1072,24 @@ def run_index_once(
             fts_processed = 0
             last_logged = 0
             quiesced = False
+            merge_stage_label = {
+                "merge.delete": "Deleting old tags",
+                "merge.insert": "Writing new tags",
+                "merge.update": "Updating files",
+                "merge.index": "Rebuilding indexes",
+            }
+
+            def _dbw_progress(kind: str, done: int, total: int) -> None:
+                # バーは FTS を流用（ラベルは Finalizing... に切替）
+                nonlocal fts_processed
+                fts_processed = done  # 単純に done を反映
+                _emit(IndexProgress(phase=IndexPhase.FTS, done=done, total=total))
+                # ステータスバーに文言を出す（任意。なければ省略）
+                try:
+                    label = merge_stage_label.get(kind.split(".")[0], "Finalizing...")
+                    logger.info("finalizing: %s %d/%d", label, done, total)
+                except Exception:
+                    pass
 
             try:
                 dbw = None
@@ -1108,6 +1126,7 @@ def run_index_once(
                     default_tagger_sig=tagger_sig,
                     unsafe_fast=True,  # ← WAL を使わず MEMORY/EXCLUSIVE/OFF
                     skip_fts=True,  # ← FTS 更新は完全停止
+                    progress_cb=_dbw_progress,
                 )
 
                 dbw.start()

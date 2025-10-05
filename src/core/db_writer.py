@@ -7,10 +7,12 @@ import sqlite3
 import threading
 import time
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 from db.connection import get_conn
 from db.repository import bulk_update_files_meta_by_id, fts_replace_rows, upsert_tags
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -53,6 +55,7 @@ class DBWriter(threading.Thread):
         default_tagger_sig: str | None = None,
         unsafe_fast: bool = False,
         skip_fts: bool = False,
+        progress_cb: Optional[Callable[[str, int, int], None]] = None,
     ):
         super().__init__(name="DBWriter", daemon=True)
         self._log = logging.getLogger(__name__)
@@ -75,6 +78,15 @@ class DBWriter(threading.Thread):
         self._debug = os.environ.get("KE_DBWRITER_DEBUG") == "1"
         self._skip_fts = os.environ.get("KE_SKIP_FTS_DURING_TAG") == "1" or (self._fts_topk <= 0)
         self._stage_tags_in_temp = True
+        self._progress_cb = progress_cb
+
+    def _progress(self, kind: str, done: int, total: int) -> None:
+        cb = self._progress_cb
+        if cb:
+            try:
+                cb(kind, int(done), int(max(total, 1)))
+            except Exception:
+                pass
 
     # 現状値の観測用
     def qsize(self) -> int:
@@ -315,19 +327,19 @@ class DBWriter(threading.Thread):
         - それ以外(従来/WAL):
             └ これまで通り tags upsert → file_tags DELETE→INSERT → (必要なら)FTS → files更新
         """
-        print("_flush called with", len(items), "items")
+        logger.debug("_flush called with", len(items), "items")
         if not items:
             return
 
         # ---------- ① UNSAFE_FAST + TEMPステージング ----------
         if self._unsafe_fast and getattr(self, "_stage_tags_in_temp", False):
-            print("... using UNSAFE_FAST + TEMP staging path")
+            logger.debug("... using UNSAFE_FAST + TEMP staging path")
             # TEMP だけをまとめてコミット（BEGIN IMMEDIATE でもよいが、TEMPのみなので通常 BEGIN で十分）
             conn.execute("BEGIN")
             now = time.time()
 
             # a) タグ定義（name, category）だけを集約（重複は IGNORE）
-            print("... inserting tag definitions into temp.tmp_tag_defs")
+            logger.debug("... inserting tag definitions into temp.tmp_tag_defs")
             defs_set: set[tuple[str, int]] = set()
             for it in items:
                 for n, _s, c in it.tags:
@@ -339,7 +351,7 @@ class DBWriter(threading.Thread):
                 )
 
             # b) 画像ごとのタグ行（file_id, tag_name, score, category）
-            print("... inserting file tags into temp.tmp_file_tags")
+            logger.debug("... inserting file tags into temp.tmp_file_tags")
             tag_rows: list[tuple[int, str, float, int]] = []
             for it in items:
                 for n, s, c in it.tags:
@@ -351,7 +363,7 @@ class DBWriter(threading.Thread):
                 )
 
             # c) files メタ（幅/高は None のときは据え置き。PK=file_id なので UPSERT）
-            print("... updating file metadata into temp.tmp_files_meta")
+            logger.debug("... updating file metadata into temp.tmp_files_meta")
             metas: list[tuple[int, int | None, int | None, str, float]] = []
             for it in items:
                 sig = getattr(it, "tagger_sig", None) or self._default_tagger_sig
@@ -370,7 +382,7 @@ class DBWriter(threading.Thread):
                 )
 
             # d) FTS は完全スキップ（後段でオフライン再構築）
-            print("... skipping FTS update (to be done offline later)")
+            logger.debug("... skipping FTS update (to be done offline later)")
             conn.commit()
             self._written += len(items)
             if self._debug:
@@ -381,7 +393,7 @@ class DBWriter(threading.Thread):
 
         # ---------- ② 従来/WAL パス ----------
         conn.execute("BEGIN IMMEDIATE")
-        print("... using standard WAL path")
+        logger.debug("... using standard WAL path")
 
         # 1) tags upsert（新規だけ抽出）＋ cache 更新
         new_defs = []
@@ -450,18 +462,23 @@ class DBWriter(threading.Thread):
         if not row or int(row[0]) == 0:
             return
 
-        self._log.info("DBWriter: offline merge start (tmp->disk)")
+        total_tag_rows = int(row[0])
+        total_file_rows = int(conn.execute("SELECT count(DISTINCT file_id) FROM temp.tmp_file_tags").fetchone()[0])
+        total_meta_rows = int(conn.execute("SELECT count(*) FROM temp.tmp_files_meta").fetchone()[0])
 
-        # 重い永続側インデックスは一旦落とす
+        self._log.info("DBWriter: offline merge start (tmp->disk)")
+        self._progress("merge.start", 0, total_tag_rows)
+
+        # 永続側の重い索引は一旦落とす
         try:
             conn.execute("DROP INDEX IF EXISTS idx_file_tags_tag_score")
-            conn.execute("DROP INDEX IF EXISTS idx_file_tags_tag_id")
+            conn.execute("DROP INDEX IF EXISTS idx_file_tags_tag_id")  # 存在しなくてもOK
         except Exception as e:
             self._log.warning("drop index failed: %s", e)
 
         conn.execute("BEGIN IMMEDIATE")
         try:
-            # 1) tags の upsert（tmp_tag_defs から）
+            # 1) tags upsert
             rows = conn.execute("SELECT name, MAX(category) FROM temp.tmp_tag_defs GROUP BY name").fetchall()
             if rows:
                 from db.repository import upsert_tags
@@ -469,41 +486,89 @@ class DBWriter(threading.Thread):
                 defs = [{"name": r[0], "category": int(r[1] or 0)} for r in rows]
                 upsert_tags(conn, defs)
 
-            # 2) 影響対象ファイルの既存タグを一括削除
-            # ★ 先に消してから temp スキーマに明示して作成（TEMPは使わない）
+            # 2) 影響ファイル抽出
             conn.execute("DROP TABLE IF EXISTS temp.tmp_file_ids")
             conn.execute("CREATE TABLE temp.tmp_file_ids AS " "SELECT DISTINCT file_id FROM temp.tmp_file_tags")
-            conn.execute("DELETE FROM file_tags WHERE file_id IN (SELECT file_id FROM temp.tmp_file_ids)")
 
-            # 3) 一時テーブル用の補助インデックス（temp を明示）
+            # 3) 既存 file_tags の一括削除（チャンク実行）
+            self._progress("merge.delete", 0, total_file_rows)
+            CHUNK_F = 5_000
+            done_f = 0
+            cur = conn.execute("SELECT file_id FROM temp.tmp_file_ids")
+            buf = []
+            for (fid,) in cur:
+                buf.append(fid)
+                if len(buf) >= CHUNK_F:
+                    ph = ",".join("?" * len(buf))
+                    conn.execute(f"DELETE FROM file_tags WHERE file_id IN ({ph})", buf)
+                    done_f += len(buf)
+                    self._progress("merge.delete", done_f, total_file_rows)
+                    buf.clear()
+            if buf:
+                ph = ",".join("?" * len(buf))
+                conn.execute(f"DELETE FROM file_tags WHERE file_id IN ({ph})", buf)
+                done_f += len(buf)
+                self._progress("merge.delete", done_f, total_file_rows)
+
+            # 4) temp 側補助インデックス（速やか）
             conn.execute("CREATE INDEX IF NOT EXISTS temp.idx_tmp_ft_name ON tmp_file_tags(tag_name)")
             conn.execute("CREATE INDEX IF NOT EXISTS temp.idx_tmp_ft_file ON tmp_file_tags(file_id)")
             conn.execute("CREATE INDEX IF NOT EXISTS temp.idx_tmp_fm_file ON tmp_files_meta(file_id)")
 
-            # 4) tmp の名前→id を JOIN で解決して永続 file_tags に流し込む
-            conn.execute("""
-                INSERT INTO file_tags (file_id, tag_id, score)
-                SELECT ft.file_id, t.id, ft.score
-                FROM temp.tmp_file_tags AS ft
-                JOIN tags AS t ON t.name = ft.tag_name
-            """)
+            # 5) INSERT（JOIN）をチャンク実行（rowid 窓）
+            self._progress("merge.insert", 0, total_tag_rows)
+            CHUNK_T = 100_000
+            done_t = 0
+            # rowid は TEMP テーブルなら使える
+            max_rowid = conn.execute("SELECT max(rowid) FROM temp.tmp_file_tags").fetchone()[0] or 0
+            start = 0
+            while start < max_rowid:
+                end = min(start + CHUNK_T, max_rowid)
+                conn.execute(
+                    """
+                    INSERT INTO file_tags (file_id, tag_id, score)
+                    SELECT ft.file_id, t.id, ft.score
+                    FROM temp.tmp_file_tags AS ft
+                    JOIN tags AS t ON t.name = ft.tag_name
+                    WHERE ft.rowid > ? AND ft.rowid <= ?
+                """,
+                    (start, end),
+                )
+                # 実際の増加行数は changes() でも取れるが、おおまかにチャンク単位で前進表示
+                done_t = min(done_t + CHUNK_T, total_tag_rows)
+                self._progress("merge.insert", done_t, total_tag_rows)
+                start = end
 
-            # 5) files メタ一括更新
-            conn.execute("""
-                UPDATE files
-                SET width          = COALESCE(width,  (SELECT m.width  FROM temp.tmp_files_meta m WHERE m.file_id = files.id)),
-                    height         = COALESCE(height, (SELECT m.height FROM temp.tmp_files_meta m WHERE m.file_id = files.id)),
-                    tagger_sig     = (SELECT m.tagger_sig FROM temp.tmp_files_meta m WHERE m.file_id = files.id),
-                    last_tagged_at = (SELECT m.tagged_at  FROM temp.tmp_files_meta m WHERE m.file_id = files.id)
-                WHERE id IN (SELECT file_id FROM temp.tmp_files_meta)
-            """)
+            # 6) files メタ更新（チャンク：id で分割）
+            self._progress("merge.update", 0, total_meta_rows)
+            CHUNK_M = 20_000
+            done_m = 0
+            # rowid 窓で tmp_files_meta を流す
+            max_mid = conn.execute("SELECT max(rowid) FROM temp.tmp_files_meta").fetchone()[0] or 0
+            start = 0
+            while start < max_mid:
+                end = min(start + CHUNK_M, max_mid)
+                conn.execute(
+                    """
+                    UPDATE files
+                    SET width          = COALESCE(width,  (SELECT m.width  FROM temp.tmp_files_meta m WHERE m.file_id = files.id AND m.rowid > ? AND m.rowid <= ?)),
+                        height         = COALESCE(height, (SELECT m.height FROM temp.tmp_files_meta m WHERE m.file_id = files.id AND m.rowid > ? AND m.rowid <= ?)),
+                        tagger_sig     = (SELECT m.tagger_sig FROM temp.tmp_files_meta m WHERE m.file_id = files.id AND m.rowid > ? AND m.rowid <= ?),
+                        last_tagged_at = (SELECT m.tagged_at  FROM temp.tmp_files_meta m WHERE m.file_id = files.id AND m.rowid > ? AND m.rowid <= ?)
+                    WHERE id IN (SELECT file_id FROM temp.tmp_files_meta WHERE rowid > ? AND rowid <= ?)
+                """,
+                    (start, end, start, end, start, end, start, end, start, end),
+                )
+                done_m = min(done_m + CHUNK_M, total_meta_rows)
+                self._progress("merge.update", done_m, total_meta_rows)
+                start = end
 
             conn.commit()
         except Exception:
             conn.rollback()
             raise
         finally:
-            # 後始末（例外/キャンセルでも確実に消す）
+            # 後始末
             for ddl in (
                 "DROP INDEX IF EXISTS temp.idx_tmp_ft_name",
                 "DROP INDEX IF EXISTS temp.idx_tmp_ft_file",
@@ -515,12 +580,16 @@ class DBWriter(threading.Thread):
                 except Exception:
                     pass
 
-        # 永続側インデックスを再作成
+        # 永続側インデックス再作成（進捗1/2 → 2/2 の形で通知）
         try:
+            self._progress("merge.index", 0, 2)
             conn.execute("CREATE INDEX IF NOT EXISTS idx_file_tags_tag_id    ON file_tags(tag_id)")
+            self._progress("merge.index", 1, 2)
             conn.execute("CREATE INDEX IF NOT EXISTS idx_file_tags_tag_score ON file_tags(tag_id, score)")
+            self._progress("merge.index", 2, 2)
             conn.commit()
         except Exception as e:
             self._log.warning("recreate index failed: %s", e)
 
+        self._progress("merge.done", 1, 1)
         self._log.info("DBWriter: offline merge done")
