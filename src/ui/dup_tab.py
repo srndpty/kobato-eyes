@@ -3,22 +3,41 @@
 from __future__ import annotations
 
 import csv
+import logging
 import os
 import platform
 import subprocess
+import sys
+import time
 from collections import deque
+from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterator, Sequence
 
 from PIL import Image
 from PIL.ImageQt import ImageQt
-from PyQt6.QtCore import QEvent, QObject, QPoint, QRunnable, QSize, Qt, QThreadPool, QTimer, pyqtSignal
-from PyQt6.QtGui import QAction, QColor, QIcon, QImage, QPainter, QPixmap  # 既にあれば不要
+from PyQt6.QtCore import (
+    QEvent,
+    QObject,
+    QPoint,
+    QRect,
+    QRunnable,
+    QSize,
+    Qt,
+    QThreadPool,
+    QTimer,
+    QtMsgType,
+    pyqtSignal,
+    qInstallMessageHandler,
+)
+from PyQt6.QtGui import QAction, QColor, QFontMetrics, QIcon, QImage, QPainter, QPixmap
 from PyQt6.QtWidgets import (
     QAbstractItemView,
+    QCheckBox,
     QDoubleSpinBox,
     QFileDialog,
+    QFrame,
     QHBoxLayout,
     QHeaderView,
     QLabel,
@@ -42,7 +61,30 @@ from dup.scanner import DuplicateCluster, DuplicateClusterEntry, DuplicateFile, 
 from utils.image_io import generate_thumbnail, get_thumbnail  # 既存ユーティリティを再利用
 from utils.paths import get_cache_dir, get_db_path
 
+LOG = logging.getLogger("dup")
+if not LOG.handlers:
+    LOG.setLevel(logging.DEBUG)
+    h = logging.StreamHandler(sys.stdout)
+    h.setFormatter(logging.Formatter("%(asctime)s %(threadName)s %(levelname)s: %(message)s"))
+    LOG.addHandler(h)
 DEBUG_THUMBS = False
+
+
+def _qt_msg(mode, ctx, msg):
+    try:
+        level = {
+            QtMsgType.QtDebugMsg: "DEBUG",
+            QtMsgType.QtInfoMsg: "INFO",
+            QtMsgType.QtWarningMsg: "WARNING",
+            QtMsgType.QtCriticalMsg: "CRITICAL",
+            QtMsgType.QtFatalMsg: "FATAL",
+        }[mode]
+    except Exception:
+        level = "QT"
+    LOG.warning(f"QT[{level}] {msg} ({ctx.file}:{ctx.line})")
+
+
+qInstallMessageHandler(_qt_msg)
 
 
 @dataclass(frozen=True)
@@ -53,6 +95,159 @@ class DuplicateScanRequest:
     hamming_threshold: int
     size_ratio: float | None
     cosine_threshold: float | None
+
+
+class ThumbTile(QFrame):
+    """256x256 サムネ + 2行テキスト + チェックの小さなタイル."""
+
+    toggled = pyqtSignal(bool)  # 必要なら使う
+
+    def __init__(self, entry: DuplicateClusterEntry, icon_size: QSize, parent=None):
+        super().__init__(parent)
+        self.setObjectName("ThumbTile")
+        self.entry = entry
+        self.icon_size = icon_size
+        self.path = entry.file.path
+        self.setFrameShape(QFrame.Shape.NoFrame)
+        self.setStyleSheet("""
+        #ThumbTile { background: transparent; }
+        #ThumbTile:hover { background: rgba(255,255,255,0.04); border-radius: 6px; }
+        """)
+
+        self.thumb = QLabel(self)
+        self.thumb.setFixedSize(icon_size)
+        self.thumb.setScaledContents(False)
+        self.thumb.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.check = QCheckBox(self)
+        # 既定状態（keeper は Unchecked, それ以外 Checked）
+        st = Qt.CheckState.Unchecked if entry.file.file_id == parent.property("keeper_id") else Qt.CheckState.Checked
+        self.check.setCheckState(st)
+
+        self.meta1 = QLabel(self)  # 1行目: size,res,ham,cos
+        self.meta2 = QLabel(self)  # 2行目: dir (middle elide)
+        for lab in (self.meta1, self.meta2):
+            lab.setWordWrap(False)
+            lab.setTextInteractionFlags(Qt.TextInteractionFlag.NoTextInteraction)
+
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(4, 4, 4, 4)
+        lay.setSpacing(4)
+        lay.addWidget(self.thumb, alignment=Qt.AlignmentFlag.AlignHCenter)
+        lay.addWidget(self.meta1)
+        lay.addWidget(self.meta2)
+
+        # メタ設定
+        size_t = DupTab._format_size(entry.file.size)
+        res_t = DupTab._format_resolution(entry.file.width, entry.file.height)
+        ham_t = "-" if entry.best_hamming is None else f"H:{entry.best_hamming}"
+        cos_t = "-" if entry.best_cosine is None else f"C:{entry.best_cosine:.3f}"
+        self.meta1.setText(f"{size_t}   {res_t}   {ham_t}   {cos_t}")
+
+        fm = QFontMetrics(self.font())
+        folder = str(entry.file.path.parent)
+        self.meta2.setText(fm.elidedText(folder, Qt.TextElideMode.ElideMiddle, icon_size.width()))
+
+        # チェックは左上にオーバレイ
+        self.check.raise_()
+        self.check.move(6, 6)
+
+    # サムネ適用
+    def set_pixmap(self, pix: QPixmap | None, placeholder: QIcon) -> None:
+        target = self.icon_size
+        if pix is None or pix.isNull():
+            self.thumb.setPixmap(placeholder.pixmap(target))
+            return
+
+        # アス比維持でフィット
+        scaled = pix.scaled(target, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
+
+        # レターボックスに中央配置
+        canvas = QPixmap(target)
+        canvas.fill(Qt.GlobalColor.transparent)  # 透過。灰背景にしたいなら fill(QColor(50,50,50))
+        p = QPainter(canvas)
+        x = (target.width() - scaled.width()) // 2
+        y = (target.height() - scaled.height()) // 2
+        p.drawPixmap(x, y, scaled)
+        p.end()
+        self.thumb.setPixmap(canvas)
+
+    def is_checked(self) -> bool:
+        return self.check.checkState() == Qt.CheckState.Checked
+
+    def set_checked(self, checked: bool) -> None:
+        self.check.setCheckState(Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked)
+
+
+class ThumbPanel(QWidget):
+    """
+    グループ内のタイルをグリッドで敷き詰めるパネル。
+    QGridLayout でも良いが、パフォーマンスのため手動レイアウトにする。
+    """
+
+    def __init__(
+        self,
+        entries: list[DuplicateClusterEntry],
+        keeper_id: int,
+        icon_size: QSize,
+        col_gap=10,
+        row_gap=12,
+        parent=None,
+    ):
+        super().__init__(parent)
+        self._icon_size = icon_size
+        self._col_gap = col_gap
+        self._row_gap = row_gap
+        self.tiles: list[ThumbTile] = []
+        self.setProperty("keeper_id", keeper_id)
+        for e in entries:
+            t = ThumbTile(e, icon_size, parent=self)
+            self.tiles.append(t)
+            t.setParent(self)
+            t.show()
+        self._cols = 1
+        self._tile_size = QSize(icon_size.width() + 8, icon_size.height() + 8 + 2 * self.fontMetrics().height() + 12)
+        self.setMinimumHeight(self._tile_size.height() + 8)
+
+    def _compute_cols(self) -> int:
+        w = max(1, self.width())
+        cell_w = self._tile_size.width() + self._col_gap
+        return max(1, w // cell_w)
+
+    def resizeEvent(self, ev):
+        super().resizeEvent(ev)
+        self._relayout()
+
+    def _relayout(self):
+        cols = self._compute_cols()
+        if cols != self._cols:
+            self._cols = cols
+        cell_w = self._tile_size.width() + self._col_gap
+        cell_h = self._tile_size.height() + self._row_gap
+        for i, t in enumerate(self.tiles):
+            r = i // self._cols
+            c = i % self._cols
+            x = c * cell_w
+            y = r * cell_h
+            t.setGeometry(x, y, self._tile_size.width(), self._tile_size.height())
+
+        rows = (len(self.tiles) + self._cols - 1) // self._cols
+        self.setMinimumHeight(rows * cell_h)
+        self.updateGeometry()
+
+    def sizeHint(self):
+        self._relayout()
+        return super().sizeHint()
+
+    def visible_tiles_in(self, viewport: QWidget, tree_viewport_rect: QRect) -> list[ThumbTile]:
+        """ツリーの viewport 座標系で見えているタイルを返す。"""
+        vis: list[ThumbTile] = []
+        # パネルの (0,0) をツリー viewport 座標へ
+        panel_top_left = self.mapTo(viewport, QPoint(0, 0))
+        for t in self.tiles:
+            r = t.geometry().translated(panel_top_left)
+            if r.intersects(tree_viewport_rect):
+                vis.append(t)
+        return vis
 
 
 class DuplicateScanSignals(QObject):
@@ -72,32 +267,45 @@ class DuplicateScanRunnable(QRunnable):
         self._request = request
         self.signals = DuplicateScanSignals()
 
-    def run(self) -> None:  # noqa: D401 - QRunnable interface
+    def run(self) -> None:
         try:
+            LOG.info("scan: start")
             settings = load_settings()
             model_name = settings.model_name
-            conn = get_conn(self._db_path)
-            try:
+
+            # conn はこの with（closing）ブロック内でだけ使う
+            with closing(get_conn(self._db_path)) as conn:
                 rows = list(iter_files_for_dup(conn, self._request.path_like, model_name=model_name))
-            finally:
-                conn.close()
+                LOG.info("scan: rows loaded = %d", len(rows))
+
             total = len(rows)
             self.signals.progress.emit(0, total)
+
             files: list[DuplicateFile] = []
             for index, row in enumerate(rows, start=1):
                 try:
                     files.append(DuplicateFile.from_row(row))
                 except ValueError:
                     continue
-                self.signals.progress.emit(index, total)
+                if index % 500 == 0:
+                    self.signals.progress.emit(index, total)
+            self.signals.progress.emit(total, total)
+
             config = DuplicateScanConfig(
                 hamming_threshold=self._request.hamming_threshold,
                 size_ratio=self._request.size_ratio,
                 cosine_threshold=self._request.cosine_threshold,
             )
+
+            LOG.info("cluster: building ...")
+            t0 = time.perf_counter()
             clusters = DuplicateScanner(config).build_clusters(files)
+            LOG.info("cluster: done; n=%d, %.2fs", len(clusters), time.perf_counter() - t0)
+
             self.signals.finished.emit(clusters)
-        except Exception as exc:  # pragma: no cover - surfaced via UI
+
+        except Exception as exc:
+            LOG.exception("scan worker crashed: %s", exc)
             try:
                 self.signals.error.emit(str(exc))
             except RuntimeError:
@@ -161,6 +369,7 @@ class DupTab(QWidget):
         self._clusters: list[DuplicateCluster] = []
         self._active_scan: DuplicateScanRunnable | None = None
         self._block_item_changed = False
+        self._bulk_populating = False
 
         self._path_input = QLineEdit(self)
         self._path_input.setPlaceholderText("Path LIKE pattern (e.g. C:% or %/images/% )")
@@ -196,18 +405,31 @@ class DupTab(QWidget):
 
         self._status_label = QLabel(self)
         self._status_label.setWordWrap(True)
-
+        self.setStyleSheet("""
+        #ThumbTile { background: transparent; }   # ← :hover 行を削除
+        """)
         self._tree = QTreeWidget(self)
+        self._tree.setStyleSheet("""
+        QTreeView::item:hover {               /* ← ホバー時の青い塗りを消す */
+            background: transparent;
+        }
+        QTreeView::item:selected:active {     /* ← ついでに選択時の色も弱めたい場合 */
+            background: rgba(80, 120, 200, 0.25);
+        }
+        QTreeView::item:selected:!active {
+            background: rgba(80, 120, 200, 0.18);
+        }
+        QTreeView { outline: 0; }
+        """)
+        self._tree.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
+        self._tree.setFocusPolicy(Qt.FocusPolicy.NoFocus)  # フォーカス枠も出さない
         self._tree.setColumnCount(6)
         self._tree.setHeaderLabels(["File", "Size", "Resolution", "Hamming", "Cosine", "Path"])
         self._tree.setAlternatingRowColors(True)
         # ★ アイコンサイズ（Tagsタブに寄せるなら 96x96 や 128x128）
-        self._icon_size = QSize(96, 96)
+        self._icon_size = QSize(256, 256)
         self._tree.setIconSize(self._icon_size)
-        # 行高をアイコン＋余白に固定（UniformRowHeights と相性◎）
-        row_h = self._icon_size.height() + 8
-        self._tree.setUniformRowHeights(True)
-        self._tree.setStyleSheet(f"QTreeView::item {{ height: {row_h}px; padding: 2px; }}")
+        self._tree.setUniformRowHeights(False)
 
         # サムネの可視範囲リクエストをタイマでデバウンス
         self._thumb_timer = QTimer(self)
@@ -230,9 +452,8 @@ class DupTab(QWidget):
         header.resizeSection(5, 420)  # Path
         header.setStretchLastSection(True)
 
-        self._tree.setUniformRowHeights(True)
-        self._tree.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerItem)
-        self._tree.setHorizontalScrollMode(QAbstractItemView.ScrollMode.ScrollPerItem)
+        self._tree.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
+        self._tree.setHorizontalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
         self._tree.setAnimated(False)
         self._tree.setSortingEnabled(False)
         self._tree.setExpandsOnDoubleClick(False)
@@ -278,7 +499,7 @@ class DupTab(QWidget):
         self._export_button.clicked.connect(self._on_export_csv)
 
         # ★ path → [QTreeWidgetItem] の逆引き（サムネ適用に使う）
-        self._thumb_bindings: dict[str, list[QTreeWidgetItem]] = {}
+        self._thumb_bindings: dict[str, list[ThumbTile]] = {}
 
         # ★ 進行中ジョブの重複投げ防止
         self._thumb_inflight: set[str] = set()
@@ -299,6 +520,108 @@ class DupTab(QWidget):
         self._thumb_budget = int(os.environ.get("KE_DUP_THUMB_BUDGET", "12"))
         self._prefetch_rows = int(os.environ.get("KE_DUP_PREFETCH_ROWS", "8"))
         self._update_action_states()
+
+        self._alive = 0
+        self._hb = QTimer(self)
+        self._hb.setInterval(1000)
+        self._hb.timeout.connect(lambda: LOG.debug(f"ui alive {self._alive:=self._alive+1}"))
+        self._hb.start()
+
+    def _auto_expand_visible_groups(self, margin: int = 200) -> None:
+        rect = self._tree.viewport().rect().adjusted(0, -margin, 0, +margin)
+        budget = int(os.environ.get("KE_DUP_EXPAND_BUDGET", "24"))  # 1ティック上限
+        expanded = 0
+
+        idx = self._tree.indexAt(QPoint(10, 10))
+        # 画面上から下に向かって可視範囲だけ舐める
+        while idx.isValid():
+            item = self._tree.itemFromIndex(idx)
+            if item is None:
+                break
+            if item.parent() is None:  # トップレベルのみ
+                r = self._tree.visualItemRect(item)
+                if r.bottom() < rect.top():
+                    idx = self._tree.indexBelow(idx)
+                    continue
+                if r.top() > rect.bottom():
+                    break
+
+                # まずヘッダーを（遅延）装着
+                self._ensure_header_built_if_visible(item)
+
+                # 見えたら自動展開
+                if not item.isExpanded():
+                    item.setExpanded(True)
+                    expanded += 1
+                    if expanded >= budget:
+                        break
+
+                # 展開状態ならパネルも（遅延）構築
+                self._ensure_panel_built_if_visible(item, force=False)
+            idx = self._tree.indexBelow(idx)
+
+    def _ensure_header_built_if_visible(self, item: QTreeWidgetItem) -> None:
+        # すでに付いていれば何もしない
+        if self._tree.itemWidget(item, 0) is not None:
+            return
+        # 画面内±200px のときだけ作る
+        vp = self._tree.viewport()
+        r = self._tree.visualItemRect(item)
+        if not (r.isValid() and r.bottom() >= -200 and r.top() <= (vp.height() + 200)):
+            return
+
+        # ここで初めて軽量なヘッダーbarを作る
+        bar = QWidget(self._tree)
+        hl = QHBoxLayout(bar)
+        hl.setContentsMargins(8, 2, 8, 2)
+        hl.setSpacing(8)
+        # タイトルだけ描画にしておく（ラベルは軽い）
+        cl: DuplicateCluster = item.data(0, Qt.ItemDataRole.UserRole)
+        idx = self._tree.indexOfTopLevelItem(item) + 1
+        title = QLabel(f"Group #{idx} ({len(cl.files)} items)", bar)
+        btn_keep = QPushButton("Keep largest in group", bar)
+        btn_uncheck = QPushButton("Uncheck all in group", bar)
+        btn_keep.setFixedHeight(22)
+        btn_uncheck.setFixedHeight(22)
+        hl.addWidget(title)
+        hl.addStretch(1)
+        hl.addWidget(btn_keep)
+        hl.addWidget(btn_uncheck)
+        self._tree.setItemWidget(item, 0, bar)
+        item.setFirstColumnSpanned(True)
+
+        # ボタンのハンドラ（クロージャで対象を束縛）
+        def _keep_this_group(it=item, cl_=cl):
+            self._ensure_panel_built_if_visible(it, force=True)
+            panel = self._panel_of_group(it)
+            if not panel:
+                return
+            for t in panel.tiles:
+                t.set_checked(t.entry.file.file_id != cl_.keeper_id)
+            self._update_action_states()
+
+        def _uncheck_this_group(it=item):
+            self._ensure_panel_built_if_visible(it, force=True)
+            panel = self._panel_of_group(it)
+            if not panel:
+                return
+            for t in panel.tiles:
+                t.set_checked(False)
+            self._update_action_states()
+
+        btn_keep.clicked.connect(_keep_this_group)
+        btn_uncheck.clicked.connect(_uncheck_this_group)
+
+    def _bind_tile_to_thumb(self, tile: ThumbTile, path: Path) -> None:
+        key = str(path)
+        self._thumb_bindings.setdefault(key, []).append(tile)
+        # 既に done 済みなら即適用
+        if key in self._thumb_done:
+            try:
+                pix = get_thumbnail(key, self._icon_size.width(), self._icon_size.height())
+                tile.set_pixmap(pix, self._placeholder_icon)
+            except Exception:
+                tile.set_pixmap(None, self._placeholder_icon)
 
     def _maybe_start_more_thumbs(self) -> None:
         slots = self._thumb_pool.maxThreadCount() - self._thumb_pool.activeThreadCount()
@@ -328,63 +651,61 @@ class DupTab(QWidget):
         return None
 
     def _request_visible_thumbs(self) -> None:
+        # ★ 先に可視グループを自動展開
+        self._auto_expand_visible_groups(margin=200)
+
         vp = self._tree.viewport()
-        if self._tree.topLevelItemCount() == 0:
-            return
+        rect = vp.rect()
 
-        # 可視最上 index（未計算保険）
-        top_idx = self._tree.indexAt(vp.rect().topLeft())
-        if not top_idx.isValid():
-            top_idx = self._tree.model().index(0, 0)
-
-        # 上に少し戻す（先読み）
-        idx = top_idx
-        for _ in range(self._prefetch_rows):
-            prev = self._tree.indexAbove(idx)
-            if not prev.isValid():
-                break
-            idx = prev
-
-        bottom_y = vp.rect().bottom()
-
-        wanted: list[str] = []
-        seen_keys: set[str] = set()
-        after_bottom_rows = self._prefetch_rows
-
-        # 可視＋マージンの範囲でキー収集（上→下の順序）
+        # まず可視グループにヘッダーを付ける
+        idx = self._tree.indexAt(QPoint(10, 10))
+        # インデックスから下方向へ、ビュー外に出るまで
+        touched = 0
         while idx.isValid():
-            rect = self._tree.visualRect(idx)
-            if rect.top() > bottom_y:
-                if after_bottom_rows <= 0:
-                    break
-                after_bottom_rows -= 1
-
             item = self._tree.itemFromIndex(idx)
-            if item is not None:
-                # まずプレースホルダ（軽い）
-                if item.icon(0).isNull():
-                    item.setIcon(0, self._placeholder_icon)
-                # この item にバインドされている path を逆引き
-                path = self._bound_path_of_item(item)
-                if path is not None:
-                    key = str(path)
-                    if key not in seen_keys:
-                        seen_keys.add(key)
-                        wanted.append(key)
-
+            if item and item.parent() is None:  # トップレベル
+                r = self._tree.visualItemRect(item)
+                if r.top() > rect.bottom() + 200:
+                    break
+                self._ensure_header_built_if_visible(item)  # ★ここ
+                # 見えていればパネルも用意（既存関数）
+                if item.isExpanded():
+                    self._ensure_panel_built_if_visible(item, force=False)
             idx = self._tree.indexBelow(idx)
+            touched += 1
+            if touched > 2000:  # 万一の無限ループ保険
+                break
 
-        # ---- pending を「wanted の順序で」再構成（ここで可視外は捨てられる） ----
+        # 以降は今までの処理（パネルがあるグループから見えているタイルを集める）
+        wanted: list[str] = []
+        for i in range(self._tree.topLevelItemCount()):
+            g = self._tree.topLevelItem(i)
+            if not g.isExpanded():
+                continue
+            panel = self._panel_of_group(g)
+            if not panel:
+                continue
+            for tile in panel.visible_tiles_in(vp, rect):
+                key = str(tile.path)
+                if key not in self._thumb_inflight and key not in self._thumb_done:
+                    wanted.append(key)
+
         self._thumb_pending.clear()
         for key in wanted:
-            if key not in self._thumb_inflight and key not in self._thumb_done:
+            if key not in self._thumb_pending:
                 self._thumb_pending.append(key)
 
-        # ステータス（任意）
         self._status_label.setText(f"thumb requests (visible): ~{len(self._thumb_pending)}")
-
-        # 空きスロット分だけ起動
         self._maybe_start_more_thumbs()
+
+    def _iter_tiles(self) -> Iterator[ThumbTile]:
+        for i in range(self._tree.topLevelItemCount()):
+            g = self._tree.topLevelItem(i)
+            panel = self._panel_of_group(g)
+            if not panel:
+                continue
+            for t in panel.tiles:
+                yield t
 
     def _cluster_hamming_score(self, cluster: "DuplicateCluster") -> int:
         """
@@ -504,25 +825,25 @@ class DupTab(QWidget):
 
     def _on_thumb_done(self, path_str: str, qimg: "QImage|None") -> None:
         self._thumb_inflight.discard(path_str)
-        items = self._thumb_bindings.get(path_str)
-        if not items:
+        targets = self._thumb_bindings.get(path_str)
+        if not targets:
+            self._thumb_done.add(path_str)
+            self._maybe_start_more_thumbs()
             return
+
         try:
             if qimg is not None:
                 pix = QPixmap.fromImage(qimg)
             else:
-                # 最悪時だけ UI で読み込み（頻度は激減）
                 pix = get_thumbnail(path_str, self._icon_size.width(), self._icon_size.height())
-            icon = QIcon(pix)
         except Exception:
-            icon = self._placeholder_icon
+            pix = None
 
-        self._tree.setUpdatesEnabled(False)
-        for it in items:
-            it.setIcon(0, icon)
-        self._tree.setUpdatesEnabled(True)
+        for tile in targets:
+            tile.set_pixmap(pix, self._placeholder_icon)
+
         self._thumb_done.add(path_str)
-        self._maybe_start_more_thumbs()  # 次の pending を流し込み
+        self._maybe_start_more_thumbs()
         if DEBUG_THUMBS:
             print(f"thumb applied: {path_str}")  # ← デバッグ
 
@@ -560,6 +881,7 @@ class DupTab(QWidget):
         self._progress.setValue(current)
 
     def _on_scan_finished(self, payload: object) -> None:
+        LOG.info("ui: _on_scan_finished begin")
         self._active_scan = None
         self._scan_button.setEnabled(True)
         if not isinstance(payload, list):
@@ -575,11 +897,13 @@ class DupTab(QWidget):
             self._tree.clear()
             self._update_action_states()
             return
+        LOG.info("ui: clusters=%d", len(self._clusters))
         self._populate_tree()
         groups = len(self._clusters)
         files = sum(len(cluster.files) for cluster in self._clusters)
         self._status_label.setText(f"Scan complete: {groups} group(s), {files} file(s).")
         self._update_action_states()
+        LOG.info("ui: _on_scan_finished end")
 
     def _on_scan_error(self, message: str) -> None:
         self._active_scan = None
@@ -635,61 +959,150 @@ class DupTab(QWidget):
         if key not in self._thumb_pending:
             self._thumb_pending.append(key)
 
-    # 既存 _populate_tree を「トップレベルだけ作る」版に差し替え
+    def _panel_of_group(self, group_item: QTreeWidgetItem) -> ThumbPanel | None:
+        # 親の直下 0 番目の子にパネルを入れる実装にしている
+        if group_item.childCount() == 0:
+            return None
+        child = group_item.child(0)
+        w = self._tree.itemWidget(child, 0)
+        return w if isinstance(w, ThumbPanel) else None
+
     def _populate_tree(self) -> None:
+        LOG.info("ui: populate begin")
         # 古い関連づけを掃除（メモリ＆ゴースト参照対策）
         self._thumb_bindings.clear()
         self._thumb_inflight.clear()
         self._thumb_pending.clear()
         self._thumb_done.clear()
         self._block_item_changed = True
-        try:
-            self._tree.setUpdatesEnabled(False)
-            self._tree.clear()
+        self._bulk_populating = True
+        self._tree.setUpdatesEnabled(False)
+        self._tree.clear()
+        self._populate_i = 0
+        self._populate_batch = int(os.environ.get("KE_DUP_POPULATE_BATCH", "300"))
 
-            for group_index, cluster in enumerate(self._clusters, start=1):
-                group_text = f"Group #{group_index} ({len(cluster.files)} items)"
-                group_item = QTreeWidgetItem(["", "", "", "", "", ""])
-                group_item.setText(0, group_text)
-                group_item.setData(0, Qt.ItemDataRole.UserRole, cluster)
-                group_item.setFirstColumnSpanned(False)  # ← スパンをやめて各列にサマリを表示
+        # タイマーで分割して流し込む
+        if hasattr(self, "_populate_timer"):
+            self._populate_timer.stop()
+        else:
+            self._populate_timer = QTimer(self)
+            self._populate_timer.setSingleShot(False)
+            self._populate_timer.timeout.connect(self._populate_tick)
 
-                # 親サムネ: 先頭アイテムにバインドして非同期読み込み
-                if cluster.files:
-                    first_path = cluster.files[0].file.path
-                    group_item.setIcon(0, self._placeholder_icon)
-                    self._bind_item_to_thumb(group_item, first_path)
+        self._populate_timer.start(0)  # すぐ1回目
 
-                # サマリ値を各列に
-                size_t, res_t, ham_t, cos_t, path_t = self._group_summary(cluster)
-                group_item.setText(1, size_t)
-                group_item.setText(2, res_t)
-                group_item.setText(3, ham_t)
-                group_item.setText(4, cos_t)
-                group_item.setText(5, path_t)
+    def _populate_tick(self) -> None:
+        n = len(self._clusters)
+        start = self._populate_i
+        end = min(start + self._populate_batch, n)
 
-                # プレースホルダ子（遅延構築フラグ）
-                placeholder = QTreeWidgetItem(["(expand to load)"])
-                placeholder.setData(0, Qt.ItemDataRole.UserRole, "__placeholder__")
-                group_item.addChild(placeholder)
+        t0 = time.perf_counter()
+        self._tree.setUpdatesEnabled(False)
+        for i in range(start, end):
+            cl = self._clusters[i]
+            it = QTreeWidgetItem(["", "", "", "", "", ""])
+            it.setData(0, Qt.ItemDataRole.UserRole, cl)
+            # テキストだけ先に入れる（bar は遅延で）
+            it.setText(0, f"Group #{i+1} ({len(cl.files)} items)")
+            ph = QTreeWidgetItem(["(expand to load)"])
+            ph.setData(0, Qt.ItemDataRole.UserRole, "__placeholder__")
+            it.addChild(ph)
+            it.setExpanded(False)
+            self._tree.addTopLevelItem(it)
+        self._tree.setUpdatesEnabled(True)
 
-                self._tree.addTopLevelItem(group_item)
-                group_item.setExpanded(False)
-        finally:
-            self._tree.setUpdatesEnabled(True)
-            self._block_item_changed = False
-        self._update_action_states()
-        self._tree.executeDelayedItemsLayout()
-        self._tree.viewport().update()
-        QTimer.singleShot(0, self._request_visible_thumbs)  # 1フレーム後に可視範囲要求
+        self._populate_i = end
+        dt = time.perf_counter() - t0
+        if (end % 1000 == 0) or end == n:
+            try:
+                import os
 
-    # 展開時にだけ子を構築
-    def _on_group_expanded(self, item: QTreeWidgetItem) -> None:
-        if item.childCount() == 1 and item.child(0).data(0, Qt.ItemDataRole.UserRole) == "__placeholder__":
-            item.takeChildren()
-            cluster: DuplicateCluster = item.data(0, Qt.ItemDataRole.UserRole)
-            self._build_children_for_cluster(item, cluster)
+                import psutil
+
+                rss = psutil.Process(os.getpid()).memory_info().rss / 1048576.0
+                LOG.info("ui: populate %d/%d (%.0fms) RSS=%.1fMB", end, n, dt * 1000, rss)
+            except Exception:
+                LOG.info("ui: populate %d/%d (%.0fms)", end, n, dt * 1000)
+
+        if end >= n:
+            self._populate_timer.stop()
+            LOG.info("ui: populate done; groups=%d", self._tree.topLevelItemCount())
+            QTimer.singleShot(0, self._expand_initial_groups)
+
+    def _expand_initial_groups(self, approx_px: int | None = None):
+        LOG.info("ui: expand_initial")
+        vp = self._tree.viewport()
+        target_h = approx_px or (vp.height() + 200)
+        acc = 0
+        for i in range(self._tree.topLevelItemCount()):
+            g = self._tree.topLevelItem(i)
+            if not g.isExpanded():
+                g.setExpanded(True)  # itemExpanded が飛ぶが、下のガードで重い構築はしない
+            rect = self._tree.visualItemRect(g)
+            acc += rect.height() if rect.height() > 0 else 24
+            if acc >= target_h:
+                break
         self._thumb_timer.start(0)
+
+    def _on_group_expanded(self, item: QTreeWidgetItem) -> None:
+        if self._bulk_populating:
+            return
+        # ビューに見えている（または直近）ときだけ構築
+        self._ensure_panel_built_if_visible(item, force=False)
+        self._thumb_timer.start(0)
+
+    def _ensure_panel_built_if_visible(self, item: QTreeWidgetItem, force: bool = False) -> None:
+        i = self._tree.indexOfTopLevelItem(item)
+        cl: DuplicateCluster = item.data(0, Qt.ItemDataRole.UserRole)
+        LOG.info("ui: ensure_panel visible=%s group=%d size=%d", force, i, len(cl.files))
+
+        if self._panel_of_group(item):
+            return
+        if item.childCount() == 0:
+            return
+        if item.child(0).data(0, Qt.ItemDataRole.UserRole) != "__placeholder__":
+            return
+
+        vp = self._tree.viewport()
+        r = self._tree.visualItemRect(item)
+        # 画面内±200px を可視扱い（マージン先読み）
+        visible = force or (r.isValid() and r.bottom() >= -200 and r.top() <= (vp.height() + 200))
+        if not visible:
+            return
+
+        # ここで初めて重いパネル生成
+        item.takeChildren()
+        cluster: DuplicateCluster = item.data(0, Qt.ItemDataRole.UserRole)
+        self._build_children_for_cluster(item, cluster)
+
+    def _request_visible_thumbs(self) -> None:
+        vp = self._tree.viewport()
+        rect = vp.rect()
+        wanted: list[str] = []
+
+        for i in range(self._tree.topLevelItemCount()):
+            g = self._tree.topLevelItem(i)
+            if not g.isExpanded():
+                continue
+
+            # 見えていればパネルを用意
+            self._ensure_panel_built_if_visible(g, force=False)
+            panel = self._panel_of_group(g)
+            if not panel:
+                continue
+
+            for tile in panel.visible_tiles_in(vp, rect):
+                key = str(tile.path)
+                if key not in self._thumb_inflight and key not in self._thumb_done:
+                    wanted.append(key)
+
+        self._thumb_pending.clear()
+        for key in wanted:
+            if key not in self._thumb_pending:
+                self._thumb_pending.append(key)
+
+        self._status_label.setText(f"thumb requests (visible): ~{len(self._thumb_pending)}")
+        self._maybe_start_more_thumbs()
 
     # 折りたたみ時は子を捨てて軽量化（必要時にまた作る）
     def _on_group_collapsed(self, item: QTreeWidgetItem) -> None:
@@ -711,28 +1124,23 @@ class DupTab(QWidget):
         placeholder.setData(0, Qt.ItemDataRole.UserRole, "__placeholder__")
         item.addChild(placeholder)
 
-    # 既存ロジックを流用して“子だけ”作る関数
-    def _build_children_for_cluster(self, parent: QTreeWidgetItem, cluster: "DuplicateCluster") -> None:
-        self._tree.setUpdatesEnabled(False)
-        try:
-            for entry in self._sort_entries_for_display(cluster.files, cluster.keeper_id):
-                item = QTreeWidgetItem(parent)
-                item.setText(0, entry.file.path.name)
-                item.setText(1, self._format_size(entry.file.size))
-                item.setText(2, self._format_resolution(entry.file.width, entry.file.height))
-                item.setText(3, "-" if entry.best_hamming is None else str(entry.best_hamming))
-                item.setText(4, "-" if entry.best_cosine is None else f"{entry.best_cosine:.3f}")
-                item.setText(5, entry.file.path.as_posix())
-                item.setData(0, Qt.ItemDataRole.UserRole, entry)
-                # プレースホルダを先につける（本物は可視時に）
-                item.setIcon(0, self._placeholder_icon)
-                # チェック状態
-                state = Qt.CheckState.Unchecked if entry.file.file_id == cluster.keeper_id else Qt.CheckState.Checked
-                item.setCheckState(0, state)
-                # サムネ適用対象にバインド（実際のロードは可視範囲だけ後段で）
-                self._bind_item_to_thumb(item, entry.file.path)
-        finally:
-            self._tree.setUpdatesEnabled(True)
+    def _build_children_for_cluster(self, parent_item: QTreeWidgetItem, cluster: "DuplicateCluster") -> None:
+        LOG.info("ui: build_panel group_size=%d", len(cluster.files))
+        # 並び替えは既存関数をそのまま利用
+        entries = self._sort_entries_for_display(cluster.files, cluster.keeper_id)
+        panel_item = QTreeWidgetItem(parent_item)
+        panel_item.setFirstColumnSpanned(True)
+        # パネル生成（アイコン 256 推奨）
+        icon256 = QSize(256, 256)
+        self._icon_size = icon256  # グリッドに合わせて以後も 256 を使う
+        panel = ThumbPanel(entries, cluster.keeper_id, self._icon_size, parent=self._tree)
+        self._tree.setItemWidget(panel_item, 0, panel)
+        # バインディング
+        for tile in panel.tiles:
+            self._bind_tile_to_thumb(tile, tile.path)
+        # 行高（sizeHint）はパネルの size に従う
+        panel_item.setSizeHint(0, panel.sizeHint())
+        LOG.info("ui: build_panel done tiles=%d", len(panel.tiles))
 
     def _on_mark_keep_largest(self) -> None:
         for top_idx in range(self._tree.topLevelItemCount()):
@@ -764,9 +1172,7 @@ class DupTab(QWidget):
         self._update_action_states()
 
     def _on_trash_checked(self) -> None:
-        checked_entries = [
-            entry for item, entry in self._iter_tree_entries() if entry and item.checkState(0) == Qt.CheckState.Checked
-        ]
+        checked_entries = [t.entry for t in self._iter_tiles() if t.is_checked()]
         if not checked_entries:
             QMessageBox.information(self, "Trash duplicates", "No files are checked for deletion.")
             return
@@ -945,9 +1351,7 @@ class DupTab(QWidget):
                 yield child, entry if isinstance(entry, DuplicateClusterEntry) else None
 
     def _count_checked(self) -> int:
-        return sum(
-            1 for item, entry in self._iter_tree_entries() if entry and item.checkState(0) == Qt.CheckState.Checked
-        )
+        return sum(1 for t in self._iter_tiles() if t.is_checked())
 
     @staticmethod
     def _format_size(value: int | None) -> str:
