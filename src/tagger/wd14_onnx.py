@@ -5,10 +5,11 @@ from __future__ import annotations
 import logging
 import os
 import weakref
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from time import perf_counter
-from typing import Iterable, Sequence
+from typing import Iterable, List, Sequence
 
 import cv2
 import numpy as np
@@ -174,8 +175,334 @@ class WD14Tagger(ITagger):
         _log_provider_details(self._session, chosen_providers)
         _ACTIVE_TAGGERS.add(self)
 
+        # ==== 並列前処理の設定 ====
+        try:
+            _cpu = os.cpu_count() or 4
+        except Exception:
+            _cpu = 4
+        self._pre_workers = int(os.getenv("KE_PREPROC_WORKERS", str(min(8, _cpu))))
+        # OpenCV の内部スレッドが暴れないように抑制（必要なら環境変数で上書き）
+        try:
+            cv2.setNumThreads(int(os.getenv("KE_CV2_THREADS", "1")))
+        except Exception:
+            pass
+        self._pre_exec: ThreadPoolExecutor | None = None
+        if self._pre_workers > 1:
+            # 注意: 終了時のクリーンアップは弱参照の finalizer やプロセス終了で開放される前提
+            self._pre_exec = ThreadPoolExecutor(max_workers=self._pre_workers, thread_name_prefix="ke-pre")
+
+        self._topk_cap = 128  # 上限256個まで
+        self._score_floor = float(os.getenv("KE_TAG_SCORE_FLOOR", "0.1"))
+
         if len(self._output_names) != 1:
             raise RuntimeError("Expected a single output tensor from WD14 ONNX model, got " f"{self._output_names}")
+
+    @property
+    def input_size_px(self) -> int:
+        return int(self._input_size)
+
+    # ---- 追加: BGR(0..255 or uint8) のリストをまとめてモデル入力に整形 ----
+    def prepare_batch_from_bgr(self, bgr_list: List[np.ndarray]) -> np.ndarray:
+        H = self._session.get_inputs()[0].shape[1] or self._input_size
+        out = np.empty((len(bgr_list), H, H, 3), dtype=np.float32)
+        for i, im in enumerate(bgr_list):
+            if im is None:
+                # ダミーで白
+                out[i] = 255.0
+                continue
+            # 4ch(PNG)なら白に合成
+            if im.ndim == 3 and im.shape[2] == 4:
+                bgr = im[:, :, :3].astype(np.float32)
+                a = im[:, :, 3:4].astype(np.float32) / 255.0
+                bgr = bgr * a + 255.0 * (1.0 - a)
+                bgr = bgr.astype(np.uint8)
+            else:
+                bgr = im
+
+            # 正方形パディング
+            h, w = bgr.shape[:2]
+            side = max(h, w, H)
+            top = (side - h) // 2
+            left = (side - w) // 2
+            sq = cv2.copyMakeBorder(
+                bgr, top, side - h - top, left, side - w - left, borderType=cv2.BORDER_CONSTANT, value=(255, 255, 255)
+            )
+
+            # resize（元と比べて拡大: CUBIC / 縮小: AREA）
+            interp = cv2.INTER_CUBIC if side < H else cv2.INTER_AREA
+            resized = cv2.resize(sq, (H, H), interpolation=interp)
+
+            out[i] = resized.astype(np.float32)  # 正規化は元実装に合わせず(=そのまま0..255)
+        return out  # (B,H,W,3) float32
+
+    def prepare_batch_pil(self, images: list[Image.Image]) -> np.ndarray:
+        _, H, _, _ = self._session.get_inputs()[0].shape
+        batch = np.vstack([self._preprocess(im) for im in images])  # (B,H,W,3) float32
+        return batch
+
+    def prepare_batch_from_rgb_np(self, imgs_rgb: Sequence[np.ndarray]) -> np.ndarray:
+        """
+        Loader から受け取った RGB uint8 の np.ndarray 群を、
+        既存 _preprocess(PIL) と完全同一ロジックで (B,H,W,3) float32 に整形する。
+        """
+        _, height, _, _ = self._session.get_inputs()[0].shape  # NHWC 前提
+        B = len(imgs_rgb)
+        out = np.empty((B, height, height, 3), dtype=np.float32)
+
+        for i, arr in enumerate(imgs_rgb):
+            if arr is None:
+                # ダミー（全白）で埋める／もしくは raise にする
+                out[i].fill(255.0)
+                continue
+
+            # arr: RGB uint8 期待。例外ケースに備えた防御
+            if arr.ndim == 2:
+                arr = cv2.cvtColor(arr, cv2.COLOR_GRAY2RGB)  # (H,W) -> (H,W,3)
+            elif arr.shape[2] == 4:
+                # RGBA -> white 合成（PIL と同等）
+                # arr は RGBA（ここでは RGB 前提だが RGBA が来た場合も救済）
+                rgb = arr[:, :, :3].astype(np.float32)
+                alpha = arr[:, :, 3:4].astype(np.float32) / 255.0
+                rgb = rgb * alpha + 255.0 * (1.0 - alpha)
+                arr = rgb.astype(np.uint8)
+            else:
+                # (H,W,3) のはず
+                pass
+
+            # PIL 経路では最後に「RGB -> BGR」してから正方パディング＆リサイズ
+            bgr = arr[:, :, ::-1]  # RGB -> BGR
+
+            bgr = self.make_square(bgr, height)
+            bgr = self.smart_resize(bgr, height)
+
+            out[i] = bgr.astype(np.float32)  # 0..255 の float32（既存と同じ）
+
+        return out
+
+    # ---- 追加: すでに整形済みバッチを推論 ----
+    def infer_batch_prepared(
+        self,
+        batch_bgr_or_rgb_prepared: np.ndarray,
+        *,
+        thresholds: ThresholdMap | None = None,
+        max_tags: MaxTagsMap | None = None,
+    ) -> list[TagResult]:
+        """
+        すでに prepare_batch_* で (B,H,W,3) float32 に整形済みのバッチを受け取る。
+        """
+        batch = np.ascontiguousarray(batch_bgr_or_rgb_prepared, dtype=np.float32)
+        ort_start = perf_counter()
+        outputs = self._session.run(self._output_names, {self._input_name: batch})
+        ort_ms = (perf_counter() - ort_start) * 1000.0
+        logits = outputs[0]
+        # 以降は従来 infer_batch() の後半（post）と同じ処理へ
+        post_start = perf_counter()
+        results = self._postprocess_logits_topk(logits=logits, thresholds=thresholds, max_tags=max_tags)
+        # results = self._postprocess_logits(logits, thresholds, max_tags)
+        post_ms = (perf_counter() - post_start) * 1000.0
+
+        # ログ（従来と同じ書式に揃える）
+        batch_size = logits.shape[0]
+        total_ms = (0.0) + ort_ms + post_ms
+        imgs_per_second = batch_size / (total_ms / 1000.0) if total_ms > 0.0 else float("inf")
+        logger.info(
+            "WD14 batch=%d preprocess=%.2fms ort=%.2fms post=%.2fms total=%.2fms imgs/s=%.2f",
+            batch_size,
+            (0.0),
+            ort_ms,
+            post_ms,
+            total_ms,
+            imgs_per_second,
+        )
+
+        return results
+
+    # ---- 既存infer_batchの後半を切り出し（postだけ再利用）----
+    def _postprocess_logits(
+        self, logits: np.ndarray, thresholds: ThresholdMap | None, max_tags: MaxTagsMap | None
+    ) -> list[TagResult]:
+        if logits.shape[1] != len(self._labels):
+            raise RuntimeError(f"Model output dim {logits.shape[1]} != labels {len(self._labels)}")
+
+        post_start = perf_counter()
+        minv, maxv = float(np.min(logits)), float(np.max(logits))
+        if 0.0 <= minv <= 1.0 and 0.0 <= maxv <= 1.0:
+            probs = logits.astype(np.float32, copy=False)
+        else:
+            probs = _sigmoid(logits).astype(np.float32, copy=False)
+
+        resolved_thresholds = self._resolve_thresholds(self._default_thresholds, thresholds)
+        thr_vec = (
+            self._default_thr_vec
+            if resolved_thresholds == self._default_thresholds
+            else self._build_threshold_vector(resolved_thresholds)
+        )
+        # ★ 全カテゴリ共通の下限（例: 0.1）を合流
+        floor = getattr(self, "_score_floor", 0.0)
+        if floor > 0.0:
+            np.maximum(thr_vec, floor, out=thr_vec)  # in-place で底上げ
+
+        mask = probs >= thr_vec
+        masked = np.where(mask, probs, -np.inf)
+        order = np.argsort(-masked, axis=1, kind="stable")
+
+        resolved_limits = self._resolve_max_tags(self._default_max_tags, max_tags)
+        results: list[TagResult] = []
+        cats = self._label_cats
+
+        for b in range(order.shape[0]):
+            picks_idx, picks_score = [], []
+            remaining = np.full(8, np.iinfo(np.int32).max, dtype=np.int32)
+            for cat, lim in resolved_limits.items():
+                if lim is not None:
+                    c = int(cat)
+                    if 0 <= c < remaining.size:
+                        remaining[c] = max(0, int(lim))
+            row = order[b]
+            srow = masked[b]
+            for j in row:
+                s = srow[j]
+                if not np.isfinite(s):
+                    break
+                c = cats[j]
+                if remaining[c] <= 0:
+                    continue
+                picks_idx.append(int(j))
+                picks_score.append(float(s))
+                remaining[c] -= 1
+
+            preds = [
+                TagPrediction(
+                    name=str(self._label_names[i]), score=picks_score[k], category=TagCategory(int(self._label_cats[i]))
+                )
+                for k, i in enumerate(picks_idx)
+            ]
+            results.append(TagResult(tags=preds))
+        post_ms = (perf_counter() - post_start) * 1000.0
+        logger.info("WD14 post=%.2fms", post_ms)
+        return results
+
+    def _postprocess_logits_topk(
+        self,
+        logits: np.ndarray,
+        *,
+        thresholds: ThresholdMap | None,
+        max_tags: MaxTagsMap | None,
+    ) -> list[TagResult]:
+        """
+        logits → TagResult の高速後処理。
+        - 閾値でマスク → top-K だけ argpartition → その小さな集合だけを降順ソート
+        - カテゴリ上限を守りつつ高スコア順に採用
+        """
+        # --- 1) 確率化（モデルにより logit/確率の両方がある）
+        if logits.dtype != np.float32:
+            logits = logits.astype(np.float32, copy=False)
+        mn, mx = float(np.min(logits)), float(np.max(logits))
+        probs = logits if (0.0 <= mn <= 1.0 and 0.0 <= mx <= 1.0) else _sigmoid(logits).astype(np.float32, copy=False)
+
+        B, C = probs.shape
+
+        # --- 2) 閾値ベクトル（デフォルトキャッシュを再利用）
+        resolved_thr = self._resolve_thresholds(self._default_thresholds, thresholds)
+        thr_vec = (
+            self._default_thr_vec
+            if resolved_thr == self._default_thresholds
+            else self._build_threshold_vector(resolved_thr)
+        )
+
+        # --- 3) カテゴリ上限
+        resolved_limits = self._resolve_max_tags(self._default_max_tags, max_tags)
+
+        # unbounded（None）を含むかで、画像ごとの K を決める
+        has_unbounded = any(v is None for v in resolved_limits.values())
+        base_cap = None if has_unbounded else max(sum(int(v) for v in resolved_limits.values() if v is not None), 64)
+        hard_cap = max(1, int(self._topk_cap))
+
+        names = self._label_names
+        cats = self._label_cats  # (C,)
+
+        results: list[TagResult] = []
+
+        # --- 画像ごと（バッチ次元）に処理
+        for b in range(B):
+            scores = probs[b]  # (C,)
+            # 閾値マスク
+            hit_mask = scores >= thr_vec  # (C,)
+            hit_count = int(hit_mask.sum())
+            if hit_count == 0:
+                results.append(TagResult(tags=[]))
+                continue
+
+            # 画像ごとの上限 K（大きすぎて全件ソートしないように）
+            if base_cap is None:
+                K = min(hit_count, hard_cap)  # unbounded がある時はヒット数か hard_cap の小さい方
+            else:
+                K = min(hit_count, base_cap, hard_cap)
+
+            # -inf でマスク（閾値未満は候補から除外）
+            masked = np.where(hit_mask, scores, -np.inf)
+
+            # top-K 候補だけ取り出す（argpartition は O(C)）
+            # すべて -inf の場合に備え、kth を安全側でクリップ
+            kth = max(0, min(K - 1, C - 1))
+            cand_idx = np.argpartition(-masked, kth)[:K]  # (≤K,)
+
+            # その小さな集合だけ降順ソート（O(K log K)）
+            cand_sorted = cand_idx[np.argsort(-masked[cand_idx], kind="stable")]
+
+            # カテゴリ上限の残数（0..7 あたりまで想定、足りなければ自動拡張でもOK）
+            remaining = np.full(8, np.iinfo(np.int32).max, dtype=np.int32)
+            for cat, lim in resolved_limits.items():
+                if lim is not None:
+                    c = int(cat)
+                    if 0 <= c < remaining.size:
+                        remaining[c] = max(0, int(lim))
+
+            picks_idx: list[int] = []
+            picks_score: list[float] = []
+            for j in cand_sorted:
+                c = int(cats[j])
+                if c < remaining.size and remaining[c] <= 0:
+                    continue
+                s = float(scores[j])
+                if not np.isfinite(s) or s < float(thr_vec[j]):  # 念のための防御
+                    continue
+                picks_idx.append(int(j))
+                picks_score.append(s)
+                if c < remaining.size:
+                    remaining[c] -= 1
+
+            # TagResult へ（名前/カテゴリはベクトルから引くので高速）
+            preds = [
+                TagPrediction(
+                    name=str(names[i]),
+                    score=picks_score[k],
+                    category=TagCategory(int(cats[i])),
+                )
+                for k, i in enumerate(picks_idx)
+            ]
+            results.append(TagResult(tags=preds))
+
+        return results
+
+    # 既存の _preprocess（1枚→(1,H,W,3)）は残しつつ、
+    # バッチ用の「1枚→(H,W,3) float32」を返す軽量版を追加
+    def _preprocess_np(self, image: Image.Image) -> np.ndarray:
+        """1枚ぶんを (H, W, 3) float32 (BGR, 0..255) で返す。"""
+        height = self._input_size
+
+        # alpha to white（PillowはC実装でGIL解放）
+        image = image.convert("RGBA")
+        new_image = Image.new("RGBA", image.size, "WHITE")
+        new_image.paste(image, mask=image)
+        image = new_image.convert("RGB")
+        rgb = np.asarray(image)  # HWC, uint8
+        bgr = rgb[:, :, ::-1]  # RGB -> BGR
+
+        bgr = self.make_square(bgr, height)
+        bgr = self.smart_resize(bgr, height)
+        # ここで float32 化。正規化はモデル仕様に合わせ 0..255 のまま（従来どおり）
+        return bgr.astype(np.float32, copy=False)
 
     # ==== 追加: しきい値ベクトルを作る ====
     def _build_threshold_vector(self, thresholds: dict[TagCategory | int, float]) -> np.ndarray:
@@ -310,10 +637,31 @@ class WD14Tagger(ITagger):
             return []
 
         total_start = perf_counter()
+        # ---------- 並列前処理 ----------
         preprocess_start = perf_counter()
-        batch = np.vstack([self._preprocess(image) for image in image_list])
+        B = len(image_list)
+        H = self._input_size
+        # 事前確保した一塊のバッファ（再利用はタグ付け側のバッチライフサイクル次第）
+        batch = np.empty((B, H, H, 3), dtype=np.float32)
+
+        if self._pre_exec is None or self._pre_workers <= 1 or B == 1:
+            # シングルスレッド（既定動作と同じ）
+            for i, im in enumerate(image_list):
+                batch[i] = self._preprocess(im)
+                # batch[i] = self._preprocess_np(im)
+        else:
+            # 並列（Pillow/CV2 はC実装でGIL解放するので効果あり）
+            # enumerate を渡して index を保つ
+            def _work(pair):
+                i, im = pair
+                batch[i] = self._preprocess(im)
+                # batch[i] = self._preprocess_np(im)
+
+            # map は順序維持、各タスクはC実装で実行
+            self._pre_exec.map(_work, enumerate(image_list), chunksize=max(1, B // (self._pre_workers * 2)))
         preprocess_ms = (perf_counter() - preprocess_start) * 1000.0
 
+        # ---------- 推論 ----------
         ort_start = perf_counter()
         outputs = self._session.run(self._output_names, {self._input_name: batch})
         ort_ms = (perf_counter() - ort_start) * 1000.0
@@ -340,6 +688,9 @@ class WD14Tagger(ITagger):
             if resolved_thresholds == self._default_thresholds
             else self._build_threshold_vector(resolved_thresholds)
         )
+        floor = getattr(self, "_score_floor", 0.0)
+        if floor > 0.0:
+            np.maximum(thr_vec, floor, out=thr_vec)
         # マスク（B,C）
         mask = probs >= thr_vec  # broadcast
 

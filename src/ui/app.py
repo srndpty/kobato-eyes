@@ -17,6 +17,9 @@ if HEADLESS:
     os.environ.setdefault("QT_OPENGL", "software")
 
 logger = logging.getLogger(__name__)
+# import faulthandler, threading
+# faulthandler.enable()
+# threading.Timer(60, faulthandler.dump_traceback).start()
 
 
 def _resolve_log_level(value: str | None) -> int:
@@ -94,6 +97,64 @@ else:
     from ui.settings_tab import SettingsTab
     from ui.tags_tab import TagsTab
 
+    def _install_crash_handlers():
+        import atexit
+        import faulthandler
+        import os
+        import signal
+        import sys
+        import threading
+        import time
+        import traceback
+        from pathlib import Path
+
+        log_dir = Path(os.environ.get("APPDATA", ".")) / "kobato-eyes" / "logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        log_file = log_dir / "crash.log"
+
+        # すべてのスレッドのスタックを致命的シグナルで吐く
+        f = open(log_file, "a", encoding="utf-8", buffering=1)
+        try:
+            faulthandler.enable(all_threads=True, file=f)
+        except Exception:
+            pass
+
+        def _dump_with_header(header: str):
+            try:
+                f.write(f"\n==== {header} {time.ctime()} ====\n")
+                faulthandler.dump_traceback(file=f, all_threads=True)
+                f.flush()
+            except Exception:
+                pass
+
+        def _sys_excepthook(t, v, tb):
+            try:
+                f.write(f"\n==== sys.excepthook {time.ctime()} ====\n")
+                traceback.print_exception(t, v, tb, file=f)
+                f.flush()
+            except Exception:
+                pass
+
+        sys.excepthook = _sys_excepthook
+
+        def _threading_excepthook(args):
+            _sys_excepthook(args.exc_type, args.exc_value, args.exc_traceback)
+
+        try:
+            threading.excepthook = _threading_excepthook
+        except Exception:
+            pass
+
+        for sname in ("SIGABRT", "SIGTERM", "SIGBREAK"):
+            s = getattr(signal, sname, None)
+            if s:
+                try:
+                    signal.signal(s, lambda signum, frame: _dump_with_header(f"signal {signum}"))
+                except Exception:
+                    pass
+
+        atexit.register(lambda: f.write(f"\n==== process exit {time.ctime()} ====\n") or f.flush())
+
     def _quick_settle_sqlite(db_path: str | os.PathLike) -> None:
         try:
             conn = get_conn(db_path)
@@ -156,6 +217,8 @@ else:
         """Launch the kobato-eyes GUI application."""
 
         setup_logging()
+        _install_crash_handlers()
+
         app = QApplication(sys.argv)
 
         def _finalise_onnx_profiles() -> None:

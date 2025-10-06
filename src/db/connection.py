@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import os
 import sqlite3
+import time
 from pathlib import Path
 from threading import Lock
 
@@ -15,32 +16,83 @@ logger = logging.getLogger(__name__)
 _BOOTSTRAP_LOCK = Lock()
 _BOOTSTRAPPED: set[str] = set()
 
+_QUIESCE = False
+_QUIESCE_LOCK = Lock()
+
+
+def begin_quiesce() -> None:
+    """UNSAFE 区間に入る。通常の新規接続を禁止する。"""
+    global _QUIESCE
+    with _QUIESCE_LOCK:
+        _QUIESCE = True
+    print("begin_quiesce()")
+
+
+def end_quiesce() -> None:
+    """UNSAFE 区間を抜ける。通常接続を許可する。"""
+    global _QUIESCE
+    with _QUIESCE_LOCK:
+        _QUIESCE = False
+    print("end_quiesce()")
+
 
 def _ensure_indexes(conn: sqlite3.Connection) -> None:
-    """必要な索引を作成（存在すれば何もしない）"""
-    conn.executescript(
-        """
-        -- 検索・集計高速化用
-        CREATE UNIQUE INDEX IF NOT EXISTS uq_tags_name          ON tags(name);
-        CREATE INDEX IF NOT EXISTS idx_tags_category            ON tags(category);
+    """
+    必要な索引を作成（存在すれば何もしない）。
+    ※起動遅延を避けるため、環境変数でスキップ可能＆1本ずつ時間をログ出力。
+    """
+    import os
+    import time
 
-        -- file_tags は (file_id, tag_id) の PRIMARY KEY があるので file_id 先頭の探索は担保される
-        CREATE INDEX IF NOT EXISTS idx_file_tags_tag_id         ON file_tags(tag_id);
-        CREATE INDEX IF NOT EXISTS idx_file_tags_tag_score      ON file_tags(tag_id, score);
+    if os.environ.get("KE_SKIP_INDEX_BUILD") == "1":
+        logger.warning("Skip building indexes (KE_SKIP_INDEX_BUILD=1)")
+        return
 
-        -- files
-        CREATE INDEX IF NOT EXISTS files_present_path_idx       ON files(is_present, path);
-        CREATE INDEX IF NOT EXISTS files_present_mtime_idx      ON files(is_present, mtime DESC);
+    # “重い”候補（巨大 file_tags で特に時間がかかる）
+    HEAVY = {"idx_file_tags_tag_score"}
+    skip_heavy = os.environ.get("KE_SKIP_HEAVY_INDEXES") == "1"
 
-        -- embeddings
-        CREATE INDEX IF NOT EXISTS idx_embeddings_model         ON embeddings(model);
-        """
+    def exists(name: str) -> bool:
+        row = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='index' AND name=?",
+            (name,),
+        ).fetchone()
+        return row is not None
+
+    def build(name: str, sql: str) -> None:
+        if exists(name):
+            logger.info("index: %-28s already exists; skip", name)
+            return
+        if skip_heavy and name in HEAVY:
+            logger.warning("index: %-28s skipped (KE_SKIP_HEAVY_INDEXES=1)", name)
+            return
+        t0 = time.perf_counter()
+        logger.info("index: %-28s begin", name)
+        try:
+            # インデックス作成を速める軽量PRAGMA（この接続内のみ）
+            conn.execute("PRAGMA synchronous=OFF")
+            conn.execute("PRAGMA temp_store=MEMORY")
+            conn.execute("PRAGMA cache_size=-262144")  # ~256MB
+            conn.execute(sql)
+            conn.commit()
+        finally:
+            dt = time.perf_counter() - t0
+            logger.info("index: %-28s end (%.2fs)", name, dt)
+
+    build("uq_tags_name", "CREATE UNIQUE INDEX IF NOT EXISTS uq_tags_name          ON tags(name)")
+    build("idx_tags_category", "CREATE INDEX IF NOT EXISTS idx_tags_category            ON tags(category)")
+    build("idx_file_tags_tag_id", "CREATE INDEX IF NOT EXISTS idx_file_tags_tag_id         ON file_tags(tag_id)")
+    build(
+        "idx_file_tags_tag_score", "CREATE INDEX IF NOT EXISTS idx_file_tags_tag_score      ON file_tags(tag_id, score)"
     )
-    # 遅いので除外、別途どこかでやりたい
-    # try:
-    #     conn.execute("ANALYZE")
-    # except sqlite3.DatabaseError:
-    #     pass
+    build(
+        "files_present_path_idx", "CREATE INDEX IF NOT EXISTS files_present_path_idx       ON files(is_present, path)"
+    )
+    build(
+        "files_present_mtime_idx",
+        "CREATE INDEX IF NOT EXISTS files_present_mtime_idx      ON files(is_present, mtime DESC)",
+    )
+    build("idx_embeddings_model", "CREATE INDEX IF NOT EXISTS idx_embeddings_model         ON embeddings(model)")
 
 
 def _resolve_db_target(db_path: str | Path) -> tuple[str, bool, bool, str, Path | None]:
@@ -108,21 +160,35 @@ def _apply_runtime_pragmas(conn: sqlite3.Connection, *, is_memory: bool) -> None
             pass
 
 
+def _exec_pragma_retry(cur: sqlite3.Cursor, sql: str, retries: int = 40, sleep_sec: float = 0.1):
+    last = None
+    for _ in range(retries):
+        try:
+            cur.execute(sql)
+            return
+        except sqlite3.OperationalError as e:
+            last = e
+            if "locked" not in str(e).lower() and "busy" not in str(e).lower():
+                raise
+            time.sleep(sleep_sec)
+    raise last
+
+
 def _apply_pragmas(conn: sqlite3.Connection, *, is_memory: bool) -> None:
     cur = conn.cursor()
     try:
         # 既存
-        cur.execute("PRAGMA foreign_keys=ON;")
+        _exec_pragma_retry(cur, "PRAGMA foreign_keys=ON;")
         if not is_memory:
             # WAL はDBに永続化される
-            cur.execute("PRAGMA journal_mode=WAL;")
+            _exec_pragma_retry(cur, "PRAGMA journal_mode=WAL;")
         # ★ここから毎接続で効く高速化系（永続ではない）
-        cur.execute("PRAGMA synchronous=NORMAL;")  # COMMIT の fsync を軽く
-        cur.execute("PRAGMA temp_store=MEMORY;")  # tempをメモリへ
-        cur.execute("PRAGMA cache_size=-200000;")  # 約200MBのページキャッシュ
-        cur.execute("PRAGMA wal_autocheckpoint=50000;")  # WAL約200MBで自動チェックポイント
+        _exec_pragma_retry(cur, "PRAGMA synchronous=NORMAL;")  # COMMIT の fsync を軽く
+        _exec_pragma_retry(cur, "PRAGMA temp_store=MEMORY;")  # tempをメモリへ
+        _exec_pragma_retry(cur, "PRAGMA cache_size=-200000;")  # 約200MBのページキャッシュ
+        _exec_pragma_retry(cur, "PRAGMA wal_autocheckpoint=50000;")  # WAL約200MBで自動チェックポイント
         try:
-            cur.execute("PRAGMA mmap_size=1073741824;")  # 1GBのmmap（対応環境のみ）
+            _exec_pragma_retry(cur, "PRAGMA mmap_size=1073741824;")  # 1GBのmmap（対応環境のみ）
         except sqlite3.DatabaseError:
             pass
         # さらに攻めるなら（任意）
@@ -157,6 +223,18 @@ def bootstrap_if_needed(db_path: str | Path, *, timeout: float = 30.0) -> None:
     # :memory: / file::memory: は起動都度スキーマ適用のみ
     if is_memory:
         logger.info("Bootstrapping schema at: %s", display_path)
+        # t0 = time.perf_counter()
+        wal = f"{display_path}-wal"
+        shm = f"{display_path}-shm"
+        try:
+            logger.info(
+                "DB sizes: db=%s wal=%s shm=%s",
+                os.path.getsize(display_path) if os.path.exists(display_path) else 0,
+                os.path.getsize(wal) if os.path.exists(wal) else 0,
+                os.path.getsize(shm) if os.path.exists(shm) else 0,
+            )
+        except Exception:
+            pass
         return
 
     with _BOOTSTRAP_LOCK:
@@ -179,12 +257,26 @@ def bootstrap_if_needed(db_path: str | Path, *, timeout: float = 30.0) -> None:
                 except sqlite3.DatabaseError:
                     pass
 
-            ensure_schema(conn)  # ここで必要なテーブル・インデックス・マイグレーション
-            _ensure_indexes(conn)  # 追加の実運用向け索引
-            try:
-                conn.execute("PRAGMA optimize;")
-            except sqlite3.DatabaseError:
-                pass
+            t1 = time.perf_counter()
+            logger.info("ensure_schema: begin")
+            ensure_schema(conn)
+            logger.info("ensure_schema: end (%.2fs)", time.perf_counter() - t1)
+
+            t2 = time.perf_counter()
+            logger.info("_ensure_indexes: begin")
+            _ensure_indexes(conn)
+            logger.info("_ensure_indexes: end (%.2fs)", time.perf_counter() - t2)
+
+            # optimize は重くなる個体があるので、一旦オフにできるスイッチ
+            if os.environ.get("KE_SKIP_OPTIMIZE") != "1":
+                t3 = time.perf_counter()
+                try:
+                    conn.execute("PRAGMA optimize;")
+                except sqlite3.DatabaseError:
+                    pass
+                logger.info("optimize: end (%.2fs)", time.perf_counter() - t3)
+            else:
+                logger.info("optimize: skipped by KE_SKIP_OPTIMIZE=1")
         finally:
             conn.close()
         _BOOTSTRAPPED.add(target)
@@ -194,8 +286,12 @@ def get_conn(
     db_path: str | Path,
     *,
     timeout: float = 30.0,
+    allow_when_quiesced: bool = False,
 ) -> sqlite3.Connection:
     """Create a SQLite connection with WAL and foreign-key support enabled."""
+    # quiesce 中は通常の新規接続を拒否（DBWriter など専用だけ allow）
+    if _QUIESCE and not allow_when_quiesced:
+        raise RuntimeError("DB is quiesced (UNSAFE fast mode active)")
     target, is_memory, uri, _, _ = _resolve_db_target(db_path)
     bootstrap_if_needed(db_path, timeout=timeout)
     conn = _connect_to_target(target, timeout=timeout, uri=uri, is_memory=is_memory)
@@ -206,4 +302,4 @@ def get_conn(
     return conn
 
 
-__all__ = ["bootstrap_if_needed", "get_conn"]
+__all__ = ["bootstrap_if_needed", "get_conn", "begin_quiesce", "end_quiesce"]

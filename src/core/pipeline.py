@@ -4,16 +4,21 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import os
+import queue
+import sqlite3
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Callable, Iterable, Iterator, Mapping, Optional, Sequence, Set
+from typing import Callable, Iterable, Iterator, List, Mapping, Optional, Sequence, Set, Tuple
 
 import numpy as np
 from PIL import Image
 
-from core.db_writer import DBWriter
+from core.db_writer import DBItem, DBWriter
 from utils.env import is_headless
 
 if is_headless():
@@ -42,11 +47,209 @@ from db.repository import fts_delete_rows, get_file_by_path, list_untagged_under
 from dup.indexer import DuplicateIndexer, EmbedderProtocol, add_embeddings_to_hnsw, load_hnsw_index, save_hnsw_index
 from index.hnsw import HNSWIndex
 from sig.phash import dhash, phash
-from tagger.base import ITagger, TagCategory
+from tagger.base import ITagger, TagCategory, TagResult
 from utils.hash import compute_sha256
 from utils.paths import ensure_dirs, get_db_path, get_index_dir
 
 logger = logging.getLogger(__name__)
+
+
+# ============================================================
+# PrefetchLoader: 画像パス列を「(paths, images)」のバッチにして先読み
+# ============================================================
+class PrefetchLoader:
+    def __init__(
+        self,
+        paths: Sequence[str],
+        *,
+        batch_size: int,
+        prefetch_batches: int = 2,
+        io_workers: int | None = None,
+    ) -> None:
+        self._paths = paths
+        self._B = int(batch_size)
+        self._depth = max(1, int(prefetch_batches))
+        cpu = os.cpu_count() or 4
+        self._workers = max(1, int(io_workers or min(8, cpu)))
+        self._q: "queue.Queue[Tuple[list[str], list[Image.Image]] | None]" = queue.Queue(self._depth)
+        self._stop = threading.Event()
+        self._th = threading.Thread(target=self._producer, name="ke-prefetch", daemon=True)
+        self._th.start()
+        logger.info("PrefetchLoader: start (B=%d, depth=%d, io_workers=%d)", self._B, self._depth, self._workers)
+
+    def _load_one(self, p: str) -> Image.Image | None:
+        try:
+            # ファイルハンドルは即クローズ。decode を完了させてRAMへ載せる
+            with Image.open(p) as im:
+                im.load()  # デコードをここで完了させる
+                return im.convert("RGB")  # 透明合成は tagger 側でも行うので RGBでOK
+        except Exception as e:
+            logger.warning("PrefetchLoader: failed to load %s: %s", p, e)
+            return None
+
+    def _producer(self) -> None:
+        try:
+            with ThreadPoolExecutor(max_workers=self._workers, thread_name_prefix="ke-io") as ex:
+                N = len(self._paths)
+                for i in range(0, N, self._B):
+                    if self._stop.is_set():
+                        break
+                    batch_paths = list(self._paths[i : i + self._B])
+                    # I/O を並列に投げる
+                    futs = {ex.submit(self._load_one, p): p for p in batch_paths}
+                    imgs: list[Image.Image] = []
+                    for fut in as_completed(futs):
+                        img = fut.result()
+                        if img is not None:
+                            imgs.append(img)
+                    # ここで順序は問いません（推論的に問題なし）。順序維持したい場合は gather 方式に変える
+                    self._q.put((batch_paths, imgs))
+                    if self._stop.is_set():
+                        break
+        finally:
+            # 終端マーカー
+            try:
+                self._q.put(None, timeout=1)
+            except Exception:
+                pass
+
+    def __iter__(self) -> Iterator[Tuple[list[str], list[Image.Image]]]:
+        while True:
+            item = self._q.get()
+            if item is None:
+                return
+            yield item
+
+    def close(self) -> None:
+        self._stop.set()
+        try:
+            # 早期終了時にキューを開放
+            while True:
+                self._q.get_nowait()
+        except Exception:
+            pass
+        if self._th.is_alive():
+            self._th.join(timeout=2.0)
+        logger.info("PrefetchLoader: stop")
+
+
+class PrefetchLoaderPrepared:
+    """
+    画像を並列ロードして前処理（PIL→RGB、正方形化＋リサイズ）まで済ませ、
+    (paths, np_batch, sizes) を事前に用意して供給するローダ。
+      - paths: List[str]（バッチ内のファイルパス。順序は元の順）
+      - np_batch: np.ndarray 形状 (B, H, W, 3), float32
+      - sizes: List[Tuple[int,int]] 元画像の (width, height)
+    """
+
+    def __init__(
+        self,
+        paths: List[str],
+        *,
+        tagger,  # WD14Tagger インスタンス（prepare_batch_pil を呼ぶ）
+        batch_size: int,
+        prefetch_batches: int = 2,
+        io_workers: int | None = None,
+    ) -> None:
+        self._paths = list(paths)
+        self._B = int(batch_size)
+        self._depth = max(1, int(prefetch_batches))
+        cpu = os.cpu_count() or 4
+        self._io_workers: int = max(1, int(io_workers or min(8, cpu)))  # ← int のまま保持
+        self._tagger = tagger
+
+        # (paths, np_batch, sizes) or None(sentinal)
+        self._q: "queue.Queue[tuple[list[str], np.ndarray, list[tuple[int,int]]] | None]" = queue.Queue(self._depth)
+        self._stop = threading.Event()
+        self._th = threading.Thread(target=self._producer, name="PL-Feeder", daemon=True)
+        self._th.start()
+        logger.info(
+            "PrefetchLoaderPrepared: start (B=%d, depth=%d, io_workers=%d)", self._B, self._depth, self._io_workers
+        )
+
+    # 個別ロード（PIL）
+    def _load_one(self, p: str) -> tuple[str, Image.Image | None, tuple[int, int] | None]:
+        try:
+            with Image.open(p) as im:
+                im.load()  # デコードを完了（ハンドル即解放）
+                w, h = im.size
+                rgb = im.convert("RGB")  # 透明合成は tagger 側でOKだが、簡便にRGBへ
+                return (p, rgb, (w, h))
+        except Exception as e:
+            logger.warning("PrefetchLoaderPrepared: failed to load %s: %s", p, e)
+            return (p, None, None)
+
+    def _producer(self) -> None:
+        try:
+            N = len(self._paths)
+            with ThreadPoolExecutor(max_workers=self._io_workers, thread_name_prefix="ke-io") as ex:
+                for i in range(0, N, self._B):
+                    if self._stop.is_set():
+                        break
+
+                    batch_paths = self._paths[i : i + self._B]
+                    # 並列ロード（順序は futures から辞書に集めて後で整える）
+                    futs = [ex.submit(self._load_one, p) for p in batch_paths]
+                    # 収集（まずは path -> (PIL or None, size or None)）
+                    tmp: dict[str, tuple[Image.Image | None, tuple[int, int] | None]] = {}
+                    for fut in as_completed(futs):
+                        p, pil, sz = fut.result()
+                        tmp[p] = (pil, sz)
+
+                    # 入力量産（順序を batch_paths で揃える）
+                    pil_list: list[Image.Image] = []
+                    sizes: list[tuple[int, int]] = []
+                    kept_paths: list[str] = []
+                    for p in batch_paths:
+                        pil, sz = tmp.get(p, (None, None))
+                        if pil is None or sz is None:
+                            continue
+                        pil_list.append(pil)
+                        sizes.append(sz)
+                        kept_paths.append(p)
+
+                    if not pil_list:
+                        # 空でも終端はまだ先なので継続
+                        continue
+
+                    # 前処理（PIL -> np.ndarray (B,H,W,3) float32）
+                    try:
+                        np_batch = self._tagger.prepare_batch_pil(pil_list)
+                    finally:
+                        # PIL バッファ解放（np_batchは tagger 側で確保済み）
+                        for im in pil_list:
+                            try:
+                                im.close()
+                            except Exception:
+                                pass
+
+                    # キューへ
+                    self._q.put((kept_paths, np_batch, sizes))
+                    if self._stop.is_set():
+                        break
+        finally:
+            try:
+                self._q.put(None, timeout=1)
+            except Exception:
+                pass
+
+    def __iter__(self) -> Iterator[Tuple[list[str], np.ndarray, list[tuple[int, int]]]]:
+        while True:
+            item = self._q.get()
+            if item is None:
+                return
+            yield item
+
+    def close(self) -> None:
+        self._stop.set()
+        try:
+            while True:
+                self._q.get_nowait()
+        except Exception:
+            pass
+        if self._th.is_alive():
+            self._th.join(timeout=2.0)
+        logger.info("PrefetchLoaderPrepared: stop")
 
 
 class IndexPhase(Enum):
@@ -313,7 +516,7 @@ def scan_and_tag(
     tagger_sig = current_tagger_sig(settings, thresholds=thresholds, max_tags=max_tags_map)
     db_path = get_db_path()
     bootstrap_if_needed(db_path)
-    conn = get_conn(db_path)
+    conn = get_conn(db_path, allow_when_quiesced=True)
     tagger: ITagger | None = None
 
     def _like_pattern(path: Path) -> str:
@@ -577,6 +780,748 @@ class _FileRecord:
     load_failed: bool = False
 
 
+def wait_for_unlock(db_path: str, timeout: float = 15.0) -> bool:
+    """短命接続で軽く叩き、ロックが抜けるのを待つ（最大 timeout 秒）。"""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            with sqlite3.connect(db_path, timeout=1.0) as c:
+                # 何か軽いクエリで OK（PRAGMA でも SELECT でも可）
+                c.execute("SELECT 1")
+                return True
+        except sqlite3.OperationalError as e:
+            if "locked" not in str(e).lower():
+                # ロック以外は待っても無意味
+                return True
+        time.sleep(0.25)
+    return False
+
+
+def _settle_after_quiesce(db_path: str, progress_cb=None) -> None:
+    logger.info("_settle_after_quiesce (best-effort)")
+    # 1) ロックが抜けるのを最大15秒だけ待つ（抜けなくても続行）
+    ok = wait_for_unlock(db_path, timeout=15.0)
+    if not ok:
+        logger.warning("settle: DB still locked; proceeding best-effort")
+
+    # 2) 掃除専用の短命接続で実行（既存接続に PRAGMA を当てない）
+    try:
+        with sqlite3.connect(db_path, timeout=30.0) as conn:
+            cur = conn.cursor()
+            # 少し広めに
+            cur.execute("PRAGMA busy_timeout=30000")
+            # MEMORY→WAL への切替は強要しない。チェックポイント＆最適化だけ
+            try:
+                cur.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            except sqlite3.OperationalError as e:
+                logger.warning("settle: wal_checkpoint failed: %s", e)
+            try:
+                cur.execute("PRAGMA optimize")
+            except sqlite3.OperationalError as e:
+                logger.warning("settle: optimize failed: %s", e)
+            conn.commit()
+    except Exception as e:
+        logger.warning("settle: sweep connection failed: %s", e)
+
+    # 3) ほんの少しだけ間を空けると Windows だと安定することが多い
+    time.sleep(0.2)
+
+
+# ============================================
+# 新規: 共通コンテキスト / 進捗エミッタ
+# ============================================
+
+
+@dataclass
+class PipelineContext:
+    db_path: str | Path
+    settings: PipelineSettings
+    thresholds: dict[TagCategory, float]
+    max_tags_map: dict[TagCategory, int]
+    tagger_sig: str
+    progress_cb: Callable[[IndexProgress], None] | None = None
+    is_cancelled: Callable[[], bool] | None = None
+
+
+class ProgressEmitter:
+    def __init__(self, cb: Callable[[IndexProgress], None] | None):
+        self._cb = cb
+        self._last: dict[IndexPhase, tuple[int, float]] = {}
+
+    def emit(self, progress: IndexProgress, force: bool = False) -> None:
+        if self._cb is None:
+            return
+        import time as _t
+
+        now = _t.perf_counter()
+        last = self._last.get(progress.phase)
+        should = force or last is None
+        if not should and last is not None:
+            last_done, last_time = last
+            if progress.total > 0:
+                step = max(1, progress.total // 100)
+                should = (progress.done >= progress.total) or ((progress.done - last_done) >= step)
+            should = should or ((now - last_time) >= 0.1)
+        if should:
+            self._last[progress.phase] = (progress.done, now)
+            try:
+                self._cb(progress)
+            except Exception:
+                # Qt 側破棄などで死んだら停止
+                logger.exception("Progress callback raised; disabling further updates.")
+                self._cb = None
+
+    def cancelled(self, fn: Callable[[], bool] | None) -> bool:
+        if fn is None:
+            return False
+        try:
+            return bool(fn())
+        except Exception:
+            logger.exception("Cancellation callback failed")
+            return False
+
+
+# ============================================
+# 新規: スキャン段階
+# ============================================
+class Scanner:
+    def __init__(self, ctx: PipelineContext, emitter: ProgressEmitter):
+        self.ctx = ctx
+        self.emitter = emitter
+
+    def scan(self) -> tuple[list[_FileRecord], dict[str, int]]:
+        settings = self.ctx.settings
+        roots = [Path(root).expanduser() for root in settings.roots if root]
+        roots = [r for r in roots if r.exists()]
+        excluded_paths = [Path(p).expanduser() for p in settings.excluded if p]
+        allow_exts = {ext.lower() for ext in (settings.allow_exts or DEFAULT_EXTENSIONS)}
+
+        stats = {"scanned": 0, "new_or_changed": 0}
+        if not roots:
+            logger.info("No valid roots configured; skipping scan.")
+            return [], stats
+
+        db_literal = str(self.ctx.db_path)
+        conn = get_conn(
+            db_literal
+            if (db_literal.startswith("file:") or db_literal == ":memory:")
+            else Path(self.ctx.db_path).expanduser(),
+            allow_when_quiesced=True,
+        )
+
+        records: list[_FileRecord] = []
+        try:
+            logger.info("Scanning %d root(s) for eligible images", len(roots))
+            for image_path in iter_images(roots, excluded=excluded_paths, extensions=allow_exts):
+                if self.emitter.cancelled(self.ctx.is_cancelled):
+                    break
+                stats["scanned"] += 1
+                self.emitter.emit(
+                    IndexProgress(phase=IndexPhase.SCAN, done=stats["scanned"], total=-1, message=str(image_path))
+                )
+
+                try:
+                    stat = image_path.stat()
+                except OSError as exc:
+                    logger.warning("Failed to stat %s: %s", image_path, exc)
+                    continue
+
+                row = get_file_by_path(conn, str(image_path))
+                is_new = row is None
+                if row is not None:
+                    size_changed = int(row["size"] or 0) != stat.st_size
+                    mtime_changed = float(row["mtime"] or 0.0) != stat.st_mtime
+                else:
+                    size_changed = True
+                    mtime_changed = True
+
+                if is_new or size_changed or mtime_changed:
+                    try:
+                        sha = compute_sha256(image_path)
+                    except OSError as exc:
+                        logger.warning("Failed to hash %s: %s", image_path, exc)
+                        continue
+                    changed = True if is_new else (str(row["sha256"] or "") != sha)  # type: ignore[index]
+                else:
+                    sha = str(row["sha256"] or "")  # type: ignore[index]
+                    changed = False
+
+                indexed_at = None if changed else (row["indexed_at"] if row else None)
+                file_id = upsert_file(
+                    conn,
+                    path=str(image_path),
+                    size=stat.st_size,
+                    mtime=stat.st_mtime,
+                    sha256=sha,
+                    indexed_at=indexed_at,
+                )
+
+                tag_exists = (
+                    conn.execute("SELECT 1 FROM file_tags WHERE file_id = ? LIMIT 1", (file_id,)).fetchone() is not None
+                )
+                embed_exists = (
+                    conn.execute(
+                        "SELECT 1 FROM embeddings WHERE file_id = ? AND model = ? LIMIT 1",
+                        (file_id, settings.embed_model.name),
+                    ).fetchone()
+                    is not None
+                )
+                stored_sig = str(row["tagger_sig"]) if (row is not None and row["tagger_sig"] is not None) else None
+                stored_tagged_at = row["last_tagged_at"] if row is not None else None
+                last_tagged_at = float(stored_tagged_at) if stored_tagged_at is not None else None
+                needs_tagging = is_new or changed or (not tag_exists) or (stored_sig != self.ctx.tagger_sig)
+
+                records.append(
+                    _FileRecord(
+                        file_id=file_id,
+                        path=image_path,
+                        size=stat.st_size,
+                        mtime=stat.st_mtime,
+                        sha=sha,
+                        is_new=is_new,
+                        changed=changed,
+                        tag_exists=tag_exists,
+                        embed_exists=embed_exists,
+                        needs_tagging=needs_tagging,
+                        needs_embedding=is_new or changed or not embed_exists,
+                        stored_tagger_sig=stored_sig,
+                        current_tagger_sig=self.ctx.tagger_sig,
+                        last_tagged_at=last_tagged_at,
+                    )
+                )
+            conn.commit()
+
+            stats["new_or_changed"] = sum(1 for r in records if r.is_new or r.changed)
+            logger.info("Scan complete: %d file(s) seen, %d new or changed", stats["scanned"], stats["new_or_changed"])
+            self.emitter.emit(
+                IndexProgress(phase=IndexPhase.SCAN, done=stats["scanned"], total=stats["scanned"]), force=True
+            )
+            return records, stats
+        finally:
+            conn.close()
+
+
+# ============================================
+# 新規: タグ付け段階（quiesce + DBWriter + PrefetchPrepared）
+# ============================================
+class TaggingStage:
+    def __init__(self, ctx: PipelineContext, emitter: ProgressEmitter):
+        self.ctx = ctx
+        self.emitter = emitter
+
+    def _log_step(self, stage: str, done: int, total: int, last: int) -> int:
+        if total <= 0:
+            return last
+        step = max(1, total // 5)
+        if done >= total or done - last >= step:
+            logger.info("%s progress: %d/%d", stage, done, total)
+            return done
+        return last
+
+    def run(self, records: list[_FileRecord]) -> tuple[int, int, list[tuple[int, np.ndarray]]]:
+        thresholds = self.ctx.thresholds
+        max_tags_map = self.ctx.max_tags_map
+        tagger_sig = self.ctx.tagger_sig
+        settings = self.ctx.settings
+        db_path = self.ctx.db_path
+
+        tag_records = [r for r in records if r.needs_tagging and not r.load_failed]
+        self.emitter.emit(IndexProgress(phase=IndexPhase.TAG, done=0, total=len(tag_records)), force=True)
+        self.emitter.emit(IndexProgress(phase=IndexPhase.FTS, done=0, total=len(tag_records)), force=True)
+        if not tag_records:
+            return 0, 0, []
+
+        # quiesce & DBWriter
+        from db.connection import begin_quiesce, end_quiesce
+
+        processed_tags = 0
+        fts_processed = 0
+        last_logged = 0
+        quiesced = False
+        dbw: DBWriter | None = None
+
+        def _dbw_progress(kind: str, done: int, total: int) -> None:
+            nonlocal fts_processed
+            fts_processed = done
+            self.emitter.emit(IndexProgress(phase=IndexPhase.FTS, done=done, total=total))
+            try:
+                logger.info("finalizing: %s %d/%d", kind.split(".")[0], done, total)
+            except Exception:
+                pass
+
+        try:
+            conn = get_conn(db_path, allow_when_quiesced=True)  # スキャナ用接続をすぐ閉じる
+            try:
+                conn.close()
+            except Exception:
+                pass
+            begin_quiesce()
+            quiesced = True
+
+            tagger = _resolve_tagger(settings, None, thresholds=thresholds or None, max_tags=max_tags_map or None)
+            logger.info("Tagging %d image(s)", len(tag_records))
+
+            dbw = DBWriter(
+                db_path,
+                flush_chunk=getattr(settings, "db_flush_chunk", 1024),
+                fts_topk=getattr(settings, "fts_topk", 128),
+                queue_size=int(os.environ.get("KE_DB_QUEUE", "1024")),
+                default_tagger_sig=tagger_sig,
+                unsafe_fast=True,
+                skip_fts=True,
+                progress_cb=_dbw_progress,
+            )
+            dbw.start()
+            time.sleep(0.2)
+            dbw.raise_if_failed()
+
+            # PrefetchPrepared + prepared 経路
+            rec_by_path: dict[str, _FileRecord] = {str(r.path): r for r in tag_records}
+            tag_paths: list[str] = list(rec_by_path.keys())
+            current_batch = max(1, int(getattr(settings, "batch_size", 32) or 32))
+            prefetch_depth = int(os.environ.get("KE_PREFETCH_DEPTH", "12"))
+            io_workers = int(os.environ.get("KE_IO_WORKERS", "16") or "16") or None
+
+            loader = PrefetchLoaderPrepared(
+                tag_paths,
+                batch_size=current_batch,
+                prefetch_batches=prefetch_depth,
+                io_workers=io_workers,
+                tagger=tagger,
+            )
+
+            def _infer_with_retry_np(rgb_list: list[np.ndarray]) -> list[TagResult]:
+                try:
+                    np_batch = tagger.prepare_batch_from_rgb_np(rgb_list)
+                    return tagger.infer_batch_prepared(
+                        np_batch, thresholds=thresholds or None, max_tags=max_tags_map or None
+                    )
+                except Exception:
+                    if len(rgb_list) <= 1:
+                        raise
+                    mid = len(rgb_list) // 2
+                    return _infer_with_retry_np(rgb_list[:mid]) + _infer_with_retry_np(rgb_list[mid:])
+
+            try:
+                for batch in loader:
+                    if self.emitter.cancelled(self.ctx.is_cancelled):
+                        break
+                    if not batch:
+                        continue
+                    batch_paths, batch_np_rgb, sizes = batch
+
+                    batch_recs: list[_FileRecord] = []
+                    rgb_list: list[np.ndarray] = []
+                    wh_needed: list[tuple[int | None, int | None]] = []
+                    for p, arr, (_w, _h) in zip(batch_paths, batch_np_rgb, sizes):
+                        if arr is None:
+                            continue
+                        rec = rec_by_path.get(p)
+                        if rec is None:
+                            continue
+                        batch_recs.append(rec)
+                        rgb_list.append(arr)
+                        need_wh = rec.is_new or rec.changed or rec.width is None or rec.height is None
+                        if need_wh:
+                            h, w = arr.shape[:2]
+                            wh_needed.append((int(w), int(h)))
+                        else:
+                            wh_needed.append((None, None))
+                    if not rgb_list:
+                        continue
+
+                    try:
+                        results = _infer_with_retry_np(rgb_list)
+                    except Exception:
+                        logger.exception("Tagger failed for a prepared batch")
+                        continue
+
+                    per_file_items: list[DBItem] = []
+                    now_ts = time.time()
+                    for rec, result, (w_opt, h_opt) in zip(batch_recs, results, wh_needed):
+                        merged: dict[str, tuple[float, TagCategory]] = {}
+                        for pred in result.tags:
+                            name = pred.name.strip()
+                            if not name:
+                                continue
+                            s = float(pred.score)
+                            cur = merged.get(name)
+                            if (cur is None) or (s > cur[0]):
+                                merged[name] = (s, pred.category)
+                        items = [(n, s, int(c)) for n, (s, c) in merged.items()]
+                        per_file_items.append(
+                            DBItem(rec.file_id, items, w_opt, h_opt, tagger_sig=tagger_sig, tagged_at=now_ts)
+                        )
+
+                        prev_sig = rec.stored_tagger_sig
+                        rec.needs_tagging = False
+                        rec.tag_exists = True
+                        rec.stored_tagger_sig = tagger_sig
+                        rec.current_tagger_sig = tagger_sig
+                        rec.last_tagged_at = now_ts
+                        if (not rec.is_new) and (not rec.changed) and (prev_sig != tagger_sig):
+                            # retagged は呼び出し側で集計したい場合は戻り値に含めても良い
+                            pass
+
+                    for it in per_file_items:
+                        dbw.put(it)
+                    processed_tags += len(per_file_items)
+                    fts_processed += len(per_file_items)
+                    last_logged = self._log_step("Tagging", processed_tags, len(tag_records), last_logged)
+                    self.emitter.emit(IndexProgress(phase=IndexPhase.TAG, done=processed_tags, total=len(tag_records)))
+                    self.emitter.emit(IndexProgress(phase=IndexPhase.FTS, done=fts_processed, total=len(tag_records)))
+
+            finally:
+                try:
+                    loader.close()
+                except Exception:
+                    pass
+                if dbw is not None:
+                    try:
+                        dbw.stop(flush=True, wait_forever=True)
+                    finally:
+                        dbw = None
+                if quiesced:
+                    try:
+                        end_quiesce()
+                    except Exception:
+                        logger.exception("end_quiesce failed")
+                    quiesced = False
+                try:
+                    _settle_after_quiesce(str(db_path))
+                except Exception:
+                    logger.warning("settle_after_quiesce failed; continuing")
+
+            logger.info("Tagging complete: %d image(s) processed", processed_tags)
+            self.emitter.emit(
+                IndexProgress(phase=IndexPhase.TAG, done=processed_tags, total=len(tag_records)), force=True
+            )
+            self.emitter.emit(
+                IndexProgress(phase=IndexPhase.FTS, done=fts_processed, total=len(tag_records)), force=True
+            )
+
+        except Exception as exc:
+            logger.exception("Tagging stage failed: %s", exc)
+
+        # Tagging では HNSW の追加対象は作らない（Embeddingで作る）
+        return processed_tags, fts_processed, []
+
+
+# ============================================
+# 新規: 埋め込み段階
+# ============================================
+class EmbeddingStage:
+    def __init__(self, ctx: PipelineContext, emitter: ProgressEmitter):
+        self.ctx = ctx
+        self.emitter = emitter
+
+    @staticmethod
+    def _ensure_image_loaded(rec: _FileRecord) -> bool:
+        if rec.load_failed:
+            return False
+        if rec.image is None:
+            from utils.image_io import safe_load_image
+
+            image = safe_load_image(
+                rec.path, max_side=4096, bomb_pixel_cap=350_000_000, hard_skip_pixels=220_000_000, skip_on_bomb=True
+            )
+            if image is None:
+                rec.load_failed = True
+                return False
+            rec.image = image
+            rec.width = image.width
+            rec.height = image.height
+        return True
+
+    def run(self, records: list[_FileRecord]) -> tuple[int, list[tuple[int, np.ndarray]]]:
+        settings = self.ctx.settings
+        embed_records = [r for r in records if r.needs_embedding and not r.load_failed]
+        self.emitter.emit(IndexProgress(phase=IndexPhase.EMBED, done=0, total=len(embed_records)), force=True)
+        if not embed_records:
+            return 0, []
+
+        conn = get_conn(self.ctx.db_path)
+        try:
+            embedder = _resolve_embedder(settings)
+        except Exception as exc:
+            logger.exception("Failed to instantiate embedder: %s", exc)
+            return 0, []
+        logger.info("Embedding %d image(s)", len(embed_records))
+
+        processed = 0
+        last_logged = 0
+        idx = 0
+        current_batch = max(1, int(getattr(settings, "batch_size", 32) or 32))
+        hnsw_additions: list[tuple[int, np.ndarray]] = []
+
+        while idx < len(embed_records):
+            if self.emitter.cancelled(self.ctx.is_cancelled):
+                break
+            batch_slice = embed_records[idx : idx + current_batch]
+
+            images: list[Image.Image] = []
+            valid: list[_FileRecord] = []
+            for rec in batch_slice:
+                if self._ensure_image_loaded(rec) and rec.image is not None:
+                    images.append(rec.image)
+                    valid.append(rec)
+            if not images:
+                idx += len(batch_slice)
+                continue
+
+            try:
+                vectors = embedder.embed_images(images)
+            except Exception as exc:
+                if current_batch > 1:
+                    current_batch = max(1, current_batch // 2)
+                    logger.warning("Embedding batch failed (%s); reducing batch size to %d", exc, current_batch)
+                    continue
+                logger.exception("Embedding failed for batch starting with %s", valid[0].path)
+                idx += len(batch_slice)
+                continue
+
+            if len(vectors) != len(valid):
+                logger.error("Embedder returned %d vectors for %d images; skipping batch", len(vectors), len(valid))
+                idx += len(batch_slice)
+                continue
+
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                up_rows_embed: list[tuple[int, str, int, memoryview]] = []
+                up_rows_file: list[tuple[int, int, float, str, int, int]] = []
+                sig_rows: list[tuple[int, int, int]] = []
+
+                for rec, image, vector in zip(valid, images, vectors):
+                    _w, _h = getattr(image, "width", None), getattr(image, "height", None)
+
+                    array = np.asarray(vector, dtype=np.float32)
+                    if array.ndim != 1:
+                        array = np.reshape(array, (-1,))
+                    if not array.flags.c_contiguous:
+                        array = np.ascontiguousarray(array, dtype=np.float32)
+                    else:
+                        array = array.astype(np.float32, copy=True)
+                    norm = float(np.linalg.norm(array))
+                    if norm > 0:
+                        array /= norm
+
+                    up_rows_file.append((rec.size, rec.mtime, rec.sha, str(rec.path), _w or 0, _h or 0))
+                    sig_rows.append((rec.file_id, int(phash(image)), int(dhash(image))))
+                    up_rows_embed.append(
+                        (rec.file_id, settings.embed_model.name, int(array.shape[0]), memoryview(array.tobytes()))
+                    )
+
+                    was_missing = not rec.embed_exists
+                    mark_indexed_at(conn, rec.file_id, indexed_at=time.time())
+                    rec.needs_embedding = False
+                    rec.embed_exists = True
+                    if rec.is_new or was_missing:
+                        hnsw_additions.append((rec.file_id, array.copy()))
+                    processed += 1
+
+                    try:
+                        image.close()
+                    except Exception:
+                        pass
+                    rec.image = None
+                    del array
+                if up_rows_file:
+                    conn.executemany(
+                        "UPDATE files SET size=?, mtime=?, sha256=? , width=?, height=? WHERE path=?",
+                        [(sz, mt, sha, w, h, p) for (sz, mt, sha, p, w, h) in up_rows_file],
+                    )
+                if sig_rows:
+                    conn.executemany(
+                        "INSERT INTO signatures (file_id, phash_u64, dhash_u64) VALUES (?, ?, ?) "
+                        "ON CONFLICT(file_id) DO UPDATE SET phash_u64=excluded.phash_u64, dhash_u64=excluded.dhash_u64",
+                        sig_rows,
+                    )
+                if up_rows_embed:
+                    conn.executemany(
+                        "INSERT INTO embeddings (file_id, model, dim, vector) VALUES (?, ?, ?, ?) "
+                        "ON CONFLICT(file_id, model) DO UPDATE SET dim=excluded.dim, vector=excluded.vector",
+                        up_rows_embed,
+                    )
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+
+            try:
+                images.clear()
+                vectors.clear()
+            except Exception:
+                pass
+            del images, vectors
+
+            if (processed % 4096) == 0:
+                import gc
+
+                gc.collect()
+
+            last_logged = self._log_step("Embedding", processed, len(embed_records), last_logged)
+            self.emitter.emit(IndexProgress(phase=IndexPhase.EMBED, done=processed, total=len(embed_records)))
+            idx += len(batch_slice)
+
+        conn.commit()
+        logger.info("Embedding complete: %d image(s) processed", processed)
+        self.emitter.emit(IndexProgress(phase=IndexPhase.EMBED, done=processed, total=len(embed_records)), force=True)
+
+        # Torch 後始末（落ちどころ回避）
+        try:
+            import torch
+
+            torch.cuda.synchronize()
+        except Exception:
+            pass
+        try:
+            for name in ("embedder", "embed_model", "clip_model", "preprocess"):
+                if name in locals():
+                    del locals()[name]
+            import gc
+
+            gc.collect()
+            try:
+                import torch as _t
+
+                _t.cuda.empty_cache()
+            except Exception:
+                pass
+        except Exception:
+            logger.exception("embedder cleanup failed")
+
+        return processed, hnsw_additions
+
+    def _log_step(self, stage: str, done: int, total: int, last: int) -> int:
+        if total <= 0:
+            return last
+        step = max(1, total // 5)
+        if done >= total or done - last >= step:
+            logger.info("%s progress: %d/%d", stage, done, total)
+            return done
+        return last
+
+
+# ============================================
+# 新規: HNSW 段階
+# ============================================
+class HnswStage:
+    def __init__(self, ctx: PipelineContext, emitter: ProgressEmitter):
+        self.ctx = ctx
+        self.emitter = emitter
+
+    def run(self, additions: list[tuple[int, np.ndarray]]) -> int:
+        self.emitter.emit(IndexProgress(phase=IndexPhase.HNSW, done=0, total=len(additions)), force=True)
+        if not additions:
+            return 0
+        dim = additions[0][1].shape[0]
+        settings = self.ctx.settings
+        ensure_dirs()
+        index_dir = Path(settings.index_dir).expanduser() if settings.index_dir else get_index_dir()
+        index_dir.mkdir(parents=True, exist_ok=True)
+        index_path = index_dir / "hnsw_cosine.bin"
+        try:
+            index = load_hnsw_index(index_path, dim=dim)
+            added = add_embeddings_to_hnsw(index, additions, dim=dim)
+            if added:
+                save_hnsw_index(index, index_path)
+            logger.info("HNSW index updated with %d new vector(s)", added)
+            self.emitter.emit(IndexProgress(phase=IndexPhase.HNSW, done=added, total=len(additions)), force=True)
+            return added
+        except Exception as exc:
+            logger.exception("Failed to update HNSW index: %s", exc)
+            return 0
+
+
+# ============================================
+# 新規: 全体オーケストレータ
+# ============================================
+class IndexPipeline:
+    def __init__(
+        self,
+        db_path: str | Path,
+        settings: PipelineSettings | None = None,
+        *,
+        tagger_override: ITagger | None = None,  # （今は未使用だが将来拡張用）
+        embedder_override: EmbedderProtocol | None = None,  # （同上）
+        progress_cb: Callable[[IndexProgress], None] | None = None,
+        is_cancelled: Callable[[], bool] | None = None,
+    ) -> None:
+        settings = settings or load_settings()
+        bootstrap_if_needed(db_path)
+        ensure_dirs()
+
+        thresholds = _build_threshold_map(settings.tagger.thresholds)
+        max_tags_map = _build_max_tags_map(getattr(settings.tagger, "max_tags", None))
+        tagger_sig = current_tagger_sig(settings, thresholds=thresholds, max_tags=max_tags_map)
+
+        self.ctx = PipelineContext(
+            db_path=str(db_path),
+            settings=settings,
+            thresholds=thresholds,
+            max_tags_map=max_tags_map,
+            tagger_sig=tagger_sig,
+            progress_cb=progress_cb,
+            is_cancelled=is_cancelled,
+        )
+        self.emitter = ProgressEmitter(progress_cb)
+
+    def run(self) -> dict[str, object]:
+        start = time.perf_counter()
+        stats: dict[str, object] = {
+            "scanned": 0,
+            "new_or_changed": 0,
+            "tagged": 0,
+            "signatures": 0,
+            "embedded": 0,
+            "hnsw_added": 0,
+            "elapsed_sec": 0.0,
+            "tagger_name": self.ctx.settings.tagger.name,
+            "retagged": 0,
+            "cancelled": False,
+            "tagger_sig": self.ctx.tagger_sig,
+        }
+        self.emitter.emit(IndexProgress(phase=IndexPhase.SCAN, done=0, total=-1, message="start"), force=True)
+
+        # 1) Scan
+        records, s = Scanner(self.ctx, self.emitter).scan()
+        stats["scanned"] = s["scanned"]
+        stats["new_or_changed"] = s["new_or_changed"]
+
+        # 2) Tag
+        if not self.emitter.cancelled(self.ctx.is_cancelled):
+            tagged, _fts, _ = TaggingStage(self.ctx, self.emitter).run(records)
+            stats["tagged"] = tagged
+
+        # 3) Embed
+        additions: list[tuple[int, np.ndarray]] = []
+        if not self.emitter.cancelled(self.ctx.is_cancelled):
+            embedded, additions = EmbeddingStage(self.ctx, self.emitter).run(records)
+            stats["signatures"] = embedded
+            stats["embedded"] = embedded
+
+        # 4) HNSW
+        if not self.emitter.cancelled(self.ctx.is_cancelled):
+            added = HnswStage(self.ctx, self.emitter).run(additions)
+            stats["hnsw_added"] = added
+
+        stats["elapsed_sec"] = time.perf_counter() - start
+        self.emitter.emit(IndexProgress(phase=IndexPhase.DONE, done=1, total=1), force=True)
+        logger.info(
+            "Indexing complete: scanned=%d, new=%d, tagged=%d, embedded=%d, hnsw_added=%d (%.2fs)",
+            stats["scanned"],
+            stats["new_or_changed"],
+            stats["tagged"],
+            stats["embedded"],
+            stats["hnsw_added"],
+            stats["elapsed_sec"],
+        )
+        return stats
+
+
+# ============================================
+# 置換: 既存 run_index_once を新クラスに委譲
+# ============================================
 def run_index_once(
     db_path: str | Path,
     settings: PipelineSettings | None = None,
@@ -586,596 +1531,14 @@ def run_index_once(
     progress_cb: Callable[[IndexProgress], None] | None = None,
     is_cancelled: Callable[[], bool] | None = None,
 ) -> dict[str, object]:
-    """Perform a full indexing pass across all configured roots (fast batched version)."""
-
-    start_time = time.perf_counter()
-    settings = settings or load_settings()
-    bootstrap_if_needed(db_path)
-    ensure_dirs()
-
-    stats: dict[str, object] = {
-        "scanned": 0,
-        "new_or_changed": 0,
-        "tagged": 0,
-        "signatures": 0,
-        "embedded": 0,
-        "hnsw_added": 0,
-        "elapsed_sec": 0.0,
-        "tagger_name": settings.tagger.name,
-        "retagged": 0,
-        "cancelled": False,
-    }
-
-    thresholds = _build_threshold_map(settings.tagger.thresholds)
-    max_tags_map = _build_max_tags_map(getattr(settings.tagger, "max_tags", None))
-    tagger_sig = current_tagger_sig(settings, thresholds=thresholds, max_tags=max_tags_map)
-    # serialised_thresholds = _serialise_thresholds(thresholds)
-    # serialised_max_tags = _serialise_max_tags(max_tags_map)
-    stats["tagger_sig"] = tagger_sig
-
-    last_emit: dict[IndexPhase, tuple[int, float]] = {}
-    # last_messages: dict[IndexPhase, str | None] = {}
-    progress_sink = progress_cb
-
-    def _emit(progress: IndexProgress, *, force: bool = False) -> None:
-        nonlocal progress_sink
-        if progress_sink is None:
-            return
-        now = time.perf_counter()
-        last = last_emit.get(progress.phase)
-        should = force or last is None
-        if not should and last is not None:
-            last_done, last_time = last
-            if progress.total > 0:
-                step = max(1, progress.total // 100)
-                should = (progress.done >= progress.total) or ((progress.done - last_done) >= step)
-            should = should or ((now - last_time) >= 0.1)
-        if should:
-            last_emit[progress.phase] = (progress.done, now)
-            try:
-                progress_sink(progress)
-            except RuntimeError as e:
-                # PyQt側QObject破棄後など。以後emit無効化
-                logger.warning("Progress callback is gone: %s; stop emitting further updates.", e)
-                progress_sink = None
-            except Exception:
-                # 予期せぬ例外も“以後emitしない”で安全側に
-                logger.exception("Progress callback raised; disabling further updates.")
-                progress_sink = None
-
-    def _should_cancel() -> bool:
-        if is_cancelled is None:
-            return False
-        try:
-            return bool(is_cancelled())
-        except Exception:
-            logger.exception("Cancellation callback failed")
-            return False
-
-    roots = [Path(root).expanduser() for root in settings.roots if root]
-    roots = [r for r in roots if r.exists()]
-    if not roots:
-        logger.info("No valid roots configured; skipping indexing run.")
-        stats["elapsed_sec"] = time.perf_counter() - start_time
-        return stats
-
-    excluded_paths = [Path(p).expanduser() for p in settings.excluded if p]
-    allow_exts = {ext.lower() for ext in (settings.allow_exts or DEFAULT_EXTENSIONS)}
-    batch_size = max(1, 32)
-    # batch_size = max(1, settings.batch_size)
-    # commit_every = max(1, getattr(settings, "commit_every", 512))  # 追加: バッチ書き込み閾値
-
-    _emit(IndexProgress(phase=IndexPhase.SCAN, done=0, total=-1, message="start"), force=True)
-
-    records: list[_FileRecord] = []
-    hnsw_additions: list[tuple[int, np.ndarray]] = []
-
-    db_literal = str(db_path)
-    conn = get_conn(
-        db_literal if (db_literal.startswith("file:") or db_literal == ":memory:") else Path(db_path).expanduser()
-    )
-    cancelled = False
-    dbw: "DBWriter | None" = None
-
-    try:
-        logger.info("Scanning %d root(s) for eligible images", len(roots))
-        # より速い「変更判定」: size/mtime が一致なら SHA を計算しない
-        for image_path in iter_images(roots, excluded=excluded_paths, extensions=allow_exts):
-            if cancelled or _should_cancel():
-                cancelled = True
-                break
-            stats["scanned"] += 1
-            _emit(IndexProgress(phase=IndexPhase.SCAN, done=stats["scanned"], total=-1, message=str(image_path)))
-
-            try:
-                stat = image_path.stat()
-            except OSError as exc:
-                logger.warning("Failed to stat %s: %s", image_path, exc)
-                continue
-
-            row = get_file_by_path(conn, str(image_path))
-            is_new = row is None
-
-            # size/mtime が一致していれば changed=False とみなして SHA 計算スキップ
-            if row is not None:
-                size_changed = int(row["size"] or 0) != stat.st_size
-                mtime_changed = float(row["mtime"] or 0.0) != stat.st_mtime
-            else:
-                size_changed = True
-                mtime_changed = True
-
-            if is_new or size_changed or mtime_changed:
-                try:
-                    sha = compute_sha256(image_path)
-                except OSError as exc:
-                    logger.warning("Failed to hash %s: %s", image_path, exc)
-                    continue
-                changed = True if is_new else (str(row["sha256"] or "") != sha)  # type: ignore[index]
-            else:
-                sha = str(row["sha256"] or "")  # type: ignore[index]
-                changed = False
-
-            indexed_at = None if changed else (row["indexed_at"] if row else None)
-            file_id = upsert_file(
-                conn,
-                path=str(image_path),
-                size=stat.st_size,
-                mtime=stat.st_mtime,
-                sha256=sha,
-                indexed_at=indexed_at,
-            )
-
-            # 既存フラグの取得は軽量クエリで
-            tag_exists = (
-                conn.execute("SELECT 1 FROM file_tags WHERE file_id = ? LIMIT 1", (file_id,)).fetchone() is not None
-            )
-            embed_exists = (
-                conn.execute(
-                    "SELECT 1 FROM embeddings WHERE file_id = ? AND model = ? LIMIT 1",
-                    (file_id, settings.embed_model.name),
-                ).fetchone()
-                is not None
-            )
-
-            stored_sig = str(row["tagger_sig"]) if (row is not None and row["tagger_sig"] is not None) else None
-            stored_tagged_at = row["last_tagged_at"] if row is not None else None
-            last_tagged_at = float(stored_tagged_at) if stored_tagged_at is not None else None
-            needs_tagging = is_new or changed or (not tag_exists) or (stored_sig != tagger_sig)
-
-            records.append(
-                _FileRecord(
-                    file_id=file_id,
-                    path=image_path,
-                    size=stat.st_size,
-                    mtime=stat.st_mtime,
-                    sha=sha,
-                    is_new=is_new,
-                    changed=changed,
-                    tag_exists=tag_exists,
-                    embed_exists=embed_exists,
-                    needs_tagging=needs_tagging,
-                    needs_embedding=is_new or changed or not embed_exists,
-                    stored_tagger_sig=stored_sig,
-                    current_tagger_sig=tagger_sig,
-                    last_tagged_at=last_tagged_at,
-                )
-            )
-
-            if _should_cancel():
-                cancelled = True
-                break
-
-        conn.commit()
-
-        stats["new_or_changed"] = sum(1 for r in records if r.is_new or r.changed)
-        logger.info("Scan complete: %d file(s) seen, %d new or changed", stats["scanned"], stats["new_or_changed"])
-        if not cancelled:
-            _emit(IndexProgress(phase=IndexPhase.SCAN, done=stats["scanned"], total=stats["scanned"]), force=True)
-
-        # --- 画像ロードヘルパ ---
-        def ensure_image_loaded(rec: _FileRecord) -> bool:
-            if rec.load_failed:
-                return False
-            if rec.image is None:
-                from utils.image_io import safe_load_image
-
-                image = safe_load_image(
-                    rec.path,
-                    max_side=4096,
-                    bomb_pixel_cap=350_000_000,
-                    hard_skip_pixels=220_000_000,  # ← これが効く
-                    skip_on_bomb=True,  # ← 爆弾判定はスキップ
-                )
-                if image is None:
-                    rec.load_failed = True
-                    return False
-                rec.image = image
-                rec.width = image.width
-                rec.height = image.height
-            return True
-
-        def log_progress(stage: str, processed: int, total: int, last_value: int) -> int:
-            if total <= 0:
-                return last_value
-            step = max(1, total // 5)
-            if processed >= total or processed - last_value >= step:
-                logger.info("%s progress: %d/%d", stage, processed, total)
-                return processed
-            return last_value
-
-        # ===== TAGGING =====
-        tag_records = [r for r in records if r.needs_tagging and not r.load_failed]
-        _emit(IndexProgress(phase=IndexPhase.TAG, done=0, total=len(tag_records)), force=True)
-        _emit(IndexProgress(phase=IndexPhase.FTS, done=0, total=len(tag_records)), force=True)
-
-        if tag_records and not cancelled:
-            try:
-                tagger = _resolve_tagger(
-                    settings,
-                    tagger_override,
-                    thresholds=thresholds or None,
-                    max_tags=max_tags_map or None,
-                )
-            except Exception as exc:
-                logger.warning("Failed to instantiate tagger: %s", exc)
-                raise
-
-            stats["tagger_name"] = type(tagger).__name__ if tagger_override is not None else settings.tagger.name
-            logger.info("Tagging %d image(s)", len(tag_records))
-
-            processed_tags = 0
-            fts_processed = 0
-            last_logged = 0
-            idx = 0
-            current_batch = batch_size
-
-            # --- DB ライター起動 ---
-            from core.db_writer import DBItem, DBStop, DBWriter
-
-            dbw = DBWriter(
-                db_path,
-                flush_chunk=getattr(settings, "db_flush_chunk", 1024),
-                fts_topk=getattr(settings, "fts_topk", 128),
-                default_tagger_sig=tagger_sig,
-            )
-            dbw.start()
-
-            try:
-                while idx < len(tag_records):
-                    if cancelled or _should_cancel():
-                        cancelled = True
-                        break
-
-                    current_batch = max(1, current_batch)
-                    batch_slice = tag_records[idx : idx + current_batch]
-
-                    images: list[Image.Image] = []
-                    batch_valid: list[_FileRecord] = []
-                    for rec in batch_slice:
-                        if ensure_image_loaded(rec) and rec.image is not None:
-                            images.append(rec.image)
-                            batch_valid.append(rec)
-
-                    if not images:
-                        idx += len(batch_slice)
-                        continue
-
-                    try:
-                        results = tagger.infer_batch(
-                            images,
-                            thresholds=thresholds or None,
-                            max_tags=max_tags_map or None,
-                        )
-                    except Exception as exc:  # pragma: no cover - defensive logging
-                        if current_batch > 1:
-                            current_batch = max(1, current_batch // 2)
-                            logger.warning("Tagger batch failed (%s); reducing batch size to %d", exc, current_batch)
-                            continue
-                        logger.exception("Tagger failed for batch starting with %s", batch_valid[0].path)
-                        idx += len(batch_slice)
-                        continue
-
-                    # 推論結果 → DBWriter に投げる形へ変換
-                    per_file_items: list[DBItem] = []
-
-                    for rec, result in zip(batch_valid, results):
-                        merged: dict[str, tuple[float, TagCategory]] = {}
-                        for pred in result.tags:
-                            name = pred.name.strip()
-                            if not name:
-                                continue
-                            score = float(pred.score)
-                            cur = merged.get(name)
-                            if (cur is None) or (score > cur[0]):
-                                merged[name] = (score, pred.category)
-
-                        items = [(n, s, int(c)) for n, (s, c) in merged.items()]
-                        w = (
-                            rec.width
-                            if (rec.is_new or rec.changed or rec.width is None or rec.height is None)
-                            else None
-                        )
-                        h = (
-                            rec.height
-                            if (rec.is_new or rec.changed or rec.width is None or rec.height is None)
-                            else None
-                        )
-                        per_file_items.append(
-                            DBItem(rec.file_id, items, w, h, tagger_sig=tagger_sig, tagged_at=time.time())
-                        )
-
-                        # UI統計用フラグはここで反映（DBはフラッシュ時に書く）
-                        previous_sig = rec.stored_tagger_sig
-                        rec.needs_tagging = False
-                        rec.tag_exists = True
-                        rec.stored_tagger_sig = tagger_sig
-                        rec.current_tagger_sig = tagger_sig
-                        rec.last_tagged_at = time.time()
-                        if (not rec.is_new) and (not rec.changed) and (previous_sig != tagger_sig):
-                            stats["retagged"] = int(stats.get("retagged", 0)) + 1
-
-                    # ここで即 enqueue（DBWriter がまとめる）
-                    for it in per_file_items:
-                        dbw.put(it)
-
-                    # 進捗（推論完了ベース）
-                    done_now = len(per_file_items)
-                    processed_tags += done_now
-                    fts_processed += done_now
-                    last_logged = log_progress("Tagging", processed_tags, len(tag_records), last_logged)
-                    _emit(IndexProgress(phase=IndexPhase.TAG, done=processed_tags, total=len(tag_records)))
-                    _emit(IndexProgress(phase=IndexPhase.FTS, done=fts_processed, total=len(tag_records)))
-
-                    # ⭐ ここから “このバッチ分の” メモリ開放（PIL画像・結果配列）
-                    for rec in batch_valid:
-                        img = rec.image
-                        rec.image = None
-                        try:
-                            if img is not None:
-                                img.close()
-                        except Exception:
-                            pass
-                        del img
-
-                    # リストの参照も切る（できるだけ早く）
-                    try:
-                        images.clear()
-                        per_file_items.clear()
-                    except Exception:
-                        pass
-                    del images
-                    del per_file_items
-                    del results
-
-                    # 数千枚に一回だけ軽くGC（断片化対策）
-                    if (processed_tags % 4096) == 0:
-                        import gc
-
-                        gc.collect()
-
-                    idx += len(batch_slice)
-            finally:
-                # ここで必ず止める（タグ付けが例外で落ちても確実に解放）
-                if dbw is not None:
-                    try:
-                        dbw.stop(flush=True, timeout=30.0)
-                    finally:
-                        dbw = None
-            # DBWriter を停止・待機
-            dbw.put(DBStop())
-            dbw.join()
-            # （上の finally で止め済み。ここは呼ばない or 保険で None チェック）
-            # dbw.raise_if_failed()
-
-            stats["tagged"] = processed_tags
-            logger.info("Tagging complete: %d image(s) processed", processed_tags)
-            _emit(IndexProgress(phase=IndexPhase.TAG, done=processed_tags, total=len(tag_records)), force=True)
-            _emit(IndexProgress(phase=IndexPhase.FTS, done=fts_processed, total=len(tag_records)), force=True)
-
-        # ===== EMBEDDING =====（ここは従来どおりでOKだが、必要なら同様に一括 executemany 化できる）
-        embed_records = [r for r in records if r.needs_embedding and not r.load_failed]
-        _emit(IndexProgress(phase=IndexPhase.EMBED, done=0, total=len(embed_records)), force=True)
-
-        if False and embed_records and not cancelled:
-            try:
-                embedder = embedder_override or _resolve_embedder(settings)
-            except Exception as exc:
-                logger.exception("Failed to instantiate embedder: %s", exc)
-            else:
-                logger.info("Embedding %d image(s)", len(embed_records))
-                processed_embeddings = 0
-                last_logged = 0
-                idx = 0
-                current_batch = batch_size
-
-                while idx < len(embed_records):
-                    if cancelled or _should_cancel():
-                        cancelled = True
-                        break
-                    batch_slice = embed_records[idx : idx + current_batch]
-
-                    images: list[Image.Image] = []
-                    valid: list[_FileRecord] = []
-                    for rec in batch_slice:
-                        if ensure_image_loaded(rec) and rec.image is not None:
-                            images.append(rec.image)
-                            valid.append(rec)
-                    if not images:
-                        idx += len(batch_slice)
-                        continue
-
-                    try:
-                        vectors = embedder.embed_images(images)
-                    except Exception as exc:
-                        if current_batch > 1:
-                            current_batch = max(1, current_batch // 2)
-                            logger.warning("Embedding batch failed (%s); reducing batch size to %d", exc, current_batch)
-                            continue
-                        logger.exception("Embedding failed for batch starting with %s", valid[0].path)
-                        idx += len(batch_slice)
-                        continue
-
-                    if len(vectors) != len(valid):
-                        logger.error(
-                            "Embedder returned %d vectors for %d images; skipping batch", len(vectors), len(valid)
-                        )
-                        idx += len(batch_slice)
-                        continue
-
-                    conn.execute("BEGIN IMMEDIATE")
-                    try:
-                        up_rows_embed: list[tuple[int, str, int, memoryview]] = []
-                        up_rows_file: list[tuple[int, int, float, str, int, int]] = []
-                        sig_rows: list[tuple[int, int, int]] = []
-
-                        for rec, image, vector in zip(valid, images, vectors):
-                            # 使う属性は先に取り出してからクローズできるようにする  # ← 追加
-                            _w, _h = getattr(image, "width", None), getattr(image, "height", None)  # ← 追加
-
-                            array = np.asarray(vector, dtype=np.float32)
-                            if array.ndim != 1:
-                                array = np.reshape(array, (-1,))
-                            if not array.flags.c_contiguous:
-                                array = np.ascontiguousarray(array, dtype=np.float32)
-                            else:
-                                array = array.astype(np.float32, copy=True)
-                            norm = float(np.linalg.norm(array))
-                            if norm > 0:
-                                array /= norm
-
-                            # files の基本属性更新（念のため）
-                            up_rows_file.append(  # ← 変更: image.width/height をローカルにした値で
-                                (rec.size, rec.mtime, rec.sha, str(rec.path), _w or 0, _h or 0)
-                            )
-                            # signatures
-                            sig_rows.append((rec.file_id, int(phash(image)), int(dhash(image))))
-                            # embeddings
-                            up_rows_embed.append(
-                                (
-                                    rec.file_id,
-                                    settings.embed_model.name,
-                                    int(array.shape[0]),
-                                    memoryview(array.tobytes()),
-                                )
-                            )
-
-                            was_missing = not rec.embed_exists
-                            mark_indexed_at(conn, rec.file_id, indexed_at=time.time())
-                            rec.needs_embedding = False
-                            rec.embed_exists = True
-                            if rec.is_new or was_missing:
-                                hnsw_additions.append((rec.file_id, array.copy()))
-                            processed_embeddings += 1
-
-                            # ここで画像を即解放し、参照も切る  # ← 追加
-                            try:
-                                if image is not None:
-                                    image.close()
-                            except Exception:
-                                pass
-                            rec.image = None
-                            del array  # ベクトル一時配列も解放しやすく  # ← 追加
-                        # bulk upserts
-                        if up_rows_file:
-                            conn.executemany(
-                                "UPDATE files SET size=?, mtime=?, sha256=? , width=?, height=? WHERE path=?",
-                                # ↑順番間違い注意: 下のタプルと合わせる
-                                [(sz, mt, sha, w, h, p) for (sz, mt, sha, p, w, h) in up_rows_file],
-                            )
-                        if sig_rows:
-                            conn.executemany(
-                                "INSERT INTO signatures (file_id, phash_u64, dhash_u64) VALUES (?, ?, ?) "
-                                "ON CONFLICT(file_id) DO UPDATE SET phash_u64=excluded.phash_u64, dhash_u64=excluded.dhash_u64",
-                                sig_rows,
-                            )
-                        if up_rows_embed:
-                            conn.executemany(
-                                "INSERT INTO embeddings (file_id, model, dim, vector) VALUES (?, ?, ?, ?) "
-                                "ON CONFLICT(file_id, model) DO UPDATE SET dim=excluded.dim, vector=excluded.vector",
-                                up_rows_embed,
-                            )
-                        conn.commit()
-                    except Exception:
-                        conn.rollback()
-                        raise
-
-                    # バッチ終了時にリスト参照を切って早めに回収  # ← 追加
-                    try:
-                        images.clear()
-                    except Exception:
-                        pass
-                    del images
-                    try:
-                        vectors.clear()
-                    except Exception:
-                        pass
-                    del vectors
-
-                    # 数千件ごとに軽くGCして断片化を抑える  # ← 追加
-                    if (processed_embeddings % 4096) == 0:
-                        import gc
-
-                        gc.collect()
-                    last_logged = log_progress("Embedding", processed_embeddings, len(embed_records), last_logged)
-                    _emit(IndexProgress(phase=IndexPhase.EMBED, done=processed_embeddings, total=len(embed_records)))
-
-                    idx += len(batch_slice)
-
-                conn.commit()
-                stats["signatures"] = processed_embeddings
-                stats["embedded"] = processed_embeddings
-                logger.info("Embedding complete: %d image(s) processed", processed_embeddings)
-                _emit(
-                    IndexProgress(phase=IndexPhase.EMBED, done=processed_embeddings, total=len(embed_records)),
-                    force=True,
-                )
-
-        # メモリ解放
-        for rec in records:
-            rec.image = None
-
-    finally:
-        conn.close()
-        try:
-            if dbw is not None:
-                dbw.stop(flush=not cancelled, timeout=30.0)
-        except Exception:
-            logger.exception("dbwriter stop failed")
-        finally:
-            dbw = None
-
-    # ===== HNSW 追記 =====
-    _emit(IndexProgress(phase=IndexPhase.HNSW, done=0, total=len(hnsw_additions)), force=True)
-    if hnsw_additions and not cancelled:
-        dim = hnsw_additions[0][1].shape[0]
-        ensure_dirs()
-        index_dir = Path(settings.index_dir).expanduser() if settings.index_dir else get_index_dir()
-        index_dir.mkdir(parents=True, exist_ok=True)
-        index_path = index_dir / "hnsw_cosine.bin"
-        try:
-            index = load_hnsw_index(index_path, dim=dim)
-            added = add_embeddings_to_hnsw(index, hnsw_additions, dim=dim)
-            if added:
-                save_hnsw_index(index, index_path)
-            stats["hnsw_added"] = added
-            logger.info("HNSW index updated with %d new vector(s)", added)
-            _emit(IndexProgress(phase=IndexPhase.HNSW, done=added, total=len(hnsw_additions)), force=True)
-        except Exception as exc:
-            logger.exception("Failed to update HNSW index: %s", exc)
-
-    stats["elapsed_sec"] = time.perf_counter() - start_time
-    stats["cancelled"] = cancelled
-    _emit(IndexProgress(phase=IndexPhase.DONE, done=1, total=1, message="cancelled" if cancelled else None), force=True)
-    logger.info(
-        "Indexing complete: scanned=%d, new=%d, tagged=%d, embedded=%d, hnsw_added=%d (%.2fs)",
-        stats["scanned"],
-        stats["new_or_changed"],
-        stats["tagged"],
-        stats["embedded"],
-        stats["hnsw_added"],
-        stats["elapsed_sec"],
-    )
-    return stats
+    return IndexPipeline(
+        db_path=db_path,
+        settings=settings,
+        tagger_override=tagger_override,
+        embedder_override=embedder_override,
+        progress_cb=progress_cb,
+        is_cancelled=is_cancelled,
+    ).run()
 
 
 def current_tagger_sig(
@@ -1211,7 +1574,7 @@ def retag_query(
 
     predicate = where_sql.strip() or "1=1"
     arguments: tuple[object, ...] = tuple(params or ())
-    conn = get_conn(db_path)
+    conn = get_conn(db_path, allow_when_quiesced=True)
     try:
         # predicate 内で f.* を参照できるように、外側の UPDATE にもエイリアスを付ける
         sql = "UPDATE files AS f " "SET tagger_sig = NULL, last_tagged_at = NULL " f"WHERE {predicate}"

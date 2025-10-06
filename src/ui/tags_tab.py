@@ -1298,6 +1298,11 @@ class TagsTab(QWidget):
             return
         self._retag_active = False
         self._db_path = self._resolve_db_path()
+        # ★ UI 側の長寿命接続を閉じておく（UNSAFE 区間の EXCLUSIVE ロックを邪魔しない）
+        try:
+            self.prepare_for_database_reset()
+        except Exception:
+            pass
         task = IndexRunnable(self._db_path)
         self._start_indexing_task(task)
 
@@ -1476,6 +1481,12 @@ class TagsTab(QWidget):
         self._update_control_states()
 
     def _start_indexing_task(self, task: IndexRunnable) -> None:
+        # UIの長寿命接続を閉じて静穏化
+        from db.connection import begin_quiesce
+
+        self.prepare_for_database_reset()
+        begin_quiesce()
+
         self._current_index_task = task
         task.signals.progress.connect(self._handle_index_progress)
         task.signals.finished.connect(self._handle_index_finished)
@@ -1926,6 +1937,8 @@ class TagsTab(QWidget):
         self._update_control_states()
 
     def _handle_index_finished(self, stats: dict[str, object]) -> None:
+        from db.connection import end_quiesce
+
         task = self._current_index_task
         if task is not None:
             try:
@@ -1934,6 +1947,11 @@ class TagsTab(QWidget):
                 pass
 
         self._close_progress_dialog()
+        # ★ 失敗時でも UI がすぐ再操作できるよう接続を復旧
+        try:
+            self.restore_connection()
+        except Exception:
+            pass
         self._indexing_active = False
         elapsed = float(stats.get("elapsed_sec", 0.0) or 0.0)
         cancelled = bool(stats.get("cancelled", False))
@@ -1968,8 +1986,15 @@ class TagsTab(QWidget):
         self._retag_active = False
         self._update_control_states()
         QTimer.singleShot(0, self._on_search_clicked)
+        # quiesce解除→UI接続を再オープン
+        try:
+            end_quiesce()
+        finally:
+            self.restore_connection()
 
     def _handle_index_failed(self, message: str) -> None:
+        from db.connection import end_quiesce
+
         task = self._current_index_task
         if task is not None:
             try:
@@ -1978,6 +2003,7 @@ class TagsTab(QWidget):
                 pass
 
         self._close_progress_dialog()
+
         self._indexing_active = False
         if message == ONNXRUNTIME_MISSING_MESSAGE:
             error_text = message
@@ -1988,6 +2014,31 @@ class TagsTab(QWidget):
         self._show_toast(error_text)
         self._retag_active = False
         self._update_control_states()
+        # ① まず quiesce を解除
+        try:
+            end_quiesce()
+        except Exception:
+            logger.exception("end_quiesce() failed in UI")
+
+        # ② 次に接続を復旧（ロックなら短いバックオフで何度か再試行）
+        self._restore_connection_with_retry()
+
+    def _restore_connection_with_retry(self, attempts: int = 20, delay_ms: int = 150) -> None:
+        try:
+            self.restore_connection()
+            return
+        except Exception as e:
+            s = str(e).lower()
+            if "locked" not in s and "busy" not in s:
+                # 別原因ならそのまま再送出
+                raise
+            if attempts <= 1:
+                # 諦める（ユーザに手動再試行させる）
+                self._show_toast("DB reopen failed (locked). Please try again.")
+                return
+
+            # 次のタイマーで再試行
+            QTimer.singleShot(delay_ms, lambda: self._restore_connection_with_retry(attempts - 1, delay_ms))
 
     def _resolve_db_path(self) -> Path:
         if self._conn is None:
