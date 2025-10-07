@@ -45,6 +45,7 @@ from PyQt6.QtWidgets import (
     QMenu,
     QMessageBox,
     QProgressBar,
+    QProgressDialog,
     QPushButton,
     QSpinBox,
     QTreeWidget,
@@ -58,6 +59,7 @@ from core.config import load_settings
 from db.connection import get_conn
 from db.repository import iter_files_for_dup, mark_files_absent
 from dup.scanner import DuplicateCluster, DuplicateClusterEntry, DuplicateFile, DuplicateScanConfig, DuplicateScanner
+from ui.dup_refine_parallel import refine_by_pixels_parallel, refine_by_tilehash_parallel
 from utils.image_io import generate_thumbnail, get_thumbnail  # 既存ユーティリティを再利用
 from utils.paths import get_cache_dir, get_db_path
 
@@ -85,6 +87,60 @@ def _qt_msg(mode, ctx, msg):
 
 
 qInstallMessageHandler(_qt_msg)
+
+
+class RefinePipelineSignals(QObject):
+    progress = pyqtSignal(int, int, str)  # cur, total, stage label
+    finished = pyqtSignal(object)  # refined clusters
+    canceled = pyqtSignal()
+    error = pyqtSignal(str)
+
+
+class RefinePipelineRunnable(QRunnable):
+    def __init__(self, clusters, tile_params, pixel_params):
+        super().__init__()
+        self.signals = RefinePipelineSignals()
+        self._clusters = clusters
+        self._tile_params = tile_params or {}
+        self._pixel_params = pixel_params or {}
+        self._cancelled = False
+
+    def cancel(self):
+        self._cancelled = True
+
+    def _is_cancelled(self):
+        return self._cancelled
+
+    def run(self):
+        try:
+            # ---- TileHash (1/2, 2/2) ----
+            def tick_tile(done, total, phase):
+                stage = "TileHash 1/2" if phase == 1 else "TileHash 2/2"
+                self.signals.progress.emit(done, total, stage)
+
+            refined = refine_by_tilehash_parallel(
+                self._clusters, tick=tick_tile, is_cancelled=self._is_cancelled, **self._tile_params
+            )
+            if self._cancelled:
+                self.signals.canceled.emit()
+                return
+
+            # ---- Pixel MAE ----
+            if self._pixel_params:
+
+                def tick_px(done, total):
+                    self.signals.progress.emit(done, total, "Pixel MAE")
+
+                refined = refine_by_pixels_parallel(
+                    refined, tick=tick_px, is_cancelled=self._is_cancelled, **self._pixel_params
+                )
+                if self._cancelled:
+                    self.signals.canceled.emit()
+                    return
+
+            self.signals.finished.emit(refined)
+        except Exception as e:
+            self.signals.error.emit(str(e))
 
 
 @dataclass(frozen=True)
@@ -370,13 +426,15 @@ class DupTab(QWidget):
         self._active_scan: DuplicateScanRunnable | None = None
         self._block_item_changed = False
         self._bulk_populating = False
+        self._refine_dialog = None
+        self._refine_task = None
 
         self._path_input = QLineEdit(self)
         self._path_input.setPlaceholderText("Path LIKE pattern (e.g. C:% or %/images/% )")
 
         self._hamming_spin = QSpinBox(self)
-        self._hamming_spin.setRange(0, 64)
-        self._hamming_spin.setValue(8)
+        self._hamming_spin.setRange(0, 10)
+        self._hamming_spin.setValue(0)
 
         self._ratio_spin = QDoubleSpinBox(self)
         self._ratio_spin.setRange(0.0, 1.0)
@@ -526,6 +584,69 @@ class DupTab(QWidget):
         self._hb.setInterval(1000)
         self._hb.timeout.connect(lambda: LOG.debug(f"ui alive {self._alive:=self._alive+1}"))
         self._hb.start()
+
+    def _start_refine_pipeline(self, clusters):
+        # パラメータ（好みに応じて UI から取ってもOK）
+        tile_params = dict(grid=8, tile=8, max_bits=8)
+        pixel_params = dict(mae_thr=0.004)
+
+        task = RefinePipelineRunnable(clusters, tile_params, pixel_params)
+        self._refine_task = task
+
+        # 進捗ダイアログ
+        dlg = QProgressDialog("Refining duplicates…", "Cancel", 0, 0, self)
+        dlg.setWindowModality(Qt.WindowModality.WindowModal)
+        dlg.setAutoClose(False)
+        dlg.setAutoReset(False)
+        dlg.setMinimumDuration(0)
+        dlg.setValue(0)
+        self._refine_dialog = dlg
+
+        # シグナル接続
+        def on_progress(cur, total, stage):
+            if total <= 0:
+                total = 1
+            dlg.setLabelText(f"{stage}  {cur} / {total}")
+            if dlg.maximum() != total:
+                dlg.setMaximum(total)
+            dlg.setValue(cur)
+
+        def on_finished(refined):
+            dlg.close()
+            self._refine_dialog = None
+            self._refine_task = None
+            # ここで self._clusters を置き換え → 並べ替え → ツリー構築
+            self._clusters = refined
+            self._clusters.sort(key=lambda c: (self._cluster_hamming_score(c), len(c.files)), reverse=True)
+            self._populate_tree()
+            groups = len(self._clusters)
+            files = sum(len(c.files) for c in self._clusters)
+            self._status_label.setText(f"Refine complete: {groups} group(s), {files} file(s).")
+            self._update_action_states()
+
+        def on_canceled():
+            dlg.close()
+            self._refine_dialog = None
+            self._refine_task = None
+            # キャンセル時は “元の” clusters で表示するか、何もしないか選べます
+            self._status_label.setText("Refine canceled.")
+
+        def on_error(msg):
+            dlg.close()
+            self._refine_dialog = None
+            self._refine_task = None
+            QMessageBox.warning(self, "Refine failed", msg)
+            self._status_label.setText("Refine failed.")
+
+        task.signals.progress.connect(on_progress)
+        task.signals.finished.connect(on_finished)
+        task.signals.canceled.connect(on_canceled)
+        task.signals.error.connect(on_error)
+
+        dlg.canceled.connect(task.cancel)
+
+        dlg.show()
+        self._pool.start(task)  # 既存の QThreadPool を使う
 
     def _auto_expand_visible_groups(self, margin: int = 200) -> None:
         rect = self._tree.viewport().rect().adjusted(0, -margin, 0, +margin)
@@ -889,8 +1010,6 @@ class DupTab(QWidget):
             return
         # ★ ここでクラスターをハミング距離の大きい順に並べ替える
         self._clusters = [c for c in payload if isinstance(c, DuplicateCluster)]
-        # 同点は「グループサイズが大きいほう」を優先したい場合はタプルキーにする
-        self._clusters.sort(key=lambda c: (self._cluster_hamming_score(c), len(c.files)), reverse=True)
 
         if not self._clusters:
             self._status_label.setText("No duplicate groups detected.")
@@ -898,7 +1017,10 @@ class DupTab(QWidget):
             self._update_action_states()
             return
         LOG.info("ui: clusters=%d", len(self._clusters))
-        self._populate_tree()
+        # ← ここで直接 populate せず、まずリファインへ
+        self._start_refine_pipeline(self._clusters)
+        # リファイン完了後に populate されるので、ここで_populate_tree()は呼ばない
+
         groups = len(self._clusters)
         files = sum(len(cluster.files) for cluster in self._clusters)
         self._status_label.setText(f"Scan complete: {groups} group(s), {files} file(s).")
