@@ -506,6 +506,26 @@ class DupTab(QWidget):
         self._thumb_timer.timeout.connect(self._request_visible_thumbs)
         self._tree.verticalScrollBar().valueChanged.connect(lambda _: self._thumb_timer.start(30))
         self._tree.viewport().installEventFilter(self)
+        self._idle_expand_timer = QTimer(self)
+        self._idle_expand_timer.setSingleShot(True)
+        self._idle_expand_timer.setInterval(500)  # ← 0.5秒アイドル
+        self._idle_expand_timer.timeout.connect(
+            lambda: self._expand_visible_collapsed_groups(max_to_expand=3, margin=120)
+        )
+
+        # スクロール“活動”の検知
+        def _on_scroll_activity():
+            # スクロールが続いている間は常にリセットされ、止まると1秒後に発火
+            self._idle_expand_timer.start()
+
+        self._on_scroll_activity = _on_scroll_activity  # メソッドとしてぶら下げてもOK
+
+        # スクロールバー操作で活動扱い
+        sb = self._tree.verticalScrollBar()
+        sb.valueChanged.connect(lambda _v: (self._thumb_timer.start(30), self._on_scroll_activity()))
+        # ついでにドラッグ開始/終了でも保険で活動扱い
+        sb.sliderPressed.connect(self._on_scroll_activity)
+        sb.sliderReleased.connect(self._on_scroll_activity)
 
         # サムネ用スレッドプールを控えめに（I/O スパイク防止）
         self._pool.setMaxThreadCount(min(4, os.cpu_count() or 2))
@@ -738,6 +758,12 @@ class DupTab(QWidget):
         hl.addWidget(btn_uncheck)
         self._tree.setItemWidget(item, 0, bar)
         item.setFirstColumnSpanned(True)
+        # ← これを追加：もとの文字列を消して下地の描画を止める
+        item.setData(0, Qt.ItemDataRole.DisplayRole, "")  # or item.setText(0, "")
+
+        # ← ついでに高さを同期＆再描画を明示
+        item.setSizeHint(0, bar.sizeHint())
+        self._tree.viewport().update(self._tree.visualItemRect(item))
 
         # ボタンのハンドラ（クロージャで対象を束縛）
         def _keep_this_group(it=item, cl_=cl):
@@ -917,6 +943,11 @@ class DupTab(QWidget):
                 QEvent.Type.UpdateRequest,
             ):
                 self._thumb_timer.start(0)
+                self._on_scroll_activity()
+
+            if ev.type() == QEvent.Type.Wheel:  # ← 追加
+                self._thumb_timer.start(0)
+                self._on_scroll_activity()
 
             if (
                 ev.type() == QEvent.Type.MouseButtonRelease
@@ -942,6 +973,47 @@ class DupTab(QWidget):
                             self._build_children_for_cluster(item, cluster)
                             self._schedule_visible_thumbs()
         return False
+
+    def _expand_visible_collapsed_groups(self, max_to_expand: int = 3, margin: int = 120) -> None:
+        # 大量追加中はスキップ（描画が落ち着いてから）
+        if getattr(self, "_bulk_populating", False):
+            return
+
+        vp = self._tree.viewport()
+        rect = vp.rect().adjusted(0, -margin, 0, +margin)
+
+        expanded = 0
+        # 画面上から可視範囲を舐める
+        idx = self._tree.indexAt(QPoint(10, 10))
+        while idx.isValid():
+            it = self._tree.itemFromIndex(idx)
+            if it is None:
+                break
+            if it.parent() is None:  # トップレベル
+                r = self._tree.visualItemRect(it)
+                if r.bottom() < rect.top():
+                    idx = self._tree.indexBelow(idx)
+                    continue
+                if r.top() > rect.bottom():
+                    break
+
+                if not it.isExpanded():
+                    # 先に軽量ヘッダーを（未装着なら）付与してから展開
+                    self._ensure_header_built_if_visible(it)
+                    it.setExpanded(True)  # → _on_group_expanded で panel を遅延構築
+                    expanded += 1
+                    if expanded >= max_to_expand:
+                        break
+
+                # すでに展開済みなら、必要ならパネルも可視条件で構築
+                else:
+                    self._ensure_panel_built_if_visible(it, force=False)
+
+            idx = self._tree.indexBelow(idx)
+
+        if expanded:
+            # サムネ要求を即キック
+            self._thumb_timer.start(0)
 
     # 可視アイテム検出 & リクエスト
     def _schedule_visible_thumbs(self) -> None:
@@ -1172,8 +1244,13 @@ class DupTab(QWidget):
 
         if end >= n:
             self._populate_timer.stop()
+            self._bulk_populating = False
+            self._block_item_changed = False
+            self._tree.setUpdatesEnabled(True)
             LOG.info("ui: populate done; groups=%d", self._tree.topLevelItemCount())
             QTimer.singleShot(0, self._expand_initial_groups)
+            if hasattr(self, "_idle_expand_timer"):
+                self._idle_expand_timer.start()
 
     def _expand_initial_groups(self, approx_px: int | None = None):
         LOG.info("ui: expand_initial")
@@ -1267,7 +1344,7 @@ class DupTab(QWidget):
         item.addChild(placeholder)
 
     def _build_children_for_cluster(self, parent_item: QTreeWidgetItem, cluster: "DuplicateCluster") -> None:
-        LOG.info("ui: build_panel group_size=%d", len(cluster.files))
+        # LOG.info("ui: build_panel group_size=%d", len(cluster.files))
         # 並び替えは既存関数をそのまま利用
         entries = self._sort_entries_for_display(cluster.files, cluster.keeper_id)
         panel_item = QTreeWidgetItem(parent_item)
