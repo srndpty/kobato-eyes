@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from core.config import config_path, load_settings, save_settings
-from core.settings import EmbedModel, PipelineSettings
+from core.settings import PipelineSettings
 
 
 def test_config_roundtrip(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -23,9 +23,6 @@ def test_config_roundtrip(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> No
         roots=[tmp_path / "root"],
         excluded=[tmp_path / "skip"],
         hamming_threshold=5,
-        cosine_threshold=0.15,
-        ssim_threshold=0.95,
-        embed_model=EmbedModel(name="ViT-H-14"),
     )
     save_settings(updated)
 
@@ -33,5 +30,3 @@ def test_config_roundtrip(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> No
     assert reloaded.roots == updated.roots
     assert reloaded.excluded == updated.excluded
     assert reloaded.hamming_threshold == 5
-    assert reloaded.cosine_threshold == pytest.approx(0.15)
-    assert reloaded.model_name == "ViT-H-14"

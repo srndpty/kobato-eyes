@@ -542,27 +542,6 @@ def upsert_signatures(conn: sqlite3.Connection, *, file_id: int, phash_u64: int,
         conn.execute(query, (file_id, int(phash_u64), int(dhash_u64)))
 
 
-def upsert_embedding(
-    conn: sqlite3.Connection,
-    *,
-    file_id: int,
-    model: str,
-    dim: int,
-    vector: bytes | memoryview,
-) -> None:
-    """Store or update an embedding vector for the given file/model pair."""
-    query = """
-        INSERT INTO embeddings (file_id, model, dim, vector)
-        VALUES (?, ?, ?, ?)
-        ON CONFLICT(file_id, model) DO UPDATE SET
-            dim = excluded.dim,
-            vector = excluded.vector
-    """
-    payload = memoryview(vector) if not isinstance(vector, memoryview) else vector
-    with conn:
-        conn.execute(query, (file_id, model, int(dim), payload))
-
-
 # ----------------------------------------
 # 検索
 # ----------------------------------------
@@ -701,16 +680,13 @@ def search_files(
 def iter_files_for_dup(
     conn: sqlite3.Connection,
     path_like: Optional[str],
-    *,
-    model_name: Optional[str] = None,  # 使わない場合はそのまま None でOK（将来のcosine用）
 ) -> Iterator[Dict[str, Any]]:
     """
     Duplicatesスキャン用に、必ず **plain dict** を返す。
     DuplicateFile.from_row() が dict.get を使っても落ちないようにする。
 
     返すキー（DuplicateFile.from_row が期待する名前に合わせる）:
-      - file_id, path, size, width, height, phash_u64, embedding
-    embedding は重いので基本 None を返す（将来必要になったらJOIN）。
+      - file_id, path, size, width, height, phash_u64
     """
     sql = """
       SELECT
@@ -739,7 +715,6 @@ def iter_files_for_dup(
             "width": r["width"],
             "height": r["height"],
             "phash_u64": r["phash_u64"],
-            "embedding": None,
         }
 
 
@@ -890,7 +865,6 @@ __all__ = [
     "update_fts",
     "update_fts_bulk",
     "upsert_signatures",
-    "upsert_embedding",
     "search_files",
     "mark_indexed_at",
     "list_tag_names",

@@ -572,7 +572,6 @@ class RefreshRunnable(QRunnable):
                 self._folder,
                 recursive=self._recursive,
                 batch_size=self._batch_size,
-                skip_hnsw=True,
                 hard_delete_missing=self._hard_delete,
             )
         except Exception as exc:  # pragma: no cover - defensive logging
@@ -1967,11 +1966,7 @@ class TagsTab(QWidget):
         else:
             self._status_label.setText(f"Indexing complete in {elapsed:.2f}s.")
         tagger_name = str(stats.get("tagger_name") or "unknown")
-        message = (
-            f"Indexed: {int(stats.get('scanned', 0))} files / "
-            f"Tagged: {int(stats.get('tagged', 0))} / "
-            f"Embedded: {int(stats.get('embedded', 0))}"
-        )
+        message = f"Indexed: {int(stats.get('scanned', 0))} files / " f"Tagged: {int(stats.get('tagged', 0))} / "
         retagged = int(stats.get("retagged", 0) or 0)
         requested = int(stats.get("retagged_marked", retagged) or 0)
         if self._retag_active:

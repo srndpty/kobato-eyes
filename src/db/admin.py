@@ -8,7 +8,6 @@ from datetime import datetime
 from pathlib import Path
 
 from db import connection as db_connection
-from utils.paths import get_index_dir
 
 logger = logging.getLogger(__name__)
 
@@ -42,7 +41,6 @@ def reset_database(
     db_path: str | Path,
     *,
     backup: bool = True,
-    purge_hnsw: bool = True,
 ) -> dict[str, object]:
     """Reset the SQLite database and associated artifacts.
 
@@ -72,25 +70,12 @@ def reset_database(
             logger.exception("Failed to remove %s", candidate)
             raise
 
-    hnsw_deleted = False
-    if purge_hnsw:
-        try:
-            index_dir = get_index_dir()
-            hnsw_path = index_dir / "hnsw_cosine.bin"
-            if hnsw_path.exists():
-                hnsw_path.unlink()
-                hnsw_deleted = True
-        except OSError:
-            logger.exception("Failed to remove HNSW index file")
-            raise
-
     _reset_bootstrap_cache(db_path, resolved_path)
     db_connection.bootstrap_if_needed(resolved_path)
 
     return {
         "db": resolved_path,
         "backup_paths": backup_paths,
-        "hnsw_deleted": hnsw_deleted,
     }
 
 

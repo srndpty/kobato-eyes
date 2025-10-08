@@ -41,15 +41,11 @@ from core.jobs import BatchJob, JobManager
 from core.scanner import DEFAULT_EXTENSIONS, iter_images
 from core.settings import PipelineSettings
 from core.tag_job import TagJobConfig, run_tag_job
-from core.watcher import DirectoryWatcher
 from db.connection import bootstrap_if_needed, get_conn
-from db.repository import fts_delete_rows, get_file_by_path, list_untagged_under_path, mark_indexed_at, upsert_file
-from dup.indexer import DuplicateIndexer, EmbedderProtocol, add_embeddings_to_hnsw, load_hnsw_index, save_hnsw_index
-from index.hnsw import HNSWIndex
-from sig.phash import dhash, phash
+from db.repository import fts_delete_rows, get_file_by_path, list_untagged_under_path, upsert_file
 from tagger.base import ITagger, TagCategory, TagResult
 from utils.hash import compute_sha256
-from utils.paths import ensure_dirs, get_db_path, get_index_dir
+from utils.paths import ensure_dirs, get_db_path
 
 logger = logging.getLogger(__name__)
 
@@ -257,8 +253,6 @@ class IndexPhase(Enum):
 
     SCAN = "scan"
     TAG = "tag"
-    EMBED = "embed"
-    HNSW = "hnsw"
     FTS = "fts"
     DONE = "done"
 
@@ -280,29 +274,16 @@ class _FileProcessJob(BatchJob):
         *,
         db_path: Path,
         tagger: ITagger,
-        embedder: EmbedderProtocol,
-        hnsw_index: HNSWIndex,
-        model_name: str,
         tag_config: TagJobConfig,
     ) -> None:
         super().__init__(list(paths))
         self._db_path = db_path
         self._tagger = tagger
-        self._embedder = embedder
-        self._index = hnsw_index
-        self._model_name = model_name
         self._tag_config = tag_config
         self._conn = None
-        self._indexer: DuplicateIndexer | None = None
 
     def prepare(self) -> None:
         self._conn = get_conn(self._db_path)
-        self._indexer = DuplicateIndexer(
-            self._conn,
-            self._embedder,
-            self._index,
-            model_name=self._model_name,
-        )
         logger.debug("Prepared processing job for %d files", len(self.items))
 
     def load_item(self, item: Path) -> Path:
@@ -353,8 +334,6 @@ class ProcessingPipeline(QObject):
         *,
         db_path: Path,
         tagger: ITagger,
-        embedder: EmbedderProtocol,
-        hnsw_index: HNSWIndex,
         job_manager: JobManager,
         settings: PipelineSettings | None = None,
     ) -> None:
@@ -366,11 +345,8 @@ class ProcessingPipeline(QObject):
             resolved_db.parent.mkdir(parents=True, exist_ok=True)
         self._db_path = resolved_db
         self._tagger = tagger
-        self._embedder = embedder
-        self._index = hnsw_index
         self._job_manager = job_manager
         self._settings = settings or PipelineSettings()
-        self._watcher: DirectoryWatcher | None = None
         self._scheduled: Set[Path] = set()
         self._tag_config = TagJobConfig()
         self._tagger_sig: str | None = None
@@ -392,39 +368,10 @@ class ProcessingPipeline(QObject):
 
     def update_settings(self, settings: PipelineSettings) -> None:
         logger.info("Updating pipeline settings: %s", settings)
-        was_running = self._watcher is not None and self._watcher.is_running()
-        if self._watcher is not None:
-            self.stop()
         self._settings = settings
         self._refresh_tag_config()
-        if self._settings.auto_index and (was_running or self._watcher is None):
-            self.start()
-
-    def start(self) -> None:
-        if self._watcher is not None:
-            return
-        if not self._settings.auto_index:
-            logger.info("Auto indexing disabled; watcher not started")
-            return
-        if not self._settings.roots:
-            logger.warning("Cannot start pipeline without roots")
-            return
-        self._watcher = DirectoryWatcher(
-            self._settings.roots,
-            callback=self.enqueue_index,
-            excluded=self._settings.excluded,
-            extensions=self._settings.allow_exts or DEFAULT_EXTENSIONS,
-            parent=self,
-        )
-        self._watcher.start()
-        logger.info("Processing pipeline started")
 
     def stop(self) -> None:
-        if self._watcher is not None:
-            self._watcher.flush_pending()
-            self._watcher.stop()
-            self._watcher.deleteLater()
-            self._watcher = None
         self._scheduled.clear()
         logger.info("Processing pipeline stopped")
 
@@ -461,9 +408,6 @@ class ProcessingPipeline(QObject):
             resolved_paths,
             db_path=self._db_path,
             tagger=self._tagger,
-            embedder=self._embedder,
-            hnsw_index=self._index,
-            model_name=self._settings.model_name,
             tag_config=self._tag_config,
         )
         signals = self._job_manager.submit(job)
@@ -480,10 +424,9 @@ def scan_and_tag(
     *,
     recursive: bool = True,
     batch_size: int = 8,
-    skip_hnsw: bool = True,
     hard_delete_missing: bool = False,
 ) -> dict[str, object]:
-    """Tag unprocessed images within ``root`` without updating embeddings or HNSW."""
+    """Tag unprocessed images within ``root``."""
 
     start_time = time.perf_counter()
     resolved_root = Path(root).expanduser()
@@ -542,9 +485,6 @@ def scan_and_tag(
         return True
 
     try:
-        if not skip_hnsw:
-            logger.info("scan_and_tag operates in tagging-only mode; embeddings/HNSW are skipped.")
-
         queued_paths: list[Path] = []
         seen: set[str] = set()
         fs_paths: set[str] = set()
@@ -638,10 +578,6 @@ def scan_and_tag(
                         placeholders = ", ".join("?" for _ in chunk)
                         conn.execute(
                             f"DELETE FROM file_tags WHERE file_id IN ({placeholders})",
-                            chunk,
-                        )
-                        conn.execute(
-                            f"DELETE FROM embeddings WHERE file_id IN ({placeholders})",
                             chunk,
                         )
                         conn.execute(
@@ -768,9 +704,7 @@ class _FileRecord:
     is_new: bool
     changed: bool
     tag_exists: bool
-    embed_exists: bool
     needs_tagging: bool
-    needs_embedding: bool
     stored_tagger_sig: str | None = None
     current_tagger_sig: str | None = None
     last_tagged_at: float | None = None
@@ -959,13 +893,6 @@ class Scanner:
                 tag_exists = (
                     conn.execute("SELECT 1 FROM file_tags WHERE file_id = ? LIMIT 1", (file_id,)).fetchone() is not None
                 )
-                embed_exists = (
-                    conn.execute(
-                        "SELECT 1 FROM embeddings WHERE file_id = ? AND model = ? LIMIT 1",
-                        (file_id, settings.embed_model.name),
-                    ).fetchone()
-                    is not None
-                )
                 stored_sig = str(row["tagger_sig"]) if (row is not None and row["tagger_sig"] is not None) else None
                 stored_tagged_at = row["last_tagged_at"] if row is not None else None
                 last_tagged_at = float(stored_tagged_at) if stored_tagged_at is not None else None
@@ -981,9 +908,7 @@ class Scanner:
                         is_new=is_new,
                         changed=changed,
                         tag_exists=tag_exists,
-                        embed_exists=embed_exists,
                         needs_tagging=needs_tagging,
-                        needs_embedding=is_new or changed or not embed_exists,
                         stored_tagger_sig=stored_sig,
                         current_tagger_sig=self.ctx.tagger_sig,
                         last_tagged_at=last_tagged_at,
@@ -1208,232 +1133,6 @@ class TaggingStage:
 
 
 # ============================================
-# 新規: 埋め込み段階
-# ============================================
-class EmbeddingStage:
-    def __init__(self, ctx: PipelineContext, emitter: ProgressEmitter):
-        self.ctx = ctx
-        self.emitter = emitter
-
-    @staticmethod
-    def _ensure_image_loaded(rec: _FileRecord) -> bool:
-        if rec.load_failed:
-            return False
-        if rec.image is None:
-            from utils.image_io import safe_load_image
-
-            image = safe_load_image(
-                rec.path, max_side=4096, bomb_pixel_cap=350_000_000, hard_skip_pixels=220_000_000, skip_on_bomb=True
-            )
-            if image is None:
-                rec.load_failed = True
-                return False
-            rec.image = image
-            rec.width = image.width
-            rec.height = image.height
-        return True
-
-    def run(self, records: list[_FileRecord]) -> tuple[int, list[tuple[int, np.ndarray]]]:
-        settings = self.ctx.settings
-        embed_records = [r for r in records if r.needs_embedding and not r.load_failed]
-        self.emitter.emit(IndexProgress(phase=IndexPhase.EMBED, done=0, total=len(embed_records)), force=True)
-        if not embed_records:
-            return 0, []
-
-        conn = get_conn(self.ctx.db_path)
-        try:
-            embedder = _resolve_embedder(settings)
-        except Exception as exc:
-            logger.exception("Failed to instantiate embedder: %s", exc)
-            return 0, []
-        logger.info("Embedding %d image(s)", len(embed_records))
-
-        processed = 0
-        last_logged = 0
-        idx = 0
-        current_batch = max(1, int(getattr(settings, "batch_size", 32) or 32))
-        hnsw_additions: list[tuple[int, np.ndarray]] = []
-
-        while idx < len(embed_records):
-            if self.emitter.cancelled(self.ctx.is_cancelled):
-                break
-            batch_slice = embed_records[idx : idx + current_batch]
-
-            images: list[Image.Image] = []
-            valid: list[_FileRecord] = []
-            for rec in batch_slice:
-                if self._ensure_image_loaded(rec) and rec.image is not None:
-                    images.append(rec.image)
-                    valid.append(rec)
-            if not images:
-                idx += len(batch_slice)
-                continue
-
-            try:
-                vectors = embedder.embed_images(images)
-            except Exception as exc:
-                if current_batch > 1:
-                    current_batch = max(1, current_batch // 2)
-                    logger.warning("Embedding batch failed (%s); reducing batch size to %d", exc, current_batch)
-                    continue
-                logger.exception("Embedding failed for batch starting with %s", valid[0].path)
-                idx += len(batch_slice)
-                continue
-
-            if len(vectors) != len(valid):
-                logger.error("Embedder returned %d vectors for %d images; skipping batch", len(vectors), len(valid))
-                idx += len(batch_slice)
-                continue
-
-            conn.execute("BEGIN IMMEDIATE")
-            try:
-                up_rows_embed: list[tuple[int, str, int, memoryview]] = []
-                up_rows_file: list[tuple[int, int, float, str, int, int]] = []
-                sig_rows: list[tuple[int, int, int]] = []
-
-                for rec, image, vector in zip(valid, images, vectors):
-                    _w, _h = getattr(image, "width", None), getattr(image, "height", None)
-
-                    array = np.asarray(vector, dtype=np.float32)
-                    if array.ndim != 1:
-                        array = np.reshape(array, (-1,))
-                    if not array.flags.c_contiguous:
-                        array = np.ascontiguousarray(array, dtype=np.float32)
-                    else:
-                        array = array.astype(np.float32, copy=True)
-                    norm = float(np.linalg.norm(array))
-                    if norm > 0:
-                        array /= norm
-
-                    up_rows_file.append((rec.size, rec.mtime, rec.sha, str(rec.path), _w or 0, _h or 0))
-                    sig_rows.append((rec.file_id, int(phash(image)), int(dhash(image))))
-                    up_rows_embed.append(
-                        (rec.file_id, settings.embed_model.name, int(array.shape[0]), memoryview(array.tobytes()))
-                    )
-
-                    was_missing = not rec.embed_exists
-                    mark_indexed_at(conn, rec.file_id, indexed_at=time.time())
-                    rec.needs_embedding = False
-                    rec.embed_exists = True
-                    if rec.is_new or was_missing:
-                        hnsw_additions.append((rec.file_id, array.copy()))
-                    processed += 1
-
-                    try:
-                        image.close()
-                    except Exception:
-                        pass
-                    rec.image = None
-                    del array
-                if up_rows_file:
-                    conn.executemany(
-                        "UPDATE files SET size=?, mtime=?, sha256=? , width=?, height=? WHERE path=?",
-                        [(sz, mt, sha, w, h, p) for (sz, mt, sha, p, w, h) in up_rows_file],
-                    )
-                if sig_rows:
-                    conn.executemany(
-                        "INSERT INTO signatures (file_id, phash_u64, dhash_u64) VALUES (?, ?, ?) "
-                        "ON CONFLICT(file_id) DO UPDATE SET phash_u64=excluded.phash_u64, dhash_u64=excluded.dhash_u64",
-                        sig_rows,
-                    )
-                if up_rows_embed:
-                    conn.executemany(
-                        "INSERT INTO embeddings (file_id, model, dim, vector) VALUES (?, ?, ?, ?) "
-                        "ON CONFLICT(file_id, model) DO UPDATE SET dim=excluded.dim, vector=excluded.vector",
-                        up_rows_embed,
-                    )
-                conn.commit()
-            except Exception:
-                conn.rollback()
-                raise
-
-            try:
-                images.clear()
-                vectors.clear()
-            except Exception:
-                pass
-            del images, vectors
-
-            if (processed % 4096) == 0:
-                import gc
-
-                gc.collect()
-
-            last_logged = self._log_step("Embedding", processed, len(embed_records), last_logged)
-            self.emitter.emit(IndexProgress(phase=IndexPhase.EMBED, done=processed, total=len(embed_records)))
-            idx += len(batch_slice)
-
-        conn.commit()
-        logger.info("Embedding complete: %d image(s) processed", processed)
-        self.emitter.emit(IndexProgress(phase=IndexPhase.EMBED, done=processed, total=len(embed_records)), force=True)
-
-        # Torch 後始末（落ちどころ回避）
-        try:
-            import torch
-
-            torch.cuda.synchronize()
-        except Exception:
-            pass
-        try:
-            for name in ("embedder", "embed_model", "clip_model", "preprocess"):
-                if name in locals():
-                    del locals()[name]
-            import gc
-
-            gc.collect()
-            try:
-                import torch as _t
-
-                _t.cuda.empty_cache()
-            except Exception:
-                pass
-        except Exception:
-            logger.exception("embedder cleanup failed")
-
-        return processed, hnsw_additions
-
-    def _log_step(self, stage: str, done: int, total: int, last: int) -> int:
-        if total <= 0:
-            return last
-        step = max(1, total // 5)
-        if done >= total or done - last >= step:
-            logger.info("%s progress: %d/%d", stage, done, total)
-            return done
-        return last
-
-
-# ============================================
-# 新規: HNSW 段階
-# ============================================
-class HnswStage:
-    def __init__(self, ctx: PipelineContext, emitter: ProgressEmitter):
-        self.ctx = ctx
-        self.emitter = emitter
-
-    def run(self, additions: list[tuple[int, np.ndarray]]) -> int:
-        self.emitter.emit(IndexProgress(phase=IndexPhase.HNSW, done=0, total=len(additions)), force=True)
-        if not additions:
-            return 0
-        dim = additions[0][1].shape[0]
-        settings = self.ctx.settings
-        ensure_dirs()
-        index_dir = Path(settings.index_dir).expanduser() if settings.index_dir else get_index_dir()
-        index_dir.mkdir(parents=True, exist_ok=True)
-        index_path = index_dir / "hnsw_cosine.bin"
-        try:
-            index = load_hnsw_index(index_path, dim=dim)
-            added = add_embeddings_to_hnsw(index, additions, dim=dim)
-            if added:
-                save_hnsw_index(index, index_path)
-            logger.info("HNSW index updated with %d new vector(s)", added)
-            self.emitter.emit(IndexProgress(phase=IndexPhase.HNSW, done=added, total=len(additions)), force=True)
-            return added
-        except Exception as exc:
-            logger.exception("Failed to update HNSW index: %s", exc)
-            return 0
-
-
-# ============================================
 # 新規: 全体オーケストレータ
 # ============================================
 class IndexPipeline:
@@ -1443,7 +1142,6 @@ class IndexPipeline:
         settings: PipelineSettings | None = None,
         *,
         tagger_override: ITagger | None = None,  # （今は未使用だが将来拡張用）
-        embedder_override: EmbedderProtocol | None = None,  # （同上）
         progress_cb: Callable[[IndexProgress], None] | None = None,
         is_cancelled: Callable[[], bool] | None = None,
     ) -> None:
@@ -1473,8 +1171,6 @@ class IndexPipeline:
             "new_or_changed": 0,
             "tagged": 0,
             "signatures": 0,
-            "embedded": 0,
-            "hnsw_added": 0,
             "elapsed_sec": 0.0,
             "tagger_name": self.ctx.settings.tagger.name,
             "retagged": 0,
@@ -1493,27 +1189,13 @@ class IndexPipeline:
             tagged, _fts, _ = TaggingStage(self.ctx, self.emitter).run(records)
             stats["tagged"] = tagged
 
-        # 3) Embed
-        additions: list[tuple[int, np.ndarray]] = []
-        if not self.emitter.cancelled(self.ctx.is_cancelled):
-            embedded, additions = EmbeddingStage(self.ctx, self.emitter).run(records)
-            stats["signatures"] = embedded
-            stats["embedded"] = embedded
-
-        # 4) HNSW
-        if not self.emitter.cancelled(self.ctx.is_cancelled):
-            added = HnswStage(self.ctx, self.emitter).run(additions)
-            stats["hnsw_added"] = added
-
         stats["elapsed_sec"] = time.perf_counter() - start
         self.emitter.emit(IndexProgress(phase=IndexPhase.DONE, done=1, total=1), force=True)
         logger.info(
-            "Indexing complete: scanned=%d, new=%d, tagged=%d, embedded=%d, hnsw_added=%d (%.2fs)",
+            "Indexing complete: scanned=%d, new=%d, tagged=%d, (%.2fs)",
             stats["scanned"],
             stats["new_or_changed"],
             stats["tagged"],
-            stats["embedded"],
-            stats["hnsw_added"],
             stats["elapsed_sec"],
         )
         return stats
@@ -1527,7 +1209,6 @@ def run_index_once(
     settings: PipelineSettings | None = None,
     *,
     tagger_override: ITagger | None = None,
-    embedder_override: EmbedderProtocol | None = None,
     progress_cb: Callable[[IndexProgress], None] | None = None,
     is_cancelled: Callable[[], bool] | None = None,
 ) -> dict[str, object]:
@@ -1535,7 +1216,6 @@ def run_index_once(
         db_path=db_path,
         settings=settings,
         tagger_override=tagger_override,
-        embedder_override=embedder_override,
         progress_cb=progress_cb,
         is_cancelled=is_cancelled,
     ).run()
@@ -1664,17 +1344,6 @@ def _resolve_tagger(
         serialised_max_tags,
     )
     return tagger_instance
-
-
-def _resolve_embedder(settings: PipelineSettings) -> EmbedderProtocol:
-    from sig.embedder import OpenClipEmbedder
-
-    return OpenClipEmbedder(
-        settings.embed_model.name,
-        settings.embed_model.pretrained,
-        device=settings.embed_model.device,
-        batch_size=settings.batch_size,
-    )
 
 
 def _format_sig_mapping(mapping: Mapping[str, float | int]) -> str:
