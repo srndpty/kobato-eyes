@@ -13,7 +13,6 @@ from db.repository import (
     mark_files_absent,
     replace_file_tags,
     update_fts,
-    upsert_embedding,
     upsert_file,
     upsert_signatures,
     upsert_tags,
@@ -129,20 +128,6 @@ def test_repository_roundtrip(memory_conn: sqlite3.Connection) -> None:
     assert sig_row["dhash_u64"] == 654
 
     vector = bytes(range(16))
-    upsert_embedding(
-        memory_conn,
-        file_id=file_id,
-        model="clip-vit",
-        dim=16,
-        vector=vector,
-    )
-    upsert_embedding(
-        memory_conn,
-        file_id=file_id,
-        model="clip-vit",
-        dim=16,
-        vector=vector[::-1],
-    )
     embed_row = memory_conn.execute(
         "SELECT dim, vector FROM embeddings WHERE file_id = ? AND model = ?",
         (file_id, "clip-vit"),
@@ -172,13 +157,6 @@ def test_iter_files_for_dup_and_mark_absent(memory_conn: sqlite3.Connection) -> 
         file_id=present_id,
         phash_u64=0x1234,
         dhash_u64=0x5678,
-    )
-    upsert_embedding(
-        memory_conn,
-        file_id=present_id,
-        model="clip-vit",
-        dim=2,
-        vector=(b"\x00\x00\x80?" * 2),
     )
 
     missing_id = upsert_file(

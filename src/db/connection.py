@@ -92,7 +92,6 @@ def _ensure_indexes(conn: sqlite3.Connection) -> None:
         "files_present_mtime_idx",
         "CREATE INDEX IF NOT EXISTS files_present_mtime_idx      ON files(is_present, mtime DESC)",
     )
-    build("idx_embeddings_model", "CREATE INDEX IF NOT EXISTS idx_embeddings_model         ON embeddings(model)")
 
 
 def _resolve_db_target(db_path: str | Path) -> tuple[str, bool, bool, str, Path | None]:

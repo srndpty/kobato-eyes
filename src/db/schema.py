@@ -71,26 +71,12 @@ SCHEMA_STATEMENTS: tuple[str, ...] = (
         FOREIGN KEY (file_id) REFERENCES files(id) ON DELETE CASCADE
     );
     """,
-    # embeddings
-    """
-    CREATE TABLE IF NOT EXISTS embeddings (
-        file_id INTEGER NOT NULL,
-        model TEXT NOT NULL,
-        dim INTEGER NOT NULL,
-        vector BLOB NOT NULL,
-        PRIMARY KEY (file_id, model),
-        FOREIGN KEY (file_id) REFERENCES files(id) ON DELETE CASCADE
-    );
-    """,
     # minimal indexes （詳細は connection._ensure_indexes で補完）
     """
     CREATE INDEX IF NOT EXISTS idx_tags_category        ON tags(category);
     """,
     """
     CREATE INDEX IF NOT EXISTS idx_file_tags_tag_id     ON file_tags(tag_id);
-    """,
-    """
-    CREATE INDEX IF NOT EXISTS idx_embeddings_model     ON embeddings(model);
     """,
     """
     CREATE INDEX IF NOT EXISTS files_present_path_idx   ON files(is_present, path);

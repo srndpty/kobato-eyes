@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
+import sqlite3
 from pathlib import Path
 
 import pytest
-import sqlite3
 from PIL import Image
 
 from core.pipeline import current_tagger_sig, run_index_once
@@ -21,9 +21,7 @@ class _StubTagger(ITagger):
         self._label = label
 
     def infer_batch(self, images, *, thresholds=None, max_tags=None):  # type: ignore[override]
-        predictions = [
-            TagPrediction(name=self._label, score=0.9, category=TagCategory.GENERAL)
-        ]
+        predictions = [TagPrediction(name=self._label, score=0.9, category=TagCategory.GENERAL)]
         return [TagResult(tags=predictions) for _ in images]
 
 
@@ -34,9 +32,7 @@ def _create_test_image(target: Path) -> None:
 
 
 def _fetch_tags(conn: sqlite3.Connection) -> set[str]:
-    rows = conn.execute(
-        "SELECT t.name FROM file_tags ft JOIN tags t ON t.id = ft.tag_id"
-    ).fetchall()
+    rows = conn.execute("SELECT t.name FROM file_tags ft JOIN tags t ON t.id = ft.tag_id").fetchall()
     return {str(row[0]) for row in rows}
 
 
@@ -47,7 +43,6 @@ def test_retagging_on_signature_change(tmp_path: Path) -> None:
 
     settings_dummy = PipelineSettings(
         roots=[str(tmp_path / "assets")],
-        auto_index=False,
         tagger=TaggerSettings(name="dummy"),
     )
 
@@ -60,9 +55,7 @@ def test_retagging_on_signature_change(tmp_path: Path) -> None:
 
     conn = get_conn(db_path)
     try:
-        row = conn.execute(
-            "SELECT tagger_sig, last_tagged_at FROM files LIMIT 1"
-        ).fetchone()
+        row = conn.execute("SELECT tagger_sig, last_tagged_at FROM files LIMIT 1").fetchone()
         assert row is not None
         initial_sig = str(row["tagger_sig"])
         initial_timestamp = float(row["last_tagged_at"] or 0.0)
@@ -78,7 +71,6 @@ def test_retagging_on_signature_change(tmp_path: Path) -> None:
 
     settings_wd14 = PipelineSettings(
         roots=[str(tmp_path / "assets")],
-        auto_index=False,
         tagger=TaggerSettings(name="wd14-onnx", model_path=str(model_path)),
     )
 
@@ -92,9 +84,7 @@ def test_retagging_on_signature_change(tmp_path: Path) -> None:
 
     conn = get_conn(db_path)
     try:
-        row = conn.execute(
-            "SELECT tagger_sig, last_tagged_at FROM files LIMIT 1"
-        ).fetchone()
+        row = conn.execute("SELECT tagger_sig, last_tagged_at FROM files LIMIT 1").fetchone()
         assert row is not None
         new_sig = str(row["tagger_sig"])
         new_timestamp = float(row["last_tagged_at"] or 0.0)

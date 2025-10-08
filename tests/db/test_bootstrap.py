@@ -11,7 +11,7 @@ import pytest
 from PIL import Image
 
 from core.pipeline import run_index_once
-from core.settings import EmbedModel, PipelineSettings, TaggerSettings
+from core.settings import PipelineSettings, TaggerSettings
 from db.connection import bootstrap_if_needed, get_conn
 from tagger.dummy import DummyTagger
 
@@ -40,9 +40,7 @@ def test_bootstrap_creates_schema(tmp_path: Path) -> None:
     conn = get_conn(db_path)
     try:
         conn.row_factory = sqlite3.Row
-        rows = conn.execute(
-            "SELECT name FROM sqlite_master WHERE type IN ('table', 'virtual table')"
-        ).fetchall()
+        rows = conn.execute("SELECT name FROM sqlite_master WHERE type IN ('table', 'virtual table')").fetchall()
         tables = {row["name"] for row in rows}
         version = conn.execute("PRAGMA user_version").fetchone()[0]
     finally:
@@ -53,9 +51,7 @@ def test_bootstrap_creates_schema(tmp_path: Path) -> None:
     assert int(version) >= 1
 
 
-def test_run_index_once_bootstraps_schema(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_run_index_once_bootstraps_schema(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     db_path = tmp_path / "library.db"
     image_dir = tmp_path / "images"
     image_dir.mkdir()
@@ -69,7 +65,6 @@ def test_run_index_once_bootstraps_schema(
         allow_exts=[".png"],
         batch_size=1,
         tagger=TaggerSettings(name="dummy"),
-        embed_model=EmbedModel(name="dummy", device="cpu", dim=4),
         index_dir=str(tmp_path / "index"),
     )
 
@@ -77,7 +72,6 @@ def test_run_index_once_bootstraps_schema(
         db_path,
         settings=settings,
         tagger_override=DummyTagger(),
-        embedder_override=_ZeroEmbedder(dim=4),
     )
 
     assert stats["scanned"] == 1

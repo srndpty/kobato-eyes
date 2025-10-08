@@ -6,10 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Mapping, Sequence
 
-import numpy as np
-
 from sig.phash import hamming64
-
 
 _EXTENSION_PRIORITY = {
     "png": 4,
@@ -36,7 +33,6 @@ class DuplicateFile:
     width: int | None
     height: int | None
     phash: int
-    embedding: np.ndarray | None
 
     @classmethod
     def from_row(cls, row: Mapping[str, object]) -> DuplicateFile:
@@ -49,18 +45,7 @@ class DuplicateFile:
         size = row.get("size")
         width = row.get("width")
         height = row.get("height")
-        embedding: np.ndarray | None = None
-        raw_embedding = row.get("embedding_vector")
-        dim_value = row.get("embedding_dim")
-        if raw_embedding is not None and dim_value is not None:
-            dim = int(dim_value)
-            buffer = raw_embedding
-            if isinstance(buffer, memoryview):
-                buffer = buffer.tobytes()
-            array = np.frombuffer(buffer, dtype=np.float32)
-            if dim > 0:
-                array = array[:dim]
-            embedding = array.astype(np.float32, copy=True) if array.size else None
+
         return cls(
             file_id=int(row.get("file_id")),
             path=raw_path,
@@ -68,7 +53,6 @@ class DuplicateFile:
             width=int(width) if isinstance(width, (int, float)) else None,
             height=int(height) if isinstance(height, (int, float)) else None,
             phash=int(phash_value),
-            embedding=embedding,
         )
 
     @property
@@ -89,7 +73,6 @@ class DuplicateClusterEntry:
 
     file: DuplicateFile
     best_hamming: int | None
-    best_cosine: float | None
 
 
 @dataclass(frozen=True)
@@ -106,7 +89,6 @@ class DuplicateScanConfig:
 
     hamming_threshold: int = 8
     size_ratio: float | None = None
-    cosine_threshold: float | None = None
     band_bits: int = 16
     band_count: int = 4
 
@@ -124,7 +106,6 @@ class DuplicateEdge:
     file_id_a: int
     file_id_b: int
     hamming: int | None
-    cosine: float | None
 
 
 class DisjointSet:
@@ -195,18 +176,11 @@ class DuplicateScanner:
                     hamming = hamming64(file_a.phash, file_b.phash)
                     if hamming > self._config.hamming_threshold:
                         continue
-                    cosine = self._compute_cosine_distance(file_a.embedding, file_b.embedding)
-                    if (
-                        self._config.cosine_threshold is not None
-                        and cosine is not None
-                        and cosine > self._config.cosine_threshold
-                    ):
-                        continue
+
                     edges[key] = DuplicateEdge(
                         file_id_a=file_a.file_id,
                         file_id_b=file_b.file_id,
                         hamming=hamming,
-                        cosine=cosine,
                     )
 
         if not edges:
@@ -215,7 +189,6 @@ class DuplicateScanner:
         dsu = DisjointSet()
         files_by_id = {file.file_id: file for file in candidates}
         best_hamming: dict[int, int] = {}
-        best_cosine: dict[int, float] = {}
         for edge in edges.values():
             dsu.union(edge.file_id_a, edge.file_id_b)
             for file_id, distance in ((edge.file_id_a, edge.hamming), (edge.file_id_b, edge.hamming)):
@@ -223,11 +196,6 @@ class DuplicateScanner:
                     current = best_hamming.get(file_id)
                     if current is None or distance < current:
                         best_hamming[file_id] = distance
-            for file_id, distance in ((edge.file_id_a, edge.cosine), (edge.file_id_b, edge.cosine)):
-                if distance is not None:
-                    current = best_cosine.get(file_id)
-                    if current is None or distance < current:
-                        best_cosine[file_id] = distance
 
         groups: dict[int, list[int]] = {}
         for file_id in {fid for edge in edges.values() for fid in (edge.file_id_a, edge.file_id_b)}:
@@ -247,7 +215,6 @@ class DuplicateScanner:
                     DuplicateClusterEntry(
                         file=file,
                         best_hamming=best_hamming.get(file_id),
-                        best_cosine=best_cosine.get(file_id),
                     )
                 )
             if len(entries) < 2:
@@ -286,25 +253,6 @@ class DuplicateScanner:
         if larger == 0:
             return True
         return (smaller / larger) >= ratio
-
-    @staticmethod
-    def _compute_cosine_distance(
-        left: np.ndarray | None, right: np.ndarray | None
-    ) -> float | None:
-        if left is None or right is None:
-            return None
-        dim = min(left.shape[0], right.shape[0])
-        if dim == 0:
-            return None
-        vec_a = left[:dim]
-        vec_b = right[:dim]
-        dot = float(np.dot(vec_a, vec_b))
-        distance = 1.0 - dot
-        if distance < 0.0:
-            distance = 0.0
-        if distance > 2.0:
-            distance = 2.0
-        return distance
 
     @staticmethod
     def _choose_keeper(entries: Sequence[DuplicateClusterEntry]) -> int:

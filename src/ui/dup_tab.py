@@ -55,7 +55,6 @@ from PyQt6.QtWidgets import (
 )
 from send2trash import send2trash
 
-from core.config import load_settings
 from db.connection import get_conn
 from db.repository import iter_files_for_dup, mark_files_absent
 from dup.scanner import DuplicateCluster, DuplicateClusterEntry, DuplicateFile, DuplicateScanConfig, DuplicateScanner
@@ -150,7 +149,6 @@ class DuplicateScanRequest:
     path_like: str | None
     hamming_threshold: int
     size_ratio: float | None
-    cosine_threshold: float | None
 
 
 class ThumbTile(QFrame):
@@ -179,7 +177,7 @@ class ThumbTile(QFrame):
         st = Qt.CheckState.Unchecked if entry.file.file_id == parent.property("keeper_id") else Qt.CheckState.Checked
         self.check.setCheckState(st)
 
-        self.meta1 = QLabel(self)  # 1行目: size,res,ham,cos
+        self.meta1 = QLabel(self)  # 1行目: size,res,ham
         self.meta2 = QLabel(self)  # 2行目: dir (middle elide)
         for lab in (self.meta1, self.meta2):
             lab.setWordWrap(False)
@@ -196,8 +194,7 @@ class ThumbTile(QFrame):
         size_t = DupTab._format_size(entry.file.size)
         res_t = DupTab._format_resolution(entry.file.width, entry.file.height)
         ham_t = "-" if entry.best_hamming is None else f"H:{entry.best_hamming}"
-        cos_t = "-" if entry.best_cosine is None else f"C:{entry.best_cosine:.3f}"
-        self.meta1.setText(f"{size_t}   {res_t}   {ham_t}   {cos_t}")
+        self.meta1.setText(f"{size_t}   {res_t}   {ham_t}")
 
         fm = QFontMetrics(self.font())
         folder = str(entry.file.path.parent)
@@ -336,12 +333,11 @@ class DuplicateScanRunnable(QRunnable):
     def run(self) -> None:
         try:
             LOG.info("scan: start")
-            settings = load_settings()
-            model_name = settings.model_name
+            # settings = load_settings()
 
             # conn はこの with（closing）ブロック内でだけ使う
             with closing(get_conn(self._db_path)) as conn:
-                rows = list(iter_files_for_dup(conn, self._request.path_like, model_name=model_name))
+                rows = list(iter_files_for_dup(conn, self._request.path_like))
                 LOG.info("scan: rows loaded = %d", len(rows))
 
             total = len(rows)
@@ -360,7 +356,6 @@ class DuplicateScanRunnable(QRunnable):
             config = DuplicateScanConfig(
                 hamming_threshold=self._request.hamming_threshold,
                 size_ratio=self._request.size_ratio,
-                cosine_threshold=self._request.cosine_threshold,
             )
 
             LOG.info("cluster: building ...")
@@ -450,13 +445,6 @@ class DupTab(QWidget):
         self._ratio_spin.setValue(0.90)
         self._ratio_spin.setSpecialValueText("disabled")
 
-        self._cosine_spin = QDoubleSpinBox(self)
-        self._cosine_spin.setRange(0.0, 2.0)
-        self._cosine_spin.setSingleStep(0.05)
-        self._cosine_spin.setDecimals(3)
-        self._cosine_spin.setValue(0.20)
-        self._cosine_spin.setSpecialValueText("disabled")
-
         self._scan_button = QPushButton("Scan", self)
         self._mark_button = QPushButton("Mark keep-largest", self)
         self._uncheck_button = QPushButton("Uncheck all", self)
@@ -493,7 +481,6 @@ class DupTab(QWidget):
 
         hdr = self._tree.header()
         hdr.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)  # 追加
-        # self._tree.setHeaderLabels(["File", "Size", "Resolution", "Hamming", "Cosine", "Path"])
         self._tree.setAlternatingRowColors(True)
         # ★ アイコンサイズ（Tagsタブに寄せるなら 96x96 や 128x128）
         self._icon_size = QSize(256, 256)
@@ -559,8 +546,6 @@ class DupTab(QWidget):
         controls_layout.addWidget(self._hamming_spin)
         controls_layout.addWidget(QLabel("Size ratio ≥", self))
         controls_layout.addWidget(self._ratio_spin)
-        controls_layout.addWidget(QLabel("Cosine ≤", self))
-        controls_layout.addWidget(self._cosine_spin)
         controls_layout.addSpacing(16)
         controls_layout.addWidget(QLabel("grid", self))
         controls_layout.addWidget(self._grid_spin)
@@ -1136,37 +1121,10 @@ class DupTab(QWidget):
 
     def _build_request(self) -> DuplicateScanRequest:
         ratio = self._ratio_spin.value()
-        cosine = self._cosine_spin.value()
         return DuplicateScanRequest(
             path_like=None,
             hamming_threshold=self._hamming_spin.value(),
             size_ratio=ratio if ratio > 0 else None,
-            cosine_threshold=cosine if cosine > 0 else None,
-        )
-
-    def _group_summary(self, cluster: "DuplicateCluster") -> tuple[str, str, str, str, str]:
-        sizes = [e.file.size for e in cluster.files if e.file.size]
-        avg_size = int(sum(sizes) / len(sizes)) if sizes else 0
-
-        widths = [e.file.width for e in cluster.files if e.file.width]
-        heights = [e.file.height for e in cluster.files if e.file.height]
-        avg_w = int(round(sum(widths) / len(widths))) if widths else 0
-        avg_h = int(round(sum(heights) / len(heights))) if heights else 0
-
-        hams = [h for h in (e.best_hamming for e in cluster.files) if h is not None]
-        avg_ham = (sum(hams) / len(hams)) if hams else None
-
-        coses = [c for c in (e.best_cosine for e in cluster.files) if c is not None]
-        avg_cos = (sum(coses) / len(coses)) if coses else None
-
-        first_path = cluster.files[0].file.path.as_posix() if cluster.files else ""
-
-        return (
-            self._format_size(avg_size) if avg_size > 0 else "-",
-            self._format_resolution(avg_w, avg_h) if (avg_w and avg_h) else "-",
-            f"{avg_ham:.1f}" if avg_ham is not None else "-",
-            f"{avg_cos:.3f}" if avg_cos is not None else "-",
-            first_path,
         )
 
     def _queue_thumb(self, path: Path) -> None:
@@ -1500,7 +1458,6 @@ class DupTab(QWidget):
                         "height",
                         "keeper",
                         "hamming",
-                        "cosine",
                     ]
                 )
                 for group_index, cluster in enumerate(self._clusters, start=1):
@@ -1515,7 +1472,6 @@ class DupTab(QWidget):
                                 entry.file.height or 0,
                                 1 if entry.file.file_id == cluster.keeper_id else 0,
                                 entry.best_hamming if entry.best_hamming is not None else "",
-                                f"{entry.best_cosine:.6f}" if entry.best_cosine is not None else "",
                             ]
                         )
         except OSError as exc:  # pragma: no cover - filesystem errors depend on environment

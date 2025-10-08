@@ -18,6 +18,15 @@ from PIL import Image
 from tagger.base import ITagger, MaxTagsMap, TagCategory, TagPrediction, TagResult, ThresholdMap
 from tagger.labels_util import load_selected_tags
 
+try:
+    import torch
+
+    torch_lib = Path(torch.__file__).parent / "lib"
+    if torch_lib.exists():
+        os.add_dll_directory(str(torch_lib))  # Windows 3.8+
+except Exception:
+    pass
+
 try:  # pragma: no cover - import is environment dependent
     import onnxruntime as ort
 except ImportError as exc:  # pragma: no cover - graceful degradation

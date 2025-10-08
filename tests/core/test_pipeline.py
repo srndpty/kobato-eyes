@@ -6,7 +6,6 @@ import time
 from pathlib import Path
 from typing import Iterable, Sequence
 
-import numpy as np
 import pytest
 from PIL import Image
 
@@ -15,11 +14,8 @@ from PyQt6.QtCore import QCoreApplication
 
 from core.jobs import JobManager
 from core.pipeline import PipelineSettings, ProcessingPipeline
-from core.settings import EmbedModel
 from db.connection import get_conn
 from db.schema import apply_schema
-from dup.indexer import EmbedderProtocol
-from index.hnsw import HNSWIndex
 from tagger.base import ITagger, TagCategory, TagPrediction, TagResult
 
 pytestmark = [pytest.mark.gui, pytest.mark.integration]
@@ -45,26 +41,6 @@ class DummyTagger(ITagger):
         return [TagResult(tags=predictions) for _ in images]
 
 
-class DummyEmbedder(EmbedderProtocol):  # type: ignore[misc]
-    @property
-    def embedding_dim(self) -> int:
-        return 4
-
-    def embed_images(self, images: Sequence[Image.Image]) -> np.ndarray:
-        vectors = []
-        for image in images:
-            arr = np.asarray(image.resize((2, 2))).astype(np.float32).flatten()
-            if arr.size < self.embedding_dim:
-                arr = np.pad(arr, (0, self.embedding_dim - arr.size))
-            else:
-                arr = arr[: self.embedding_dim]
-            norm = np.linalg.norm(arr)
-            if norm:
-                arr /= norm
-            vectors.append(arr.astype(np.float32))
-        return np.vstack(vectors)
-
-
 def _create_test_image(path: Path) -> None:
     Image.new("RGB", (16, 16), color=(200, 20, 20)).save(path, format="PNG")
 
@@ -88,18 +64,13 @@ def test_pipeline_processes_paths(tmp_path: Path, qapp: QCoreApplication) -> Non
     _create_test_image(image_path)
 
     tagger = DummyTagger()
-    embedder = DummyEmbedder()
-    hnsw = HNSWIndex(space="cosine")
-    hnsw.build(dim=4, max_elements=10)
 
     manager = JobManager(max_workers=1)
     pipeline = ProcessingPipeline(
         db_path=db_path,
         tagger=tagger,
-        embedder=embedder,
-        hnsw_index=hnsw,
         job_manager=manager,
-        settings=PipelineSettings(embed_model=EmbedModel(name="dummy")),
+        settings=PipelineSettings(),
     )
 
     pipeline.enqueue_path(image_path)
@@ -107,11 +78,8 @@ def test_pipeline_processes_paths(tmp_path: Path, qapp: QCoreApplication) -> Non
 
     conn = get_conn(db_path)
     tags = conn.execute("SELECT name FROM tags").fetchall()
-    embeddings = conn.execute("SELECT COUNT(*) FROM embeddings").fetchone()[0]
     conn.close()
 
     assert any(row["name"] == "color:red" for row in tags)
-    assert embeddings == 1
-    assert hnsw.current_count == 1
 
     pipeline.shutdown()

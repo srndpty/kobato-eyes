@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Iterable, TYPE_CHECKING
+from typing import TYPE_CHECKING, Iterable
 
 from PyQt6.QtCore import pyqtSignal
 from PyQt6.QtWidgets import (
@@ -13,22 +13,20 @@ from PyQt6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
     QFileDialog,
-    QHBoxLayout,
-    QDoubleSpinBox,
     QFormLayout,
-    QLineEdit,
+    QHBoxLayout,
     QLabel,
+    QLineEdit,
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
-    QSpinBox,
     QToolTip,
     QVBoxLayout,
     QWidget,
 )
 
 from core.config import load_settings, save_settings
-from core.settings import EmbedModel, PipelineSettings, TaggerSettings
+from core.settings import PipelineSettings, TaggerSettings
 from db.admin import reset_database
 from utils.paths import get_db_path
 
@@ -86,15 +84,8 @@ class ResetDatabaseDialog(QDialog):
             )
         )
 
-        self._backup_check = QCheckBox(
-            "Backup .db / -wal / -shm before deleting (recommended)", self
-        )
+        self._backup_check = QCheckBox("Backup .db / -wal / -shm before deleting (recommended)", self)
         self._backup_check.setChecked(True)
-
-        self._purge_check = QCheckBox(
-            "Delete HNSW index file (hnsw_cosine.bin) as well", self
-        )
-        self._purge_check.setChecked(True)
 
         self._rescan_check = QCheckBox("Start indexing immediately after reset", self)
         self._rescan_check.setChecked(True)
@@ -133,10 +124,6 @@ class ResetDatabaseDialog(QDialog):
         return self._backup_check.isChecked()
 
     @property
-    def purge_hnsw_enabled(self) -> bool:
-        return self._purge_check.isChecked()
-
-    @property
     def start_index_enabled(self) -> bool:
         return self._rescan_check.isChecked()
 
@@ -153,33 +140,10 @@ class SettingsTab(QWidget):
         self._excluded_edit = QPlainTextEdit(self)
         self._excluded_edit.setPlaceholderText("Paths to ignore")
 
-        self._hamming_spin = QSpinBox(self)
-        self._hamming_spin.setRange(0, 64)
-        self._hamming_spin.setValue(8)
-
-        self._cosine_spin = QDoubleSpinBox(self)
-        self._cosine_spin.setRange(0.0, 1.0)
-        self._cosine_spin.setSingleStep(0.01)
-        self._cosine_spin.setValue(0.2)
-
-        self._ssim_spin = QDoubleSpinBox(self)
-        self._ssim_spin.setRange(0.0, 1.0)
-        self._ssim_spin.setSingleStep(0.01)
-        self._ssim_spin.setValue(0.9)
-
-        self._model_combo = QComboBox(self)
-        self._model_combo.addItems(["ViT-L-14", "ViT-H-14", "RN50"])
-
         self._device_combo = QComboBox(self)
         self._device_combo.addItem("Auto", "auto")
         self._device_combo.addItem("CUDA", "cuda")
         self._device_combo.addItem("CPU", "cpu")
-
-        self._pretrained_edit = QLineEdit(self)
-        self._pretrained_edit.setPlaceholderText("e.g. openai")
-
-        self._auto_index_check = QCheckBox("Auto index changes", self)
-        self._auto_index_check.setChecked(True)
 
         self._tagger_combo = QComboBox(self)
         self._tagger_combo.addItems(["dummy", "wd14-onnx"])
@@ -213,16 +177,10 @@ class SettingsTab(QWidget):
         form = QFormLayout()
         form.addRow(QLabel("Roots"), self._roots_edit)
         form.addRow(QLabel("Excluded"), self._excluded_edit)
-        form.addRow("Hamming threshold", self._hamming_spin)
-        form.addRow("Cosine threshold", self._cosine_spin)
-        form.addRow("SSIM threshold", self._ssim_spin)
-        form.addRow("Model", self._model_combo)
         form.addRow("Device", self._device_combo)
-        form.addRow("Pretrained tag", self._pretrained_edit)
         form.addRow("Tagger", self._tagger_combo)
         form.addRow("Model path", tagger_model_row)
         form.addRow("", tagger_env_row)
-        form.addRow(self._auto_index_check)
 
         layout = QVBoxLayout(self)
         layout.addLayout(form)
@@ -242,19 +200,7 @@ class SettingsTab(QWidget):
         self._current_settings = settings
         self._roots_edit.setPlainText("\n".join(str(path) for path in settings.roots))
         self._excluded_edit.setPlainText("\n".join(str(path) for path in settings.excluded))
-        self._hamming_spin.setValue(settings.hamming_threshold)
-        self._cosine_spin.setValue(settings.cosine_threshold)
-        self._ssim_spin.setValue(settings.ssim_threshold)
-        self._auto_index_check.setChecked(bool(settings.auto_index))
-        index = self._model_combo.findText(settings.model_name)
-        if index >= 0:
-            self._model_combo.setCurrentIndex(index)
-        self._pretrained_edit.setText(settings.embed_model.pretrained)
-        device_index = self._device_combo.findData(settings.embed_model.device)
-        if device_index >= 0:
-            self._device_combo.setCurrentIndex(device_index)
-        else:
-            self._device_combo.setCurrentIndex(0)
+
         tagger_index = self._tagger_combo.findText(settings.tagger.name)
         if tagger_index >= 0:
             self._tagger_combo.setCurrentIndex(tagger_index)
@@ -279,15 +225,6 @@ class SettingsTab(QWidget):
         settings = PipelineSettings(
             roots=[Path(line) for line in self._lines(self._roots_edit) if line],
             excluded=[Path(line) for line in self._lines(self._excluded_edit) if line],
-            hamming_threshold=int(self._hamming_spin.value()),
-            cosine_threshold=float(self._cosine_spin.value()),
-            ssim_threshold=float(self._ssim_spin.value()),
-            embed_model=EmbedModel(
-                name=self._model_combo.currentText(),
-                pretrained=self._pretrained_edit.text().strip(),
-                device=str(self._device_combo.currentData()),
-            ),
-            auto_index=self._auto_index_check.isChecked(),
             tagger=tagger_settings,
         )
         save_settings(settings)
@@ -329,7 +266,6 @@ class SettingsTab(QWidget):
             return
 
         backup = dialog.backup_enabled
-        purge = dialog.purge_hnsw_enabled
         start_index = dialog.start_index_enabled
 
         if self._pipeline is not None:
@@ -342,7 +278,7 @@ class SettingsTab(QWidget):
             self._tags_tab.prepare_for_database_reset()
 
         try:
-            result = reset_database(db_path, backup=backup, purge_hnsw=purge)
+            result = reset_database(db_path, backup=backup)
         except Exception as exc:
             logger.exception("Database reset failed for %s", db_path)
             if self._tags_tab is not None:
@@ -350,10 +286,7 @@ class SettingsTab(QWidget):
             QMessageBox.critical(
                 self,
                 "Reset failed",
-                (
-                    "Database reset failed. Ensure no other process is accessing the database.\n"
-                    f"Details: {exc}"
-                ),
+                ("Database reset failed. Ensure no other process is accessing the database.\n" f"Details: {exc}"),
             )
             return
 
@@ -361,18 +294,12 @@ class SettingsTab(QWidget):
             self._tags_tab.handle_database_reset()
 
         backup_paths = [Path(path) for path in result.get("backup_paths", [])]
-        hnsw_deleted = bool(result.get("hnsw_deleted", False))
         message_lines = ["Database reset completed successfully."]
         if backup_paths:
             message_lines.append("Backups saved to:")
             message_lines.extend(f"  • {path}" for path in backup_paths)
         else:
             message_lines.append("No backup files were created.")
-        if purge:
-            if hnsw_deleted:
-                message_lines.append("HNSW index file was deleted.")
-            else:
-                message_lines.append("HNSW index file was not found.")
 
         QMessageBox.information(self, "Reset database", "\n".join(message_lines))
 

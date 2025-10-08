@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import os
-from dataclasses import InitVar, dataclass, field
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
@@ -54,66 +54,25 @@ class TaggerSettings:
     thresholds: dict[str, float] = field(default_factory=lambda: DEFAULT_TAG_THRESHOLDS.copy())
 
 
-_DEFAULT_PRETRAINED_TAGS = {
-    "ViT-L-14": "openai",
-    "ViT-H-14": "laion2b_s32b_b82k",
-    "RN50": "openai",
-}
-
-
-_VALID_EMBED_DEVICES = {"auto", "cuda", "cpu"}
-
-
-def _default_pretrained(model_name: str) -> str:
-    return _DEFAULT_PRETRAINED_TAGS.get(model_name, "openai")
-
-
-@dataclass
-class EmbedModel:
-    name: str = "ViT-L-14"
-    pretrained: str = "openai"
-    device: str = "auto"
-    dim: int = 768
-
-    def __post_init__(self) -> None:
-        if not isinstance(self.pretrained, str):
-            self.pretrained = "" if self.pretrained is None else str(self.pretrained)
-        self.pretrained = self.pretrained.strip()
-        if not self.pretrained:
-            self.pretrained = _default_pretrained(self.name)
-        device_value = (self.device or "auto") if isinstance(self.device, str) else str(self.device)
-        device_normalised = device_value.strip().lower()
-        if device_normalised not in _VALID_EMBED_DEVICES:
-            device_normalised = "auto"
-        self.device = device_normalised
-
-
 @dataclass
 class PipelineSettings:
     roots: list[str] = field(default_factory=list)
     excluded: list[str] = field(default_factory=_default_excluded)
     allow_exts: set[str] = field(default_factory=_default_allow_exts)
-    auto_index: bool = True
     batch_size: int = 8
-    model_name_init: InitVar[str | None] = None
     hamming_threshold: int = 10
-    cosine_threshold: float = 0.90
     ssim_threshold: float = 0.92
     tagger: TaggerSettings = field(default_factory=TaggerSettings)
-    embed_model: EmbedModel = field(default_factory=EmbedModel)
     index_dir: str | None = None
 
-    def __post_init__(self, model_name_init: str | None = None) -> None:
+    def __post_init__(self) -> None:
         self.roots = [self._normalise_path(path) for path in self.roots if path]
         self.excluded = [self._normalise_path(path) for path in (self.excluded or [])]
         if not self.excluded:
             self.excluded = _default_excluded()
         self.allow_exts = {self._normalise_ext(ext) for ext in (self.allow_exts or _default_allow_exts()) if ext}
-        self.auto_index = bool(self.auto_index)
         if self.batch_size <= 0:
             self.batch_size = 1
-        if model_name_init:
-            self.embed_model.name = str(model_name_init)
         if self.index_dir is not None and self.index_dir != "":
             self.index_dir = self._normalise_path(self.index_dir)
         else:
@@ -131,10 +90,6 @@ class PipelineSettings:
         if not ext.startswith("."):
             ext = f".{ext}"
         return ext
-
-    @property
-    def model_name(self) -> str:
-        return self.embed_model.name
 
     def resolved_index_dir(self) -> str:
         return self.index_dir or default_index_dir()
@@ -154,9 +109,7 @@ class PipelineSettings:
         allow_exts = _normalise_exts(data.get("allow_exts"), defaults.allow_exts)
 
         batch_size = _coerce_int(data.get("batch_size"), defaults.batch_size)
-        auto_index = _coerce_bool(data.get("auto_index"), defaults.auto_index)
         hamming_threshold = _coerce_int(data.get("hamming_threshold"), defaults.hamming_threshold)
-        cosine_threshold = _coerce_float(data.get("cosine_threshold"), defaults.cosine_threshold)
         ssim_threshold = _coerce_float(data.get("ssim_threshold"), defaults.ssim_threshold)
 
         tagger_conf = data.get("tagger", {}) or {}
@@ -175,18 +128,6 @@ class PipelineSettings:
             thresholds=tagger_thresholds,
         )
 
-        embed_conf = data.get("embed_model", {}) or {}
-        embed_name = embed_conf.get("name")
-        if embed_name is None and "model_name" in data:
-            embed_name = data["model_name"]
-        embed_pretrained = _coerce_str(embed_conf.get("pretrained"))
-        embed_model = EmbedModel(
-            name=str(embed_name or defaults.embed_model.name),
-            pretrained=embed_pretrained,
-            device=str(embed_conf.get("device", defaults.embed_model.device)),
-            dim=_coerce_int(embed_conf.get("dim", embed_conf.get("dims")), defaults.embed_model.dim),
-        )
-
         index_dir_value = data.get("index_dir")
         if index_dir_value in (None, ""):
             index_dir = None
@@ -197,13 +138,10 @@ class PipelineSettings:
             roots=roots,
             excluded=excluded,
             allow_exts=allow_exts,
-            auto_index=auto_index,
             batch_size=batch_size,
             hamming_threshold=hamming_threshold,
-            cosine_threshold=cosine_threshold,
             ssim_threshold=ssim_threshold,
             tagger=tagger,
-            embed_model=embed_model,
             index_dir=index_dir,
         )
 
@@ -222,22 +160,14 @@ class PipelineSettings:
             "roots": [str(path) for path in self.roots],
             "excluded": [str(path) for path in self.excluded],
             "allow_exts": sorted(self.allow_exts),
-            "auto_index": bool(self.auto_index),
             "batch_size": self.batch_size,
             "hamming_threshold": self.hamming_threshold,
-            "cosine_threshold": self.cosine_threshold,
             "ssim_threshold": self.ssim_threshold,
             "tagger": {
                 "name": self.tagger.name,
                 "model_path": self.tagger.model_path,
                 "tags_csv": self.tagger.tags_csv,
                 "thresholds": self.tagger.thresholds,
-            },
-            "embed_model": {
-                "name": self.embed_model.name,
-                "pretrained": self.embed_model.pretrained,
-                "device": self.embed_model.device,
-                "dim": self.embed_model.dim,
             },
             "index_dir": self.index_dir or default_index_dir(),
         }
@@ -312,7 +242,6 @@ def _coerce_optional_path(value: Any) -> str | None:
 __all__ = [
     "PipelineSettings",
     "TaggerSettings",
-    "EmbedModel",
     "default_index_dir",
     "normalise_roots",
     "normalise_excluded",
