@@ -41,12 +41,12 @@ from PyQt6.QtWidgets import (
     QHBoxLayout,
     QHeaderView,
     QLabel,
-    QLineEdit,
     QMenu,
     QMessageBox,
     QProgressBar,
     QProgressDialog,
     QPushButton,
+    QSizePolicy,
     QSpinBox,
     QTreeWidget,
     QTreeWidgetItem,
@@ -207,6 +207,8 @@ class ThumbTile(QFrame):
         self.check.raise_()
         self.check.move(6, 6)
 
+        self.check.stateChanged.connect(lambda _s: self.toggled.emit(self.is_checked()))
+
     # サムネ適用
     def set_pixmap(self, pix: QPixmap | None, placeholder: QIcon) -> None:
         target = self.icon_size
@@ -240,6 +242,8 @@ class ThumbPanel(QWidget):
     QGridLayout でも良いが、パフォーマンスのため手動レイアウトにする。
     """
 
+    sizeHintChanged = pyqtSignal()
+
     def __init__(
         self,
         entries: list[DuplicateClusterEntry],
@@ -262,6 +266,8 @@ class ThumbPanel(QWidget):
             t.show()
         self._cols = 1
         self._tile_size = QSize(icon_size.width() + 8, icon_size.height() + 8 + 2 * self.fontMetrics().height() + 12)
+        self._content_h = self._tile_size.height() + 8  # ← パネル全体の高さを保持
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)  # ← 重要（縦は sizeHint に従う）
         self.setMinimumHeight(self._tile_size.height() + 8)
 
     def _compute_cols(self) -> int:
@@ -287,12 +293,16 @@ class ThumbPanel(QWidget):
             t.setGeometry(x, y, self._tile_size.width(), self._tile_size.height())
 
         rows = (len(self.tiles) + self._cols - 1) // self._cols
+        self._content_h = rows * cell_h
         self.setMinimumHeight(rows * cell_h)
         self.updateGeometry()
+        self.sizeHintChanged.emit()
 
     def sizeHint(self):
-        self._relayout()
-        return super().sizeHint()
+        # 幅はツリー側では使われないのでダミーでOK。高さだけ正確に返す
+        return QSize(self._tile_size.width(), self._content_h)
+        # self._relayout()
+        # return super().sizeHint()
 
     def visible_tiles_in(self, viewport: QWidget, tree_viewport_rect: QRect) -> list[ThumbTile]:
         """ツリーの viewport 座標系で見えているタイルを返す。"""
@@ -429,9 +439,6 @@ class DupTab(QWidget):
         self._refine_dialog = None
         self._refine_task = None
 
-        self._path_input = QLineEdit(self)
-        self._path_input.setPlaceholderText("Path LIKE pattern (e.g. C:% or %/images/% )")
-
         self._hamming_spin = QSpinBox(self)
         self._hamming_spin.setRange(0, 10)
         self._hamming_spin.setValue(0)
@@ -481,8 +488,12 @@ class DupTab(QWidget):
         """)
         self._tree.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
         self._tree.setFocusPolicy(Qt.FocusPolicy.NoFocus)  # フォーカス枠も出さない
-        self._tree.setColumnCount(6)
-        self._tree.setHeaderLabels(["File", "Size", "Resolution", "Hamming", "Cosine", "Path"])
+        self._tree.setColumnCount(1)
+        self._tree.setHeaderHidden(True)
+
+        hdr = self._tree.header()
+        hdr.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)  # 追加
+        # self._tree.setHeaderLabels(["File", "Size", "Resolution", "Hamming", "Cosine", "Path"])
         self._tree.setAlternatingRowColors(True)
         # ★ アイコンサイズ（Tagsタブに寄せるなら 96x96 や 128x128）
         self._icon_size = QSize(256, 256)
@@ -499,19 +510,10 @@ class DupTab(QWidget):
         # サムネ用スレッドプールを控えめに（I/O スパイク防止）
         self._pool.setMaxThreadCount(min(4, os.cpu_count() or 2))
 
-        header = self._tree.header()
-        header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)  # ← 全列を手動幅に
-        # だいたいの初期幅（必要なら好みで調整）
-        header.resizeSection(0, self._icon_size.width() + 220)  # File(+サムネ)
-        header.resizeSection(1, 80)  # Size
-        header.resizeSection(2, 90)  # Resolution
-        header.resizeSection(3, 80)  # Hamming
-        header.resizeSection(4, 80)  # Cosine
-        header.resizeSection(5, 420)  # Path
-        header.setStretchLastSection(True)
-
         self._tree.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
         self._tree.setHorizontalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
+        sb = self._tree.verticalScrollBar()
+        sb.setSingleStep(24)  # 1ホイール刻みのpx。好みで 12〜48 に調整
         self._tree.setAnimated(False)
         self._tree.setSortingEnabled(False)
         self._tree.setExpandsOnDoubleClick(False)
@@ -522,15 +524,31 @@ class DupTab(QWidget):
         self._tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self._tree.customContextMenuRequested.connect(self._on_context_menu_requested)
 
+        self._grid_spin = QSpinBox(self)
+        self._grid_spin.setRange(2, 16)
+        self._grid_spin.setValue(8)
+        self._tile_spin = QSpinBox(self)
+        self._tile_spin.setRange(4, 16)
+        self._tile_spin.setValue(8)
+        self._maxbits_spin = QSpinBox(self)
+        self._maxbits_spin.setRange(0, 128)
+        self._maxbits_spin.setValue(8)
+
         controls_layout = QHBoxLayout()
-        controls_layout.addWidget(QLabel("Path LIKE", self))
-        controls_layout.addWidget(self._path_input, 1)
         controls_layout.addWidget(QLabel("Hamming ≤", self))
         controls_layout.addWidget(self._hamming_spin)
         controls_layout.addWidget(QLabel("Size ratio ≥", self))
         controls_layout.addWidget(self._ratio_spin)
         controls_layout.addWidget(QLabel("Cosine ≤", self))
         controls_layout.addWidget(self._cosine_spin)
+        controls_layout.addSpacing(16)
+        controls_layout.addWidget(QLabel("grid", self))
+        controls_layout.addWidget(self._grid_spin)
+        controls_layout.addWidget(QLabel("tile", self))
+        controls_layout.addWidget(self._tile_spin)
+        controls_layout.addWidget(QLabel("max_bits", self))
+        controls_layout.addWidget(self._maxbits_spin)
+        controls_layout.addStretch(1)
 
         button_layout = QHBoxLayout()
         button_layout.addWidget(self._scan_button)
@@ -585,9 +603,18 @@ class DupTab(QWidget):
         self._hb.timeout.connect(lambda: LOG.debug(f"ui alive {self._alive:=self._alive+1}"))
         self._hb.start()
 
+    def _update_status_summary(self) -> None:
+        groups = len(self._clusters)
+        files = sum(len(c.files) for c in self._clusters)
+        self._status_label.setText(f"{groups} group(s), {files} file(s) detected.")
+
     def _start_refine_pipeline(self, clusters):
         # パラメータ（好みに応じて UI から取ってもOK）
-        tile_params = dict(grid=8, tile=8, max_bits=8)
+        tile_params = dict(
+            grid=self._grid_spin.value(),
+            tile=self._tile_spin.value(),
+            max_bits=self._maxbits_spin.value(),
+        )
         pixel_params = dict(mae_thr=0.004)
 
         task = RefinePipelineRunnable(clusters, tile_params, pixel_params)
@@ -623,6 +650,7 @@ class DupTab(QWidget):
             files = sum(len(c.files) for c in self._clusters)
             self._status_label.setText(f"Refine complete: {groups} group(s), {files} file(s).")
             self._update_action_states()
+            self._update_status_summary()
 
         def on_canceled():
             dlg.close()
@@ -816,7 +844,7 @@ class DupTab(QWidget):
             if key not in self._thumb_pending:
                 self._thumb_pending.append(key)
 
-        self._status_label.setText(f"thumb requests (visible): ~{len(self._thumb_pending)}")
+        # self._status_label.setText(f"thumb requests (visible): ~{len(self._thumb_pending)}")
         self._maybe_start_more_thumbs()
 
     def _iter_tiles(self) -> Iterator[ThumbTile]:
@@ -1035,14 +1063,10 @@ class DupTab(QWidget):
         self._update_action_states()
 
     def _build_request(self) -> DuplicateScanRequest:
-        path_text = self._path_input.text().strip()
-        like = None
-        if path_text:
-            like = path_text if any(ch in path_text for ch in "%_") else f"{path_text}%"
         ratio = self._ratio_spin.value()
         cosine = self._cosine_spin.value()
         return DuplicateScanRequest(
-            path_like=like,
+            path_like=None,
             hamming_threshold=self._hamming_spin.value(),
             size_ratio=ratio if ratio > 0 else None,
             cosine_threshold=cosine if cosine > 0 else None,
@@ -1122,7 +1146,7 @@ class DupTab(QWidget):
         self._tree.setUpdatesEnabled(False)
         for i in range(start, end):
             cl = self._clusters[i]
-            it = QTreeWidgetItem(["", "", "", "", "", ""])
+            it = QTreeWidgetItem([""])
             it.setData(0, Qt.ItemDataRole.UserRole, cl)
             # テキストだけ先に入れる（bar は遅延で）
             it.setText(0, f"Group #{i+1} ({len(cl.files)} items)")
@@ -1174,10 +1198,6 @@ class DupTab(QWidget):
         self._thumb_timer.start(0)
 
     def _ensure_panel_built_if_visible(self, item: QTreeWidgetItem, force: bool = False) -> None:
-        i = self._tree.indexOfTopLevelItem(item)
-        cl: DuplicateCluster = item.data(0, Qt.ItemDataRole.UserRole)
-        LOG.info("ui: ensure_panel visible=%s group=%d size=%d", force, i, len(cl.files))
-
         if self._panel_of_group(item):
             return
         if item.childCount() == 0:
@@ -1223,7 +1243,7 @@ class DupTab(QWidget):
             if key not in self._thumb_pending:
                 self._thumb_pending.append(key)
 
-        self._status_label.setText(f"thumb requests (visible): ~{len(self._thumb_pending)}")
+        # self._status_label.setText(f"thumb requests (visible): ~{len(self._thumb_pending)}")
         self._maybe_start_more_thumbs()
 
     # 折りたたみ時は子を捨てて軽量化（必要時にまた作る）
@@ -1257,12 +1277,21 @@ class DupTab(QWidget):
         self._icon_size = icon256  # グリッドに合わせて以後も 256 を使う
         panel = ThumbPanel(entries, cluster.keeper_id, self._icon_size, parent=self._tree)
         self._tree.setItemWidget(panel_item, 0, panel)
+
         # バインディング
+        # 初回＆以降のリサイズで Tree の行高を追従させる
+        def _sync_size_hint():
+            panel_item.setSizeHint(0, panel.sizeHint())
+            self._tree.doItemsLayout()  # F12で飛べないが、executeDelayedItemsLayoutはダメで、doItemsLayoutじゃないといけないらしい
+            self._tree.viewport().update()
+
+        panel.sizeHintChanged.connect(_sync_size_hint)
+        QTimer.singleShot(0, _sync_size_hint)  # 生成直後にも一度
+
         for tile in panel.tiles:
             self._bind_tile_to_thumb(tile, tile.path)
-        # 行高（sizeHint）はパネルの size に従う
-        panel_item.setSizeHint(0, panel.sizeHint())
-        LOG.info("ui: build_panel done tiles=%d", len(panel.tiles))
+            tile.toggled.connect(lambda _=None, self=self: self._update_action_states())
+        self._update_action_states()
 
     def _on_mark_keep_largest(self) -> None:
         for top_idx in range(self._tree.topLevelItemCount()):
@@ -1325,6 +1354,7 @@ class DupTab(QWidget):
                     new_clusters.append(rebuilt)
             self._clusters = new_clusters
             self._populate_tree()
+            self._update_status_summary()
         summary = f"Moved {len(successes)} file(s) to trash."
         if failures:
             summary += f" Failed: {len(failures)}."
@@ -1473,7 +1503,11 @@ class DupTab(QWidget):
                 yield child, entry if isinstance(entry, DuplicateClusterEntry) else None
 
     def _count_checked(self) -> int:
-        return sum(1 for t in self._iter_tiles() if t.is_checked())
+        tiles = list(self._iter_tiles())
+        if tiles:  # 既に可視タイルがあるときは実際のチェック状態
+            return sum(1 for t in tiles if t.is_checked())
+        # まだ何も展開していない初期状態は、keeper 以外が Checked 相当
+        return sum(max(0, len(c.files) - 1) for c in self._clusters)
 
     @staticmethod
     def _format_size(value: int | None) -> str:
