@@ -1480,6 +1480,15 @@ def _resolve_tagger(
         model_path_obj = Path(settings.tagger.model_path)
         tagger_instance = WD14Tagger(model_path_obj, tags_csv=settings.tagger.tags_csv)
         model_path_value = str(model_path_obj)
+    elif lowered == "pixai":
+        from tagger.pixai_torch import PixAITagger
+
+        if not settings.tagger.model_path:
+            raise ValueError("PixAI: model_dir is required")
+        model_dir = Path(settings.tagger.model_path)
+        tagger_instance = PixAITagger(model_dir, default_thresholds=settings.tagger.thresholds)
+        model_path_value = str(model_dir)
+        tags_csv_value = None
     else:
         raise ValueError(f"Unknown tagger '{settings.tagger.name}'")
 

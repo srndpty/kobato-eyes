@@ -29,6 +29,11 @@ dev = [
     "pytest>=8.3.0",
     "hypothesis>=6.115.0"
 ]
+pixai = [
+    "torch>=2.3.0",
+    "torchvision>=0.18.0",
+    "timm>=1.0.3",
+]
 
 [tool.setuptools]
 package-dir = {"" = "src"}

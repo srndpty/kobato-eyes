@@ -146,11 +146,11 @@ class SettingsTab(QWidget):
         self._device_combo.addItem("CPU", "cpu")
 
         self._tagger_combo = QComboBox(self)
-        self._tagger_combo.addItems(["dummy", "wd14-onnx"])
+        self._tagger_combo.addItems(["dummy", "wd14-onnx", "pixai"])
         self._tagger_combo.currentTextChanged.connect(self._update_tagger_inputs)
 
         self._tagger_model_edit = QLineEdit(self)
-        self._tagger_model_edit.setPlaceholderText("Path to WD14 ONNX model")
+        self._tagger_model_edit.setPlaceholderText("Model path")
         self._tagger_model_button = QPushButton("Browse…", self)
         self._tagger_model_button.clicked.connect(self._on_browse_model)
         tagger_model_row = QWidget(self)
@@ -214,8 +214,9 @@ class SettingsTab(QWidget):
         previous_tagger = current.tagger if current else TaggerSettings()
         tagger_name = self._tagger_combo.currentText()
         is_wd14 = tagger_name.lower() == "wd14-onnx"
+        is_pixai = tagger_name.lower() == "pixai"
         model_path_text = self._tagger_model_edit.text().strip()
-        model_path = model_path_text if is_wd14 and model_path_text else None
+        model_path = model_path_text if (is_wd14 or is_pixai) and model_path_text else None
         tagger_settings = TaggerSettings(
             name=tagger_name,
             model_path=model_path,
@@ -240,10 +241,22 @@ class SettingsTab(QWidget):
         return (line.strip() for line in edit.toPlainText().splitlines())
 
     def _update_tagger_inputs(self, name: str) -> None:
-        is_wd14 = name.lower() == "wd14-onnx"
-        self._tagger_model_edit.setEnabled(is_wd14)
-        self._tagger_model_button.setEnabled(is_wd14)
+        lowered = name.lower()
+        is_wd14 = lowered == "wd14-onnx"
+        is_pixai = lowered == "pixai"
+        enable_path = is_wd14 or is_pixai
+        self._tagger_model_edit.setEnabled(enable_path)
+        self._tagger_model_button.setEnabled(enable_path)
         self._tagger_env_button.setEnabled(is_wd14)
+        if is_wd14:
+            self._tagger_model_edit.setPlaceholderText("Path to WD14 ONNX model")
+            self._tagger_model_button.setText("Browse…")
+        elif is_pixai:
+            self._tagger_model_edit.setPlaceholderText("Directory containing PixAI weights")
+            self._tagger_model_button.setText("Select…")
+        else:
+            self._tagger_model_edit.setPlaceholderText("Model path")
+            self._tagger_model_button.setText("Browse…")
 
     def set_pipeline(self, pipeline: ProcessingPipeline | None) -> None:
         self._pipeline = pipeline
@@ -309,6 +322,17 @@ class SettingsTab(QWidget):
     def _on_browse_model(self) -> None:
         text_value = self._tagger_model_edit.text().strip()
         start_dir = str(Path(text_value).expanduser().parent) if text_value else ""
+        lowered = self._tagger_combo.currentText().lower()
+        if lowered == "pixai":
+            directory = QFileDialog.getExistingDirectory(
+                self,
+                "Select PixAI model directory",
+                start_dir,
+            )
+            if directory:
+                self._tagger_model_edit.setText(directory)
+            return
+
         file_path, _ = QFileDialog.getOpenFileName(
             self,
             "Select WD14 ONNX model",
