@@ -15,6 +15,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Callable, Iterable, Iterator, List, Mapping, Optional, Sequence, Set, Tuple
 
+import cv2
 import numpy as np
 from PIL import Image
 
@@ -129,12 +130,53 @@ class PrefetchLoader:
         logger.info("PrefetchLoader: stop")
 
 
+# --- TurboJPEG はあれば使う（無ければ自動でオフ） ---
+_USE_TJ = os.getenv("KE_USE_TURBOJPEG", "1") != "0"
+_TJ = None
+if _USE_TJ:
+    try:
+        from turbojpeg import TJPF, TurboJPEG  # type: ignore
+
+        _TJ = TurboJPEG()
+    except Exception as e:
+        logger.info("TurboJPEG not available (%s); falling back to OpenCV/PIL", e)
+        _TJ = None
+
+_TARGET = 448  # tagger の入力サイズ
+
+
+def _choose_tj_scale(w: int, h: int) -> tuple[int, int]:
+    # TurboJPEG の縮小段階は (1/1, 1/2, 1/4, 1/8, 1/16)。
+    side = max(w, h)
+    # ざっくり target に近づける（余裕を持って大きめ→後で1回だけ resize）
+    if side >= _TARGET * 8:
+        return (1, 8)
+    if side >= _TARGET * 4:
+        return (1, 4)
+    if side >= _TARGET * 2:
+        return (1, 2)
+    return (1, 1)
+
+
+def _alpha_to_white_bgr(bg_or_bgra: np.ndarray) -> np.ndarray:
+    if bg_or_bgra.ndim == 2:  # gray
+        return cv2.cvtColor(bg_or_bgra, cv2.COLOR_GRAY2BGR)
+    if bg_or_bgra.shape[2] == 3:
+        return bg_or_bgra
+    if bg_or_bgra.shape[2] == 4:
+        bgr = bg_or_bgra[:, :, :3].astype(np.float32)
+        a = bg_or_bgra[:, :, 3:4].astype(np.float32) / 255.0
+        bgr = (bgr * a + 255.0 * (1.0 - a)).astype(np.uint8)
+        return bgr
+    return bg_or_bgra[:, :, :3]
+
+
 class PrefetchLoaderPrepared:
     """
-    画像を並列ロードして前処理（PIL→RGB、正方形化＋リサイズ）まで済ませ、
-    (paths, np_batch, sizes) を事前に用意して供給するローダ。
+    画像を並列ロードし、BGR で軽量デコード→縮小→tagger で最終整形して、
+    (paths, np_batch, sizes) を供給するローダ。
       - paths: List[str]（バッチ内のファイルパス。順序は元の順）
-      - np_batch: np.ndarray 形状 (B, H, W, 3), float32
+      - np_batch: np.ndarray 形状 (B, H, W, 3), float32  ※tagger.prepare_batch_from_bgr() の結果
       - sizes: List[Tuple[int,int]] 元画像の (width, height)
     """
 
@@ -142,7 +184,7 @@ class PrefetchLoaderPrepared:
         self,
         paths: List[str],
         *,
-        tagger,  # WD14Tagger インスタンス（prepare_batch_pil を呼ぶ）
+        tagger,  # WD14Tagger インスタンス（prepare_batch_from_bgr を呼ぶ）
         batch_size: int,
         prefetch_batches: int = 2,
         io_workers: int | None = None,
@@ -151,7 +193,13 @@ class PrefetchLoaderPrepared:
         self._B = int(batch_size)
         self._depth = max(1, int(prefetch_batches))
         cpu = os.cpu_count() or 4
-        self._io_workers: int = max(1, int(io_workers or min(8, cpu)))  # ← int のまま保持
+        # 既定はやや強め（PNG 多めのとき効く）: 明示指定があればそちらを優先、env でも上書き可
+        env_workers = os.getenv("KE_IO_WORKERS")
+        if env_workers is not None:
+            io_workers = int(env_workers)
+        if io_workers is None:
+            io_workers = min(max(4, cpu), 16)
+        self._io_workers: int = max(1, int(io_workers))
         self._tagger = tagger
 
         # (paths, np_batch, sizes) or None(sentinal)
@@ -163,17 +211,71 @@ class PrefetchLoaderPrepared:
             "PrefetchLoaderPrepared: start (B=%d, depth=%d, io_workers=%d)", self._B, self._depth, self._io_workers
         )
 
-    # 個別ロード（PIL）
-    def _load_one(self, p: str) -> tuple[str, Image.Image | None, tuple[int, int] | None]:
+    # --- 1 枚ロード（TurboJPEG/OpenCV 優先、失敗したら PIL） ---
+    def _load_one(self, p: str) -> tuple[str, np.ndarray | None, tuple[int, int] | None]:
+        ext = Path(p).suffix.lower()
         try:
-            with Image.open(p) as im:
-                im.load()  # デコードを完了（ハンドル即解放）
-                w, h = im.size
-                rgb = im.convert("RGB")  # 透明合成は tagger 側でOKだが、簡便にRGBへ
-                return (p, rgb, (w, h))
+            # --- JPEG: TurboJPEG 縮小デコード ---
+            if ext in (".jpg", ".jpeg") and _TJ is not None:
+                with open(p, "rb") as f:
+                    buf = f.read()
+                # ヘッダから元サイズ取得
+                try:
+                    w, h, _, _ = _TJ.decode_header(buf)
+                except Exception:
+                    # ヘッダ取れない超古い JPEG 等は一旦フルで読んで形状から決める
+                    tmp = _TJ.decode(buf, pixel_format=TJPF.BGR)
+                    h, w = tmp.shape[:2]
+                scale = _choose_tj_scale(w, h)
+                bgr = _TJ.decode(buf, pixel_format=TJPF.BGR, scaling_factor=scale)
+                # ここで軽く TARGET 付近へ
+                hh, ww = bgr.shape[:2]
+                side = max(hh, ww)
+                if side != _TARGET:
+                    ratio = _TARGET / side
+                    interp = cv2.INTER_AREA if side > _TARGET else cv2.INTER_CUBIC
+                    bgr = cv2.resize(bgr, (max(1, int(ww * ratio)), max(1, int(hh * ratio))), interpolation=interp)
+                return (p, bgr, (w, h))
+
+            # --- PNG / WebP / その他: OpenCV ---
+            data = np.fromfile(p, dtype=np.uint8)  # Windows で速い
+            im = cv2.imdecode(data, cv2.IMREAD_UNCHANGED)
+            if im is None:
+                raise RuntimeError("cv2.imdecode failed")
+            bgr = _alpha_to_white_bgr(im)
+            hh, ww = bgr.shape[:2]
+            side = max(hh, ww)
+            if side != _TARGET:
+                ratio = _TARGET / side
+                interp = cv2.INTER_AREA if side > _TARGET else cv2.INTER_CUBIC
+                bgr = cv2.resize(bgr, (max(1, int(ww * ratio)), max(1, int(hh * ratio))), interpolation=interp)
+            # 元サイズは im の生サイズ（アルファ有無に関係なし）
+            H0, W0 = (im.shape[0], im.shape[1]) if im.ndim >= 2 else (hh, ww)
+            return (p, bgr, (int(W0), int(H0)))
+
         except Exception as e:
-            logger.warning("PrefetchLoaderPrepared: failed to load %s: %s", p, e)
-            return (p, None, None)
+            logger.warning("PrefetchLoaderPrepared: failed to load %s: %s (fallback PIL)", p, e)
+            # --- フォールバック: PIL ---
+            try:
+                with Image.open(p) as im:
+                    w, h = im.size
+                    im = im.convert("RGBA")
+                    bg = Image.new("RGBA", im.size, "WHITE")
+                    bg.paste(im, mask=im.split()[-1])
+                    rgb = bg.convert("RGB")
+                    # ここでは軽く縮小のみ（最終整形は tagger に任せる）
+                    rgb.thumbnail((_TARGET, _TARGET))
+                    bgr = np.asarray(rgb)[:, :, ::-1]  # RGB->BGR
+                    return (p, bgr, (w, h))
+            except Exception as e2:
+                logger.warning("PrefetchLoaderPrepared: PIL fallback also failed %s: %s", p, e2)
+                return (p, None, None)
+
+    def qsize(self) -> int:
+        try:
+            return self._q.qsize()
+        except Exception:
+            return -1
 
     def _producer(self) -> None:
         try:
@@ -184,43 +286,39 @@ class PrefetchLoaderPrepared:
                         break
 
                     batch_paths = self._paths[i : i + self._B]
-                    # 並列ロード（順序は futures から辞書に集めて後で整える）
                     futs = [ex.submit(self._load_one, p) for p in batch_paths]
-                    # 収集（まずは path -> (PIL or None, size or None)）
-                    tmp: dict[str, tuple[Image.Image | None, tuple[int, int] | None]] = {}
-                    for fut in as_completed(futs):
-                        p, pil, sz = fut.result()
-                        tmp[p] = (pil, sz)
 
-                    # 入力量産（順序を batch_paths で揃える）
-                    pil_list: list[Image.Image] = []
+                    tmp: dict[str, tuple[np.ndarray | None, tuple[int, int] | None]] = {}
+                    for fut in as_completed(futs):
+                        p, arr, sz = fut.result()
+                        tmp[p] = (arr, sz)
+
+                    # 順序維持で集約
+                    bgr_list: list[np.ndarray] = []
                     sizes: list[tuple[int, int]] = []
                     kept_paths: list[str] = []
                     for p in batch_paths:
-                        pil, sz = tmp.get(p, (None, None))
-                        if pil is None or sz is None:
+                        arr, sz = tmp.get(p, (None, None))
+                        if arr is None or sz is None:
                             continue
-                        pil_list.append(pil)
+                        bgr_list.append(arr)
                         sizes.append(sz)
                         kept_paths.append(p)
 
-                    if not pil_list:
-                        # 空でも終端はまだ先なので継続
+                    if not bgr_list:
                         continue
 
-                    # 前処理（PIL -> np.ndarray (B,H,W,3) float32）
-                    try:
-                        np_batch = self._tagger.prepare_batch_pil(pil_list)
-                    finally:
-                        # PIL バッファ解放（np_batchは tagger 側で確保済み）
-                        for im in pil_list:
-                            try:
-                                im.close()
-                            except Exception:
-                                pass
+                    # ここで最終整形（正方形 + ぴったり TARGET + float32）を tagger に任せる
+                    np_batch = self._tagger.prepare_batch_from_bgr(bgr_list)
 
-                    # キューへ
+                    # キューへ（必要なら put 時間をログ）
+                    t0 = time.perf_counter()
+                    q_before = self._q.qsize()
                     self._q.put((kept_paths, np_batch, sizes))
+                    wait_put_ms = (time.perf_counter() - t0) * 1000.0
+                    if wait_put_ms > 1.0 or q_before == self._depth - 1:
+                        logger.info("LOAD put wait=%.1fms q=%d/%d", wait_put_ms, q_before, self._depth)
+
                     if self._stop.is_set():
                         break
         finally:
@@ -1003,9 +1101,10 @@ class TaggingStage:
             # PrefetchPrepared + prepared 経路
             rec_by_path: dict[str, _FileRecord] = {str(r.path): r for r in tag_records}
             tag_paths: list[str] = list(rec_by_path.keys())
+            tag_paths.sort(key=lambda p: (Path(p).parent, os.path.getsize(p)))
             current_batch = max(1, int(getattr(settings, "batch_size", 32) or 32))
-            prefetch_depth = int(os.environ.get("KE_PREFETCH_DEPTH", "12"))
-            io_workers = int(os.environ.get("KE_IO_WORKERS", "16") or "16") or None
+            prefetch_depth = int(os.environ.get("KE_PREFETCH_DEPTH", "128") or "128") or 128
+            io_workers = int(os.environ.get("KE_IO_WORKERS", "12") or "12") or None
 
             loader = PrefetchLoaderPrepared(
                 tag_paths,
@@ -1028,12 +1127,36 @@ class TaggingStage:
                     return _infer_with_retry_np(rgb_list[:mid]) + _infer_with_retry_np(rgb_list[mid:])
 
             try:
-                for batch in loader:
+                loader_iter = iter(loader)
+                while True:
+                    t_wait0 = time.perf_counter()
+                    try:
+                        batch = next(loader_iter)  # ← ここでローダが供給できるまでブロック
+                    except StopIteration:
+                        break
+
+                    wait_batch_ms = (time.perf_counter() - t_wait0) * 1000.0
                     if self.emitter.cancelled(self.ctx.is_cancelled):
                         break
                     if not batch:
+                        # 何も来なかったがループは前進。待ち時間だけログる
+                        logger.info("PIPE wait_batch=%.2fms (empty batch)", wait_batch_ms)
                         continue
                     batch_paths, batch_np_rgb, sizes = batch
+
+                    if wait_batch_ms > 1000:
+                        from collections import Counter
+
+                        exts = [os.path.splitext(p)[1].lower() for p in batch_paths]
+                        ext_cnt = Counter(exts)
+                        # 総画素数（参考指標）: そのバッチの decode 負荷の目安
+                        total_px = sum((w * h) for (_, _), (w, h) in zip(sizes, sizes))  # sizes が (w,h) ならそのまま
+                        logger.warning(
+                            "PIPE slow_batch: wait=%.0fms, ext=%s, total_px=%.1f MP",
+                            wait_batch_ms,
+                            dict(ext_cnt),
+                            total_px / 1e6,
+                        )
 
                     batch_recs: list[_FileRecord] = []
                     rgb_list: list[np.ndarray] = []
@@ -1054,6 +1177,9 @@ class TaggingStage:
                             wh_needed.append((None, None))
                     if not rgb_list:
                         continue
+
+                    qsz = getattr(loader, "qsize", lambda: -1)()
+                    logger.info("PIPE batch=%d wait_batch=%.2fms loader_qsize=%d", len(rgb_list), wait_batch_ms, qsz)
 
                     try:
                         results = _infer_with_retry_np(rgb_list)
@@ -1088,8 +1214,30 @@ class TaggingStage:
                             # retagged は呼び出し側で集計したい場合は戻り値に含めても良い
                             pass
 
-                    for it in per_file_items:
-                        dbw.put(it)
+                    # --- DBWriter へ投入（満杯だとここでブロック）---
+                    q_before = None
+                    try:
+                        q_before = dbw.qsize()  # あれば
+                    except Exception:
+                        pass
+                    t_enqueue0 = time.perf_counter()
+                    for db_item in per_file_items:
+                        dbw.put(db_item)  # blocking put
+                    enqueue_ms = (time.perf_counter() - t_enqueue0) * 1000.0
+                    q_after = None
+                    try:
+                        q_after = dbw.qsize()
+                    except Exception:
+                        pass
+
+                    logger.info(
+                        "PIPE batch=%d wait_batch=%.2fms enqueue=%.2fms qsize=%s->%s",
+                        len(per_file_items),
+                        wait_batch_ms,
+                        enqueue_ms,
+                        q_before,
+                        q_after,
+                    )
                     processed_tags += len(per_file_items)
                     fts_processed += len(per_file_items)
                     last_logged = self._log_step("Tagging", processed_tags, len(tag_records), last_logged)

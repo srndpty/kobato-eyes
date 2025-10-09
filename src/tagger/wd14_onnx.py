@@ -202,6 +202,8 @@ class WD14Tagger(ITagger):
 
         self._topk_cap = 128  # 上限256個まで
         self._score_floor = float(os.getenv("KE_TAG_SCORE_FLOOR", "0.1"))
+        self._batch_seq = 0
+        self._last_batch_end = None
 
         if len(self._output_names) != 1:
             raise RuntimeError("Expected a single output tensor from WD14 ONNX model, got " f"{self._output_names}")
@@ -299,6 +301,11 @@ class WD14Tagger(ITagger):
         """
         すでに prepare_batch_* で (B,H,W,3) float32 に整形済みのバッチを受け取る。
         """
+        start = perf_counter()
+        idle_ms = 0.0
+        if self._last_batch_end is not None:
+            idle_ms = (start - self._last_batch_end) * 1000.0
+
         batch = np.ascontiguousarray(batch_bgr_or_rgb_prepared, dtype=np.float32)
         ort_start = perf_counter()
         outputs = self._session.run(self._output_names, {self._input_name: batch})
@@ -314,10 +321,14 @@ class WD14Tagger(ITagger):
         batch_size = logits.shape[0]
         total_ms = (0.0) + ort_ms + post_ms
         imgs_per_second = batch_size / (total_ms / 1000.0) if total_ms > 0.0 else float("inf")
+
+        self._last_batch_end = perf_counter()
+        self._batch_seq += 1
+
         logger.info(
-            "WD14 batch=%d preprocess=%.2fms ort=%.2fms post=%.2fms total=%.2fms imgs/s=%.2f",
+            "WD14 infer_batch_prepared batch=%d idle=%.2fms ort=%.2fms post=%.2fms total=%.2fms imgs/s=%.2f",
             batch_size,
-            (0.0),
+            idle_ms,
             ort_ms,
             post_ms,
             total_ms,
