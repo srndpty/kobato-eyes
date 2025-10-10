@@ -8,8 +8,7 @@ import sys
 from logging.handlers import RotatingFileHandler
 
 from utils.env import is_headless
-from utils.paths import ensure_dirs, get_app_paths, migrate_data_dir_if_needed
-from utils.paths import get_log_dir
+from utils.paths import get_app_paths, get_log_dir
 
 HEADLESS = is_headless()
 
@@ -94,7 +93,6 @@ else:
     QGuiApplication.setAttribute(Qt.ApplicationAttribute.AA_UseSoftwareOpenGL)
 
     from core.config import PipelineSettings
-    from db.connection import bootstrap_if_needed, get_conn
     from ui.dup_tab import DupTab
     from ui.settings_tab import SettingsTab
     from ui.tags_tab import TagsTab
@@ -163,14 +161,9 @@ else:
 
         def __init__(self, view_model: MainViewModel | None = None) -> None:
             super().__init__()
-            migrate_data_dir_if_needed()
-            ensure_dirs()
-            app_paths = get_app_paths()
-            db_path = app_paths.db_path()
-            logger.info("DB at %s", db_path)
-            _quick_settle_sqlite(db_path)
-            bootstrap_if_needed(db_path)
             self._view_model = view_model or MainViewModel(self)
+            db_path = self._view_model.db_path
+            logger.info("DB at %s", db_path)
             self._tags_view_model = self._view_model.create_tags_view_model(self)
             self._dup_view_model = self._view_model.create_dup_view_model(self)
             self._settings_view_model = self._view_model.create_settings_view_model(self)
