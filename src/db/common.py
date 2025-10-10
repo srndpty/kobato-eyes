@@ -92,14 +92,23 @@ def chunk(seq: Sequence[Any], size: int) -> Iterable[Sequence[Any]]:
 
 
 def fts_is_contentless(conn: sqlite3.Connection) -> bool:
-    """Return True when the FTS table is configured in contentless mode."""
+    """Return ``True`` if the ``fts_files`` table uses ``content=''`` mode."""
 
     try:
         row = conn.execute("SELECT value FROM pragma_fts5('fts_files','content')").fetchone()
         value = row[0] if row else None
         return not value
     except sqlite3.Error:
-        return False
+        try:
+            sql_row = conn.execute(
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name='fts_files'"
+            ).fetchone()
+        except sqlite3.Error:
+            return False
+        if not sql_row:
+            return False
+        sql_text = "".join(str(sql_row[0] or "").lower().split())
+        return "content=''" in sql_text or 'content=""' in sql_text
 
 
 __all__ = [

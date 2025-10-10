@@ -68,5 +68,16 @@ def test_run_index_once_reports_progress(tmp_path: Path, temp_db: Path) -> None:
     assert scan_events[0].total == -1
     assert any(event.total == stats["scanned"] for event in scan_events)
 
-    assert any(event.phase is IndexPhase.TAG for event in events)
-    assert any(event.phase is IndexPhase.FTS for event in events)
+    tag_events = [event for event in events if event.phase is IndexPhase.TAG]
+    if stats["tagged"]:
+        assert tag_events, "Expected TAG phase events when files are tagged"
+        assert tag_events[-1].done == stats["tagged"]
+    else:
+        assert not tag_events
+
+    fts_events = [event for event in events if event.phase is IndexPhase.FTS]
+    if stats["signatures"]:
+        assert fts_events, "Expected FTS phase events when rows are written"
+        assert fts_events[-1].done == stats["signatures"]
+    else:
+        assert not fts_events
