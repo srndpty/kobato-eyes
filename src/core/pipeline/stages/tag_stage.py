@@ -134,7 +134,7 @@ class TagStage:
 
         tagger = _resolve_tagger(
             settings,
-            None,
+            ctx.tagger_override,
             thresholds=thresholds or None,
             max_tags=max_tags_map or None,
         )
