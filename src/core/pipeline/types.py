@@ -10,7 +10,7 @@ from typing import Callable
 from PIL import Image
 
 from core.config import PipelineSettings
-from tagger.base import TagCategory
+from tagger.base import ITagger, TagCategory
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +37,7 @@ class PipelineContext:
     thresholds: dict["TagCategory", float]
     max_tags_map: dict["TagCategory", int]
     tagger_sig: str
+    tagger_override: ITagger | None = None
     progress_cb: Callable[[IndexProgress], None] | None = None
     is_cancelled: Callable[[], bool] | None = None
 

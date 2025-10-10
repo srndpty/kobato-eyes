@@ -48,6 +48,7 @@ class IndexPipeline:
             thresholds=thr_map,
             max_tags_map=max_map,
             tagger_sig=tagger_sig,
+            tagger_override=tagger_override,
             progress_cb=progress_cb,
             is_cancelled=is_cancelled,
         )
@@ -56,7 +57,6 @@ class IndexPipeline:
         self._scan_result: ScanStageResult | None = None
         self._tag_result: TagStageResult | None = None
         self._write_result: WriteStageResult | None = None
-        self._tagger_override = tagger_override
 
     def set_stage_override(self, name: str, stage: object) -> None:
         """Override a stage with a test double."""

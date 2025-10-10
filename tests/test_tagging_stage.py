@@ -87,6 +87,7 @@ def _ctx():
         thresholds={TagCategory.GENERAL: 0.35},
         max_tags_map={},
         tagger_sig="unittest:sig",
+        tagger_override=FakeTagger(),
         progress_cb=None,
         is_cancelled=None,
     )
