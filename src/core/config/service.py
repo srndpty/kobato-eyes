@@ -48,6 +48,11 @@ class SettingsService:
             return PipelineSettings()
 
         settings = PipelineSettings.from_mapping(raw_data)
+
+        default_index_dir = str(self._app_paths.index_dir())
+        if settings.index_dir == default_index_dir:
+            settings.index_dir = None
+
         return settings
 
     def save(self, settings: PipelineSettings) -> None:
