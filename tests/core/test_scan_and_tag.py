@@ -117,8 +117,8 @@ def test_scan_and_tag_hard_deletes_missing(temp_env: Path, tmp_path: Path) -> No
             (file_id,),
         )
         conn.execute(
-            "INSERT INTO fts_files (rowid, file_id, text) VALUES (?, ?, ?)",
-            (file_id, file_id, "gone"),
+            "INSERT INTO fts_files (rowid, text) VALUES (?, ?)",
+            (file_id, "gone"),
         )
     finally:
         conn.close()
