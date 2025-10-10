@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Mapping
 
-from core.settings import PipelineSettings
+from core.config import PipelineSettings
 from tagger.base import TagCategory
 
 from .utils import _digest_identifier, _format_sig_mapping

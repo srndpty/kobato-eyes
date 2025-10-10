@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from core.config import AppPaths
 from utils import paths
 
 
@@ -14,24 +15,23 @@ def test_migrate_data_dir_moves_legacy_contents(
 ) -> None:
     """Ensure legacy data directories are migrated without overwriting files."""
 
-    monkeypatch.delenv("KOE_DATA_DIR", raising=False)
-
     legacy_dir = tmp_path / "KobatoEyes"
     target_dir = tmp_path / "kobato-eyes"
     legacy_dir.mkdir()
     target_dir.mkdir()
 
     class DummyPlatformDirs:
-        def __init__(
-            self, appname: str, appauthor: bool = False, roaming: bool = True
-        ) -> None:
+        def __init__(self, appname: str) -> None:
             mapping = {
                 "kobato-eyes": target_dir,
                 "KobatoEyes": legacy_dir,
             }
-            self.user_data_dir = str(mapping[appname])
+            base = mapping[appname]
+            self.user_data_dir = str(base)
+            self.user_config_dir = str(base / "config")
 
-    monkeypatch.setattr(paths, "PlatformDirs", DummyPlatformDirs)
+    app_paths = AppPaths(env={}, platform_dirs_factory=lambda name: DummyPlatformDirs(name))
+    monkeypatch.setattr(paths, "_APP_PATHS", app_paths)
 
     (legacy_dir / "kobato-eyes.db").write_text("legacy-db")
     (legacy_dir / "kobato-eyes.db-wal").write_text("legacy-wal")

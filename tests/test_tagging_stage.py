@@ -7,7 +7,7 @@ import numpy as np
 from core.pipeline.tagging import TaggingStage
 from core.pipeline.testhooks import IDBWriterLike, IQuiesceCtrl, TaggingDeps
 from core.pipeline.types import IndexPhase, PipelineContext, ProgressEmitter, _FileRecord
-from core.settings import PipelineSettings
+from core.config import PipelineSettings
 from tagger.base import ITagger, TagCategory, TagPrediction, TagResult
 
 

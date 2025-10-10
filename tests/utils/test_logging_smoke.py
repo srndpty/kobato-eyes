@@ -12,8 +12,9 @@ pytest.importorskip(
     exc_type=ImportError,
 )
 
+from core.config import AppPaths
 from ui.app import setup_logging
-from utils.paths import get_log_dir
+from utils import paths
 
 pytestmark = pytest.mark.gui
 
@@ -31,7 +32,7 @@ def _clear_logging_handlers() -> None:
 def test_setup_logging_creates_rotating_file(tmp_path, monkeypatch) -> None:
     """setup_logging should prepare the log file and accept writes."""
 
-    monkeypatch.setenv("KOE_DATA_DIR", str(tmp_path))
+    monkeypatch.setattr(paths, "_APP_PATHS", AppPaths(env={"KOE_DATA_DIR": str(tmp_path)}))
     monkeypatch.delenv("KOE_LOG_LEVEL", raising=False)
     _clear_logging_handlers()
 
@@ -46,7 +47,7 @@ def test_setup_logging_creates_rotating_file(tmp_path, monkeypatch) -> None:
         if callable(flush):
             flush()
 
-    log_dir = get_log_dir()
+    log_dir = paths.get_log_dir()
     log_path = log_dir / "app.log"
     assert log_path.exists()
     contents = log_path.read_text(encoding="utf-8")

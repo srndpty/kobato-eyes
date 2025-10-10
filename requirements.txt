@@ -43,6 +43,7 @@ pytest==8.4.2
 pytokens==0.1.10
 PyTurboJPEG==1.8.2
 PyYAML==6.0.3
+pydantic==2.8.2
 requests==2.32.5
 ruff==0.14.0
 safetensors==0.6.2

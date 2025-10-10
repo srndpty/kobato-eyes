@@ -26,7 +26,7 @@ from PyQt6.QtWidgets import (
 )
 
 from core.config import load_settings, save_settings
-from core.settings import PipelineSettings, TaggerSettings
+from core.config import PipelineSettings, TaggerSettings
 from db.admin import reset_database
 from utils.paths import get_db_path
 

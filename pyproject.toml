@@ -19,6 +19,7 @@ dependencies = [
     "opencv-python-headless>=4.10.0.84",
     "Send2Trash>=1.8.3",
     "PyYAML>=6.0",
+    "pydantic>=2.8",
 ]
 
 [project.optional-dependencies]

@@ -9,7 +9,7 @@ from typing import Callable
 
 from PIL import Image
 
-from core.settings import PipelineSettings
+from core.config import PipelineSettings
 from tagger.base import TagCategory
 
 logger = logging.getLogger(__name__)

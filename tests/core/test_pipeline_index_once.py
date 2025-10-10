@@ -11,7 +11,7 @@ import pytest
 from PIL import Image
 
 from core.pipeline import run_index_once
-from core.settings import PipelineSettings, TaggerSettings
+from core.config import PipelineSettings, TaggerSettings
 from db.connection import get_conn
 from db.schema import apply_schema
 from tagger.dummy import DummyTagger

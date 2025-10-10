@@ -19,16 +19,17 @@ sys.modules.pop("db.schema", None)
 sys.modules.pop("db.repository", None)
 
 from core.pipeline import scan_and_tag
-from core.settings import PipelineSettings
+from core.config import AppPaths, PipelineSettings
 from db.connection import get_conn
 from db.repository import replace_file_tags, upsert_file, upsert_tags
-from utils.paths import get_db_path
+from utils import paths
 
 
 @pytest.fixture()
 def temp_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
     data_dir = tmp_path / "data"
-    monkeypatch.setenv("KOE_DATA_DIR", str(data_dir))
+    app_paths = AppPaths(env={"KOE_DATA_DIR": str(data_dir)})
+    monkeypatch.setattr(paths, "_APP_PATHS", app_paths)
     monkeypatch.setattr("core.pipeline.load_settings", lambda: PipelineSettings(allow_exts={".png"}))
     return data_dir
 
@@ -44,7 +45,7 @@ def test_scan_and_tag_soft_deletes_missing(temp_env: Path, tmp_path: Path) -> No
     present.write_bytes(b"test")
     missing = root / "missing.png"
 
-    db_path = get_db_path()
+    db_path = paths.get_db_path()
     conn = get_conn(db_path)
     try:
         present_id = upsert_file(
@@ -99,7 +100,7 @@ def test_scan_and_tag_hard_deletes_missing(temp_env: Path, tmp_path: Path) -> No
     root.mkdir()
     missing = root / "gone.png"
 
-    db_path = get_db_path()
+    db_path = paths.get_db_path()
     conn = get_conn(db_path)
     try:
         file_id = upsert_file(
