@@ -9,7 +9,7 @@ from typing import Iterable, Sequence
 import pytest
 from PyQt6.QtCore import QCoreApplication
 
-from core.settings import PipelineSettings, TaggerSettings
+from core.config import PipelineSettings, TaggerSettings
 from dup.scanner import DuplicateScanConfig
 from ui.viewmodels import DupViewModel, SettingsViewModel, TagsViewModel
 
@@ -69,7 +69,7 @@ def test_tags_view_model_wraps_dependencies(tmp_path: Path) -> None:
 
     rows = view_model.search_files(conn, "1=1", [])
     assert rows == [{"id": 1}]
-    paths = view_model.iter_paths_for_search(conn, "*" )
+    paths = view_model.iter_paths_for_search(conn, "*")
     assert paths == ["/a", "/b"]
 
     retagged = view_model.retag_query(view_model.db_path, "predicate", [1, 2])
@@ -158,7 +158,7 @@ def test_settings_view_model_build_and_reset(tmp_path: Path) -> None:
     view_model.apply_settings(settings)
 
     assert [Path(p) for p in emitted[-1].roots] == [Path("/data")]
-    assert emitted[-1].tagger.model_path == "/model.onnx"
+    assert Path(emitted[-1].tagger.model_path).name == "model.onnx"
 
     message = view_model.check_tagger_environment()
     assert "ONNX providers" in message

@@ -20,8 +20,8 @@ from db.repository import (
     upsert_signatures,
     upsert_tags,
 )
-from db.tags import upsert_tags as tags_upsert
 from db.schema import apply_schema
+from db.tags import upsert_tags as tags_upsert
 
 
 @pytest.fixture()
@@ -131,15 +131,6 @@ def test_repository_roundtrip(memory_conn: sqlite3.Connection) -> None:
     assert sig_row["phash_u64"] == 789
     assert sig_row["dhash_u64"] == 654
 
-    vector = bytes(range(16))
-    embed_row = memory_conn.execute(
-        "SELECT dim, vector FROM embeddings WHERE file_id = ? AND model = ?",
-        (file_id, "clip-vit"),
-    ).fetchone()
-    assert embed_row is not None
-    assert embed_row["dim"] == 16
-    assert bytes(embed_row["vector"]) == vector[::-1]
-
     # Ensure FTS content is still queryable after all operations.
     final_match = memory_conn.execute(
         "SELECT rowid FROM fts_files WHERE fts_files MATCH ?",
@@ -178,17 +169,16 @@ def test_iter_files_for_dup_and_mark_absent(memory_conn: sqlite3.Connection) -> 
         dhash_u64=0x5679,
     )
 
-    rows = list(iter_files_for_dup(memory_conn, None, model_name="clip-vit"))
+    rows = list(iter_files_for_dup(memory_conn, None))
     assert len(rows) == 1
     row = rows[0]
     assert row["file_id"] == present_id
-    assert row["embedding_dim"] == 2
 
-    filtered_rows = list(iter_files_for_dup(memory_conn, "C:/images/present%", model_name="clip-vit"))
+    filtered_rows = list(iter_files_for_dup(memory_conn, "C:/images/present%"))
     assert len(filtered_rows) == 1
     assert filtered_rows[0]["file_id"] == present_id
 
-    empty_rows = list(iter_files_for_dup(memory_conn, "Z:%", model_name="clip-vit"))
+    empty_rows = list(iter_files_for_dup(memory_conn, "Z:%"))
     assert empty_rows == []
 
     updated = mark_files_absent(memory_conn, [present_id])

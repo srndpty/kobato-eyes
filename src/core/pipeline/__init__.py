@@ -3,6 +3,8 @@ Aggregate public API for core.pipeline (backward compatibility).
 Re-exports are intentional; keep them listed in __all__ to satisfy linters.
 """
 
+from core.config import load_settings
+
 from .maintenance import _settle_after_quiesce, wait_for_unlock
 from .manual_refresh import scan_and_tag
 from .orchestrator import IndexPipeline, run_index_once
@@ -56,4 +58,5 @@ __all__ = [
     "WriteStage",
     "WriteStageDeps",
     "WriteStageResult",
+    "load_settings",
 ]

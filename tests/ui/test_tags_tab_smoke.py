@@ -56,11 +56,9 @@ def test_index_now_triggers_pipeline(tags_tab: TagsTab) -> None:
         return {
             "scanned": 1,
             "tagged": 1,
-            "embedded": 1,
             "elapsed_sec": 0.1,
             "new_or_changed": 1,
             "signatures": 1,
-            "hnsw_added": 1,
             "tagger_name": "dummy",
         }
 

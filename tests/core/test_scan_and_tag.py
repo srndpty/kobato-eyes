@@ -18,8 +18,8 @@ sys.modules.pop("db", None)
 sys.modules.pop("db.schema", None)
 sys.modules.pop("db.repository", None)
 
-from core.pipeline import scan_and_tag
 from core.config import AppPaths, PipelineSettings
+from core.pipeline import scan_and_tag
 from db.connection import get_conn
 from db.repository import replace_file_tags, upsert_file, upsert_tags
 from utils import paths
@@ -113,10 +113,6 @@ def test_scan_and_tag_hard_deletes_missing(temp_env: Path, tmp_path: Path) -> No
         gone_tag = upsert_tags(conn, [{"name": "gone", "category": 0}])["gone"]
         replace_file_tags(conn, file_id, [(gone_tag, 0.5)])
         conn.execute(
-            "INSERT INTO embeddings (file_id, model, dim, vector) VALUES (?, 'model', 1, X'00')",
-            (file_id,),
-        )
-        conn.execute(
             "INSERT INTO signatures (file_id, phash_u64, dhash_u64) VALUES (?, 1, 2)",
             (file_id,),
         )
@@ -134,20 +130,9 @@ def test_scan_and_tag_hard_deletes_missing(temp_env: Path, tmp_path: Path) -> No
 
     conn2 = get_conn(db_path)
     try:
-        assert conn2.execute(
-            "SELECT 1 FROM files WHERE path = ?", (str(missing.resolve()),)
-        ).fetchone() is None
-        assert conn2.execute(
-            "SELECT 1 FROM file_tags WHERE file_id = ?", (file_id,)
-        ).fetchone() is None
-        assert conn2.execute(
-            "SELECT 1 FROM embeddings WHERE file_id = ?", (file_id,)
-        ).fetchone() is None
-        assert conn2.execute(
-            "SELECT 1 FROM signatures WHERE file_id = ?", (file_id,)
-        ).fetchone() is None
-        assert conn2.execute(
-            "SELECT 1 FROM fts_files WHERE rowid = ?", (file_id,)
-        ).fetchone() is None
+        assert conn2.execute("SELECT 1 FROM files WHERE path = ?", (str(missing.resolve()),)).fetchone() is None
+        assert conn2.execute("SELECT 1 FROM file_tags WHERE file_id = ?", (file_id,)).fetchone() is None
+        assert conn2.execute("SELECT 1 FROM signatures WHERE file_id = ?", (file_id,)).fetchone() is None
+        assert conn2.execute("SELECT 1 FROM fts_files WHERE rowid = ?", (file_id,)).fetchone() is None
     finally:
         conn2.close()

@@ -3,44 +3,17 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Sequence
 
-import numpy as np
 import pytest
 from PIL import Image
 
-from core.pipeline import IndexPhase, IndexProgress, run_index_once
 from core.config import PipelineSettings, TaggerSettings
+from core.pipeline import IndexPhase, IndexProgress, run_index_once
 from db.connection import get_conn
 from db.schema import apply_schema
 from tagger.dummy import DummyTagger
 
 pytestmark = pytest.mark.not_gui
-
-
-class TinyEmbedder:
-    """Deterministic embedder for progress tests."""
-
-    def __init__(self, dim: int = 4) -> None:
-        self._dim = dim
-
-    @property
-    def embedding_dim(self) -> int:
-        return self._dim
-
-    def embed_images(self, images: Sequence[Image.Image]) -> np.ndarray:
-        vectors = []
-        for image in images:
-            arr = np.asarray(image.resize((2, 2))).astype(np.float32).flatten()
-            if arr.size < self._dim:
-                arr = np.pad(arr, (0, self._dim - arr.size))
-            else:
-                arr = arr[: self._dim]
-            norm = np.linalg.norm(arr)
-            if norm:
-                arr /= norm
-            vectors.append(arr.astype(np.float32))
-        return np.vstack(vectors)
 
 
 @pytest.fixture()
@@ -80,7 +53,6 @@ def test_run_index_once_reports_progress(tmp_path: Path, temp_db: Path) -> None:
         temp_db,
         settings=settings,
         tagger_override=DummyTagger(),
-        embedder_override=TinyEmbedder(),
         progress_cb=_collect,
     )
 
@@ -97,6 +69,4 @@ def test_run_index_once_reports_progress(tmp_path: Path, temp_db: Path) -> None:
     assert any(event.total == stats["scanned"] for event in scan_events)
 
     assert any(event.phase is IndexPhase.TAG for event in events)
-    assert any(event.phase is IndexPhase.EMBED for event in events)
     assert any(event.phase is IndexPhase.FTS for event in events)
-    assert any(event.phase is IndexPhase.HNSW for event in events)
