@@ -8,7 +8,7 @@ from pathlib import Path
 from PyQt6.QtCore import QObject, pyqtSignal
 
 from core.config import load_settings, save_settings
-from core.settings import PipelineSettings
+from core.config.schema import PipelineSettings
 from db.connection import bootstrap_if_needed, get_conn
 from utils.paths import ensure_dirs, get_db_path, migrate_data_dir_if_needed
 

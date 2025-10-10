@@ -8,7 +8,7 @@ from typing import Callable, Iterable
 
 from PyQt6.QtCore import QObject, pyqtSignal
 
-from core.settings import PipelineSettings, TaggerSettings
+from core.config.schema import PipelineSettings, TaggerSettings
 from db.admin import reset_database as _reset_database
 from utils.paths import get_db_path as _get_db_path
 

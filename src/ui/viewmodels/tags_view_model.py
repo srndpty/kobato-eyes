@@ -8,12 +8,21 @@ from typing import Callable, Iterable, Sequence
 from PyQt6.QtCore import QObject
 
 from core.config import load_settings as _load_settings
-from core.pipeline import IndexProgress, retag_all as _retag_all, retag_query as _retag_query, run_index_once as _run_index_once, scan_and_tag as _scan_and_tag
-from core.query import extract_positive_tag_terms as _extract_positive_tag_terms, translate_query as _translate_query
-from core.settings import PipelineSettings
+from core.config.schema import PipelineSettings
+from core.pipeline import IndexProgress
+from core.pipeline import retag_all as _retag_all
+from core.pipeline import retag_query as _retag_query
+from core.pipeline import run_index_once as _run_index_once
+from core.pipeline import scan_and_tag as _scan_and_tag
+from core.query import extract_positive_tag_terms as _extract_positive_tag_terms
+from core.query import translate_query as _translate_query
 from db.connection import get_conn as _get_conn
-from db.repository import _load_tag_thresholds as _load_tag_thresholds, iter_paths_for_search as _iter_paths_for_search, list_tag_names as _list_tag_names, search_files as _search_files
-from utils.paths import ensure_dirs as _ensure_dirs, get_db_path as _get_db_path
+from db.repository import _load_tag_thresholds as _load_tag_thresholds
+from db.repository import iter_paths_for_search as _iter_paths_for_search
+from db.repository import list_tag_names as _list_tag_names
+from db.repository import search_files as _search_files
+from utils.paths import ensure_dirs as _ensure_dirs
+from utils.paths import get_db_path as _get_db_path
 from utils.search_export import make_export_dir as _make_export_dir
 
 

@@ -66,14 +66,8 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from core.config import load_settings
-from core.pipeline import IndexProgress, retag_all, retag_query, run_index_once, scan_and_tag
-from core.query import extract_positive_tag_terms, translate_query
 from core.config import PipelineSettings
-from db.connection import get_conn
-from db.repository import _load_tag_thresholds, iter_paths_for_search, list_tag_names, search_files
 from core.pipeline import IndexProgress
-from core.settings import PipelineSettings
 from tagger import labels_util
 from tagger.base import TagCategory
 from tagger.wd14_onnx import ONNXRUNTIME_MISSING_MESSAGE

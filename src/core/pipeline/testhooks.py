@@ -5,7 +5,8 @@ from typing import Callable, Iterable, List, Optional, Tuple
 
 import numpy as np
 
-from core.db_writer import DBItem, DBWriter
+from core.db_writer import DBWriter
+from core.pipeline.contracts import DBWriteQueue
 
 from .loaders import PrefetchLoaderPrepared
 
