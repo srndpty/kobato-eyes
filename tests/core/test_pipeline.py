@@ -13,7 +13,8 @@ pytest.importorskip("PyQt6.QtCore", reason="PyQt6 core required", exc_type=Impor
 from PyQt6.QtCore import QCoreApplication
 
 from core.jobs import JobManager
-from core.pipeline import PipelineSettings, ProcessingPipeline
+from core.pipeline import ProcessingPipeline
+from core.settings import PipelineSettings
 from db.connection import get_conn
 from db.schema import apply_schema
 from tagger.base import ITagger, TagCategory, TagPrediction, TagResult
