@@ -215,8 +215,8 @@ def update_fts(conn: sqlite3.Connection, file_id: int, text: str | None) -> None
         if text:
             # contentless でも OK：rowid とインデックス対象の列（text）を挿入
             conn.execute(
-                "INSERT INTO fts_files (rowid, file_id, text) VALUES (?, ?, ?)",
-                (file_id, file_id, text),
+                "INSERT INTO fts_files (rowid, text) VALUES (?, ?)",
+                (file_id, text),
             )
 
 
@@ -225,17 +225,17 @@ def update_fts_bulk(conn: sqlite3.Connection, entries: Iterable[tuple[int, Optio
     FTS エントリの一括更新。
     entries: Iterable[(file_id, text_or_None)]
     """
-    delete_rows: list[tuple[int]] = []
+    delete_ids: list[int] = []
     insert_rows: list[tuple[int, str]] = []
     for fid, text in entries:
-        delete_rows.append((fid,))
+        delete_ids.append(fid)
         if text:
             insert_rows.append((fid, text))
 
     with conn:
-        if delete_rows:
+        if delete_ids:
             # conn.executemany("DELETE FROM fts_files WHERE rowid = ?", delete_rows)
-            fts_delete_rows(conn, delete_rows)
+            fts_delete_rows(conn, delete_ids)
         if insert_rows:
             conn.executemany(
                 "INSERT INTO fts_files (rowid, text) VALUES (?, ?)",

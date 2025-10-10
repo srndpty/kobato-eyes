@@ -54,21 +54,21 @@ def update_fts(conn: sqlite3.Connection, file_id: int, text: str | None) -> None
         fts_delete_rows(conn, [file_id])
         if text:
             conn.execute(
-                "INSERT INTO fts_files (rowid, file_id, text) VALUES (?, ?, ?)",
-                (file_id, file_id, text),
+                "INSERT INTO fts_files (rowid, text) VALUES (?, ?)",
+                (file_id, text),
             )
 
 
 def update_fts_bulk(conn: sqlite3.Connection, entries: Iterable[tuple[int, str | None]]) -> None:
-    delete_rows: list[tuple[int]] = []
+    delete_ids: list[int] = []
     insert_rows: list[tuple[int, str]] = []
     for fid, text in entries:
-        delete_rows.append((fid,))
+        delete_ids.append(fid)
         if text:
             insert_rows.append((fid, text))
     with conn:
-        if delete_rows:
-            fts_delete_rows(conn, [fid for (fid,) in delete_rows])
+        if delete_ids:
+            fts_delete_rows(conn, delete_ids)
         if insert_rows:
             conn.executemany(
                 "INSERT INTO fts_files (rowid, text) VALUES (?, ?)",

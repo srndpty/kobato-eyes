@@ -97,14 +97,14 @@ def test_repository_roundtrip(memory_conn: sqlite3.Connection) -> None:
 
     update_fts(memory_conn, file_id, "kobato safe test")
     match = memory_conn.execute(
-        "SELECT file_id FROM fts_files WHERE fts_files MATCH ?",
+        "SELECT rowid AS file_id FROM fts_files WHERE fts_files MATCH ?",
         ("safe",),
     ).fetchone()
     assert match is not None and match["file_id"] == file_id
 
     update_fts(memory_conn, file_id, None)
     match_after_delete = memory_conn.execute(
-        "SELECT file_id FROM fts_files WHERE rowid = ?",
+        "SELECT rowid FROM fts_files WHERE rowid = ?",
         (file_id,),
     ).fetchone()
     assert match_after_delete is None
