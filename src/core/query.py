@@ -117,8 +117,22 @@ def _split_parens_safely(raw: str) -> list[str]:
     return [token for token in tokens if token]
 
 
+def _split_words(query: str) -> list[str]:
+    if not query:
+        return []
+    lex = shlex.shlex(query, posix=True)
+    lex.whitespace_split = True  # 空白で区切る
+    lex.commenters = ""  # コメント無効
+    lex.quotes = '"'  # " だけをクォートとして扱う（' は通常文字）
+    try:
+        return list(lex)
+    except ValueError:
+        # 予期せぬ入力でも落ちないようフォールバック
+        return query.split()
+
+
 def _tokenize(query: str) -> list[_Token]:
-    raw_tokens = shlex.split(query, posix=True) if query else []
+    raw_tokens = _split_words(query)
     tokens: list[_Token] = []
     for raw_token in raw_tokens:
         for raw in _split_parens_safely(raw_token):
@@ -425,6 +439,7 @@ def translate_query(
     tokens = _tokenize(query)
     parser = _Parser(tokens)
     expr = parser.parse()
+    print(f"translate_query, tokens={tokens}, expr={expr}")
     return _build_sql(expr, file_alias=file_alias, thresholds=thresholds)
 
 
