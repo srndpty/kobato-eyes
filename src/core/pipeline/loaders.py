@@ -118,7 +118,8 @@ class PrefetchLoaderPrepared:
                     ratio = _TARGET / side
                     interp = cv2.INTER_AREA if side > _TARGET else cv2.INTER_CUBIC
                     bgr = cv2.resize(bgr, (max(1, int(ww * ratio)), max(1, int(hh * ratio))), interpolation=interp)
-                return (p, bgr, (w, h))
+                rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+                return (p, rgb, (w, h))
 
             # --- PNG / WebP / その他: OpenCV ---
             data = np.fromfile(p, dtype=np.uint8)  # Windows で速い
@@ -132,9 +133,10 @@ class PrefetchLoaderPrepared:
                 ratio = _TARGET / side
                 interp = cv2.INTER_AREA if side > _TARGET else cv2.INTER_CUBIC
                 bgr = cv2.resize(bgr, (max(1, int(ww * ratio)), max(1, int(hh * ratio))), interpolation=interp)
+            rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
             # 元サイズは im の生サイズ（アルファ有無に関係なし）
             H0, W0 = (im.shape[0], im.shape[1]) if im.ndim >= 2 else (hh, ww)
-            return (p, bgr, (int(W0), int(H0)))
+            return (p, rgb, (int(W0), int(H0)))
 
         except Exception as e:
             logger.warning("PrefetchLoaderPrepared: failed to load %s: %s (fallback PIL)", p, e)
@@ -148,8 +150,9 @@ class PrefetchLoaderPrepared:
                     rgb = bg.convert("RGB")
                     # ここでは軽く縮小のみ（最終整形は tagger に任せる）
                     rgb.thumbnail((_TARGET, _TARGET))
-                    bgr = np.asarray(rgb)[:, :, ::-1]  # RGB->BGR
-                    return (p, bgr, (w, h))
+                    # bgr = np.asarray(rgb)[:, :, ::-1]  # RGB->BGR
+                    rgb_arr = np.asarray(rgb)  # ここはそのままRGB
+                    return (p, rgb_arr, (w, h))
             except Exception as e2:
                 logger.warning("PrefetchLoaderPrepared: PIL fallback also failed %s: %s", p, e2)
                 return (p, None, None)
@@ -192,7 +195,7 @@ class PrefetchLoaderPrepared:
                         continue
 
                     # ここで最終整形（正方形 + ぴったり TARGET + float32）を tagger に任せる
-                    np_batch = self._tagger.prepare_batch_from_bgr(bgr_list)
+                    np_batch = self._tagger.prepare_batch_from_rgb_np(bgr_list)
 
                     # キューへ（必要なら put 時間をログ）
                     t0 = time.perf_counter()

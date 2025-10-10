@@ -9,7 +9,7 @@ import numpy as np
 
 from core.db_writer import DBItem
 from db.connection import get_conn
-from tagger.base import TagCategory, TagResult
+from tagger.base import TagCategory
 
 from .maintenance import _settle_after_quiesce
 from .resolver import _resolve_tagger
@@ -95,7 +95,8 @@ class TaggingStage:
             rec_by_path: dict[str, _FileRecord] = {str(r.path): r for r in tag_records}
             tag_paths: list[str] = list(rec_by_path.keys())
             tag_paths.sort(key=lambda p: (Path(p).parent, os.path.getsize(p)))
-            current_batch = max(1, int(getattr(settings, "batch_size", 32) or 32))
+            current_batch = 32
+            # current_batch = max(1, int(getattr(settings, "batch_size", 32) or 32))
             prefetch_depth = int(os.environ.get("KE_PREFETCH_DEPTH", "128") or "128") or 128
             io_workers = int(os.environ.get("KE_IO_WORKERS", "12") or "12") or None
 
@@ -107,17 +108,20 @@ class TaggingStage:
                 io_workers,
             )
 
-            def _infer_with_retry_np(rgb_list: list[np.ndarray]) -> list[TagResult]:
+            def _infer_prepared_with_retry(np_batch):
                 try:
-                    np_batch = tagger.prepare_batch_from_rgb_np(rgb_list)
                     return tagger.infer_batch_prepared(
                         np_batch, thresholds=thresholds or None, max_tags=max_tags_map or None
                     )
                 except Exception:
-                    if len(rgb_list) <= 1:
+                    # OOM等で失敗したら分割して再試行
+                    n = np_batch.shape[0]
+                    if n <= 1:
                         raise
-                    mid = len(rgb_list) // 2
-                    return _infer_with_retry_np(rgb_list[:mid]) + _infer_with_retry_np(rgb_list[mid:])
+                    mid = n // 2
+                    left = _infer_prepared_with_retry(np_batch[:mid])
+                    right = _infer_prepared_with_retry(np_batch[mid:])
+                    return left + right
 
             try:
                 loader_iter = iter(loader)
@@ -160,7 +164,7 @@ class TaggingStage:
                     logger.info("PIPE batch=%d wait_batch=%.2fms loader_qsize=%d", len(rgb_list), wait_batch_ms, qsz)
 
                     try:
-                        results = _infer_with_retry_np(rgb_list)
+                        results = _infer_prepared_with_retry(batch_np_rgb)
                     except Exception:
                         logger.exception("Tagger failed for a prepared batch")
                         continue
