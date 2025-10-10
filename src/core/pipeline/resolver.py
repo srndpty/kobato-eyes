@@ -4,7 +4,7 @@ import logging
 from pathlib import Path
 from typing import Mapping
 
-from core.settings import PipelineSettings
+from core.config import PipelineSettings
 from tagger.base import ITagger, TagCategory
 
 from .utils import _serialise_max_tags, _serialise_thresholds

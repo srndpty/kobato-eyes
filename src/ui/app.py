@@ -8,6 +8,7 @@ import sys
 from logging.handlers import RotatingFileHandler
 
 from utils.env import is_headless
+from utils.paths import ensure_dirs, get_app_paths, migrate_data_dir_if_needed
 from utils.paths import get_log_dir
 
 HEADLESS = is_headless()
@@ -56,7 +57,8 @@ def setup_logging() -> None:
     stream_handler.setFormatter(formatter)
     root_logger.addHandler(stream_handler)
 
-    log_dir = get_log_dir()
+    app_paths = get_app_paths()
+    log_dir = app_paths.log_dir()
     log_dir.mkdir(parents=True, exist_ok=True)
     log_path = log_dir / "app.log"
     file_handler = RotatingFileHandler(
@@ -91,6 +93,8 @@ else:
 
     QGuiApplication.setAttribute(Qt.ApplicationAttribute.AA_UseSoftwareOpenGL)
 
+    from core.config import PipelineSettings
+    from db.connection import bootstrap_if_needed, get_conn
     from ui.dup_tab import DupTab
     from ui.settings_tab import SettingsTab
     from ui.tags_tab import TagsTab
@@ -159,6 +163,13 @@ else:
 
         def __init__(self, view_model: MainViewModel | None = None) -> None:
             super().__init__()
+            migrate_data_dir_if_needed()
+            ensure_dirs()
+            app_paths = get_app_paths()
+            db_path = app_paths.db_path()
+            logger.info("DB at %s", db_path)
+            _quick_settle_sqlite(db_path)
+            bootstrap_if_needed(db_path)
             self._view_model = view_model or MainViewModel(self)
             self._tags_view_model = self._view_model.create_tags_view_model(self)
             self._dup_view_model = self._view_model.create_dup_view_model(self)

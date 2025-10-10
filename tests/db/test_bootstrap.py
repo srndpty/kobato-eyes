@@ -11,9 +11,10 @@ import pytest
 from PIL import Image
 
 from core.pipeline import run_index_once
-from core.settings import PipelineSettings, TaggerSettings
+from core.config import AppPaths, PipelineSettings, TaggerSettings
 from db.connection import bootstrap_if_needed, get_conn
 from tagger.dummy import DummyTagger
+from utils import paths
 
 pytestmark = pytest.mark.integration
 
@@ -57,7 +58,8 @@ def test_run_index_once_bootstraps_schema(tmp_path: Path, monkeypatch: pytest.Mo
     image_dir.mkdir()
     _make_sample_image(image_dir / "one.png")
 
-    monkeypatch.setenv("KOE_DATA_DIR", str(tmp_path / "data"))
+    app_paths = AppPaths(env={"KOE_DATA_DIR": str(tmp_path / "data")})
+    monkeypatch.setattr(paths, "_APP_PATHS", app_paths)
 
     settings = PipelineSettings(
         roots=[str(image_dir)],
