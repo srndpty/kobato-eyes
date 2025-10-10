@@ -5,8 +5,7 @@ from typing import Callable, Iterable, List, Optional, Tuple
 
 import numpy as np
 
-from core.db_writer import DBWriter
-from core.pipeline.contracts import DBItem, DBWriteQueue
+from core.db_writer import DBItem, DBWriter
 
 from .loaders import PrefetchLoaderPrepared
 
@@ -72,6 +71,12 @@ def default_dbwriter_factory(
     )
 
 
+def _default_conn_factory(db_path: str):
+    from db.connection import get_conn
+
+    return get_conn(db_path, allow_when_quiesced=True)
+
+
 @dataclass
 class TaggingDeps:
     """TaggingStage のテスト容易性のための依存集合（デフォルトは実運用実装）。"""
@@ -79,6 +84,7 @@ class TaggingDeps:
     loader_factory: LoaderFactory = default_loader_factory
     dbwriter_factory: DBWriterFactory = default_dbwriter_factory
     quiesce: IQuiesceCtrl = _DefaultQuiesceCtrl()
+    conn_factory: Callable[[str], object] = _default_conn_factory
 
 
 __all__ = ["TaggingDeps", "IQuiesceCtrl", "IDBWriterLike", "default_loader_factory", "default_dbwriter_factory"]

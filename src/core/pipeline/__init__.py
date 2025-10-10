@@ -10,6 +10,9 @@ from .resolver import _resolve_tagger
 from .retag import retag_all, retag_query
 from .scanner import Scanner
 from .signature import _build_max_tags_map, _build_threshold_map, current_tagger_sig
+from .stages.scan_stage import ScanStage, ScanStageDeps, ScanStageResult
+from .stages.tag_stage import TagStage, TagStageDeps, TagStageResult
+from .stages.write_stage import WriteStage, WriteStageDeps, WriteStageResult
 from .tagging import TaggingStage
 from .testhooks import TaggingDeps
 from .types import IndexPhase, IndexProgress, PipelineContext, ProgressEmitter, _FileRecord
@@ -44,4 +47,13 @@ __all__ = [
     "Scanner",
     "TaggingStage",
     "TaggingDeps",
+    "ScanStage",
+    "ScanStageDeps",
+    "ScanStageResult",
+    "TagStage",
+    "TagStageDeps",
+    "TagStageResult",
+    "WriteStage",
+    "WriteStageDeps",
+    "WriteStageResult",
 ]
