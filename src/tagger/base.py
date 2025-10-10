@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from enum import IntEnum
 from typing import Mapping, Protocol, Sequence, runtime_checkable
 
+import numpy as np
 from PIL import Image
 
 
@@ -43,6 +44,18 @@ MaxTagsMap = Mapping[TagCategory, int]
 @runtime_checkable
 class ITagger(Protocol):
     """Interface all tagging implementations must satisfy."""
+
+    def prepare_batch_from_rgb_np(self, images: Sequence[np.ndarray]) -> np.ndarray:
+        """Convert raw RGB image arrays into a model-ready float32 batch."""
+
+    def infer_batch_prepared(
+        self,
+        batch: np.ndarray,
+        *,
+        thresholds: ThresholdMap | None = None,
+        max_tags: MaxTagsMap | None = None,
+    ) -> list[TagResult]:
+        """Run inference over a preprocessed batch produced by ``prepare_batch_from_rgb_np``."""
 
     def infer_batch(
         self,
