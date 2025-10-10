@@ -95,7 +95,8 @@ class TaggingStage:
             rec_by_path: dict[str, _FileRecord] = {str(r.path): r for r in tag_records}
             tag_paths: list[str] = list(rec_by_path.keys())
             tag_paths.sort(key=lambda p: (Path(p).parent, os.path.getsize(p)))
-            current_batch = max(1, int(getattr(settings, "batch_size", 32) or 32))
+            current_batch = 32
+            # current_batch = max(1, int(getattr(settings, "batch_size", 32) or 32))
             prefetch_depth = int(os.environ.get("KE_PREFETCH_DEPTH", "128") or "128") or 128
             io_workers = int(os.environ.get("KE_IO_WORKERS", "12") or "12") or None
 
