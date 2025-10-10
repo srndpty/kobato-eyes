@@ -5,7 +5,8 @@ from typing import Callable, Iterable, List, Optional, Tuple
 
 import numpy as np
 
-from core.db_writer import DBItem, DBWriter
+from core.db_writer import DBWriter
+from core.pipeline.contracts import DBItem, DBWriteQueue
 
 from .loaders import PrefetchLoaderPrepared
 
@@ -43,12 +44,8 @@ def default_loader_factory(paths: List[str], tagger, batch_size: int, prefetch_b
     )
 
 
-class IDBWriterLike:
-    def start(self) -> None: ...
-    def raise_if_failed(self) -> None: ...
-    def put(self, item: DBItem) -> None: ...
-    def qsize(self) -> int: ...
-    def stop(self, *, flush: bool, wait_forever: bool) -> None: ...
+class IDBWriterLike(DBWriteQueue):
+    """Backwards compatible alias for DB writing queues."""
 
 
 def default_dbwriter_factory(

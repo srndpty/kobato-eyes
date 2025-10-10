@@ -7,7 +7,7 @@ from pathlib import Path
 
 import numpy as np
 
-from core.db_writer import DBItem
+from core.pipeline.contracts import DBItem, DBWriteQueue
 from db.connection import get_conn
 from tagger.base import TagCategory
 
@@ -54,7 +54,7 @@ class TaggingStage:
         fts_processed = 0
         last_logged = 0
         quiesced = False
-        dbw = None
+        dbw: DBWriteQueue | None = None
 
         def _dbw_progress(kind: str, done: int, total: int) -> None:
             nonlocal fts_processed

@@ -51,6 +51,8 @@ class FakeDBWriter(IDBWriterLike):
     def __init__(self):
         self.items = []
         self._q = 0
+        self.stopped = False
+        self.flushed = None
 
     def start(self):
         pass
@@ -66,7 +68,8 @@ class FakeDBWriter(IDBWriterLike):
         return self._q
 
     def stop(self, *, flush: bool, wait_forever: bool):
-        pass
+        self.stopped = True
+        self.flushed = flush
 
 
 class NoopQuiesce(IQuiesceCtrl):
@@ -131,6 +134,7 @@ def test_tagging_stage_with_fakes():
 
     assert tagged == 2
     assert len(fake_db.items) == 2
+    assert fake_db.stopped and fake_db.flushed is True
     # DBItem の中身ざっくり（ファイルIDが入っている）
     ids = sorted(it.file_id for it in fake_db.items)
     assert ids == [1, 2]
