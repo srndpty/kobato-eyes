@@ -2,12 +2,25 @@
 
 from __future__ import annotations
 
-import cv2
-import numpy as np
-from PIL import Image
+try:
+    import numpy as np  # type: ignore[import-not-found]
+except ModuleNotFoundError:  # pragma: no cover - optional dependency may be absent in tests
+    np = None  # type: ignore[assignment]
+
+try:
+    from PIL import Image  # type: ignore[import-not-found]
+except ModuleNotFoundError:  # pragma: no cover - optional dependency may be absent in tests
+    Image = None  # type: ignore[assignment]
+
+try:
+    import cv2  # type: ignore[import-not-found]
+except ModuleNotFoundError:  # pragma: no cover - optional dependency may be absent in tests
+    cv2 = None  # type: ignore[assignment]
 
 
 def _to_grayscale(image: Image.Image, size: tuple[int, int]) -> np.ndarray:
+    if Image is None or np is None:  # pragma: no cover - dependency guard
+        raise RuntimeError("NumPy and Pillow are required to compute perceptual hashes")
     resample = getattr(Image, "Resampling", Image).LANCZOS  # type: ignore[attr-defined]
     grayscale = image.convert("L").resize(size, resample)
     return np.asarray(grayscale, dtype=np.float32)
@@ -19,6 +32,8 @@ def _to_signed(value: int) -> int:
 
 def phash(image: Image.Image) -> int:
     """Compute a perceptual hash (pHash) using a DCT over the image."""
+    if cv2 is None:  # pragma: no cover - exercised when OpenCV is unavailable
+        raise RuntimeError("OpenCV (cv2) is required to compute perceptual hashes")
     pixels = _to_grayscale(image, (32, 32))
     dct = cv2.dct(pixels)
     block = dct[:8, :8]

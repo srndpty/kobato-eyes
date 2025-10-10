@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Mapping, Sequence
@@ -33,6 +34,7 @@ class DuplicateFile:
     width: int | None
     height: int | None
     phash: int
+    embedding: tuple[float, ...] | None = None
 
     @classmethod
     def from_row(cls, row: Mapping[str, object]) -> DuplicateFile:
@@ -91,6 +93,7 @@ class DuplicateScanConfig:
     size_ratio: float | None = None
     band_bits: int = 16
     band_count: int = 4
+    cosine_threshold: float | None = None
 
     def __post_init__(self) -> None:
         if self.band_bits <= 0:
@@ -99,6 +102,9 @@ class DuplicateScanConfig:
             raise ValueError("band_count must be positive")
         if self.hamming_threshold < 0 or self.hamming_threshold > 64:
             raise ValueError("hamming_threshold must be in [0, 64]")
+        if self.cosine_threshold is not None:
+            if not (-1.0 <= self.cosine_threshold <= 1.0):
+                raise ValueError("cosine_threshold must be between -1.0 and 1.0")
 
 
 @dataclass
@@ -175,6 +181,8 @@ class DuplicateScanner:
                         continue
                     hamming = hamming64(file_a.phash, file_b.phash)
                     if hamming > self._config.hamming_threshold:
+                        continue
+                    if not self._passes_cosine_similarity(file_a, file_b):
                         continue
 
                     edges[key] = DuplicateEdge(
@@ -253,6 +261,36 @@ class DuplicateScanner:
         if larger == 0:
             return True
         return (smaller / larger) >= ratio
+
+    def _passes_cosine_similarity(self, left: DuplicateFile, right: DuplicateFile) -> bool:
+        """Return True when cosine similarity is above the configured threshold."""
+
+        threshold = self._config.cosine_threshold
+        if threshold is None:
+            return True
+        cosine = self._compute_cosine_similarity(left, right)
+        if cosine is None:
+            return True
+        return cosine >= threshold
+
+    @staticmethod
+    def _compute_cosine_similarity(left: DuplicateFile, right: DuplicateFile) -> float | None:
+        """Compute cosine similarity between two duplicate file embeddings."""
+
+        vec_left = left.embedding
+        vec_right = right.embedding
+        if vec_left is None or vec_right is None:
+            return None
+        if len(vec_left) == 0 or len(vec_right) == 0:
+            return None
+        if len(vec_left) != len(vec_right):
+            return None
+        dot = sum(a * b for a, b in zip(vec_left, vec_right))
+        norm_left = math.sqrt(sum(a * a for a in vec_left))
+        norm_right = math.sqrt(sum(b * b for b in vec_right))
+        if norm_left == 0.0 or norm_right == 0.0:
+            return None
+        return dot / (norm_left * norm_right)
 
     @staticmethod
     def _choose_keeper(entries: Sequence[DuplicateClusterEntry]) -> int:

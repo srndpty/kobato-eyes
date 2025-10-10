@@ -13,6 +13,7 @@ def make_file(
     width: int,
     height: int,
     phash: int,
+    embedding: tuple[float, ...] | None = None,
 ) -> DuplicateFile:
     return DuplicateFile(
         file_id=file_id,
@@ -21,6 +22,7 @@ def make_file(
         width=width,
         height=height,
         phash=phash,
+        embedding=embedding,
     )
 
 
@@ -76,6 +78,7 @@ def test_scanner_honours_ratio_and_cosine_thresholds() -> None:
             width=100,
             height=100,
             phash=base_hash,
+            embedding=(0.9, 0.1),
         ),
         make_file(
             3,
@@ -84,6 +87,7 @@ def test_scanner_honours_ratio_and_cosine_thresholds() -> None:
             width=200,
             height=200,
             phash=base_hash ^ 0x1,
+            embedding=(0.89, 0.11),
         ),
         make_file(
             4,
@@ -92,6 +96,7 @@ def test_scanner_honours_ratio_and_cosine_thresholds() -> None:
             width=200,
             height=200,
             phash=base_hash ^ 0x2,
+            embedding=(0.88, 0.12),
         ),
         make_file(
             5,
@@ -100,9 +105,12 @@ def test_scanner_honours_ratio_and_cosine_thresholds() -> None:
             width=200,
             height=200,
             phash=base_hash ^ 0x3,
+            embedding=(-0.5, 0.3),
         ),
     ]
-    scanner = DuplicateScanner(DuplicateScanConfig(hamming_threshold=4, size_ratio=0.5))
+    scanner = DuplicateScanner(
+        DuplicateScanConfig(hamming_threshold=4, size_ratio=0.5, cosine_threshold=0.9)
+    )
     clusters = scanner.build_clusters(files)
     assert len(clusters) == 1
     ids = {entry.file.file_id for entry in clusters[0].files}
