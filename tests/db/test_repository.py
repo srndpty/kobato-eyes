@@ -7,7 +7,10 @@ from typing import Iterator
 
 import pytest
 
+import db.repository as repository_mod
 from db.connection import get_conn
+from db.files import bulk_update_files_meta_by_id as files_bulk_update
+from db.fts import fts_replace_rows as fts_replace
 from db.repository import (
     iter_files_for_dup,
     mark_files_absent,
@@ -17,6 +20,7 @@ from db.repository import (
     upsert_signatures,
     upsert_tags,
 )
+from db.tags import upsert_tags as tags_upsert
 from db.schema import apply_schema
 
 
@@ -191,3 +195,9 @@ def test_iter_files_for_dup_and_mark_absent(memory_conn: sqlite3.Connection) -> 
     assert updated == 1
     status = memory_conn.execute("SELECT is_present FROM files WHERE id = ?", (present_id,)).fetchone()
     assert status is not None and status["is_present"] == 0
+
+
+def test_repository_module_reexports() -> None:
+    assert repository_mod.upsert_tags is tags_upsert
+    assert repository_mod.bulk_update_files_meta_by_id is files_bulk_update
+    assert repository_mod.fts_replace_rows is fts_replace

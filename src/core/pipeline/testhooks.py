@@ -43,12 +43,8 @@ def default_loader_factory(paths: List[str], tagger, batch_size: int, prefetch_b
     )
 
 
-class IDBWriterLike:
-    def start(self) -> None: ...
-    def raise_if_failed(self) -> None: ...
-    def put(self, item: DBItem) -> None: ...
-    def qsize(self) -> int: ...
-    def stop(self, *, flush: bool, wait_forever: bool) -> None: ...
+class IDBWriterLike(DBWriteQueue):
+    """Backwards compatible alias for DB writing queues."""
 
 
 def default_dbwriter_factory(
@@ -75,6 +71,12 @@ def default_dbwriter_factory(
     )
 
 
+def _default_conn_factory(db_path: str):
+    from db.connection import get_conn
+
+    return get_conn(db_path, allow_when_quiesced=True)
+
+
 @dataclass
 class TaggingDeps:
     """TaggingStage のテスト容易性のための依存集合（デフォルトは実運用実装）。"""
@@ -82,6 +84,7 @@ class TaggingDeps:
     loader_factory: LoaderFactory = default_loader_factory
     dbwriter_factory: DBWriterFactory = default_dbwriter_factory
     quiesce: IQuiesceCtrl = _DefaultQuiesceCtrl()
+    conn_factory: Callable[[str], object] = _default_conn_factory
 
 
 __all__ = ["TaggingDeps", "IQuiesceCtrl", "IDBWriterLike", "default_loader_factory", "default_dbwriter_factory"]

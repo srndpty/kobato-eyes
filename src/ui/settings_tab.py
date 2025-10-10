@@ -29,6 +29,8 @@ from core.config import load_settings, save_settings
 from core.config import PipelineSettings, TaggerSettings
 from db.admin import reset_database
 from utils.paths import get_db_path
+from core.settings import PipelineSettings, TaggerSettings
+from ui.viewmodels import SettingsViewModel
 
 if TYPE_CHECKING:
     from core.pipeline import ProcessingPipeline
@@ -133,8 +135,15 @@ class SettingsTab(QWidget):
 
     settings_applied = pyqtSignal(PipelineSettings)
 
-    def __init__(self, parent: QWidget | None = None) -> None:
+    def __init__(
+        self,
+        parent: QWidget | None = None,
+        *,
+        view_model: SettingsViewModel | None = None,
+    ) -> None:
         super().__init__(parent)
+        self._view_model = view_model or SettingsViewModel(self)
+        self._view_model.settings_applied.connect(self.settings_applied.emit)
         self._roots_edit = QPlainTextEdit(self)
         self._roots_edit.setPlaceholderText("One path per line")
         self._excluded_edit = QPlainTextEdit(self)
@@ -191,13 +200,14 @@ class SettingsTab(QWidget):
         buttons.addWidget(apply_button)
         layout.addLayout(buttons)
 
-        self._current_settings: PipelineSettings = PipelineSettings()
+        self._current_settings: PipelineSettings = self._view_model.current_settings
         self._pipeline: ProcessingPipeline | None = None
         self._tags_tab: TagsTab | None = None
-        self._load_initial_settings()
+        self.load_settings(self._current_settings)
 
     def load_settings(self, settings: PipelineSettings) -> None:
         self._current_settings = settings
+        self._view_model.set_current_settings(settings)
         self._roots_edit.setPlainText("\n".join(str(path) for path in settings.roots))
         self._excluded_edit.setPlainText("\n".join(str(path) for path in settings.excluded))
 
@@ -210,30 +220,21 @@ class SettingsTab(QWidget):
         self._update_tagger_inputs(self._tagger_combo.currentText())
 
     def _emit_settings(self) -> None:
-        current = self._current_settings
+        current = self._current_settings or PipelineSettings()
         previous_tagger = current.tagger if current else TaggerSettings()
         tagger_name = self._tagger_combo.currentText()
         is_wd14 = tagger_name.lower() == "wd14-onnx"
         model_path_text = self._tagger_model_edit.text().strip()
         model_path = model_path_text if is_wd14 and model_path_text else None
-        tagger_settings = TaggerSettings(
-            name=tagger_name,
-            model_path=model_path,
-            tags_csv=previous_tagger.tags_csv if is_wd14 else None,
-            thresholds=dict(previous_tagger.thresholds),
-        )
-        settings = PipelineSettings(
+        settings = self._view_model.build_settings(
             roots=[Path(line) for line in self._lines(self._roots_edit) if line],
             excluded=[Path(line) for line in self._lines(self._excluded_edit) if line],
-            tagger=tagger_settings,
+            tagger_name=tagger_name,
+            model_path=model_path,
+            previous_tagger=previous_tagger,
         )
-        save_settings(settings)
         self._current_settings = settings
-        self.settings_applied.emit(settings)
-
-    def _load_initial_settings(self) -> None:
-        settings = load_settings()
-        self.load_settings(settings)
+        self._view_model.apply_settings(settings)
 
     @staticmethod
     def _lines(edit: QPlainTextEdit) -> Iterable[str]:
@@ -252,7 +253,7 @@ class SettingsTab(QWidget):
         self._tags_tab = tags_tab
 
     def _on_reset_database(self) -> None:
-        db_path = get_db_path()
+        db_path = self._view_model.db_path
         dialog = ResetDatabaseDialog(db_path, self)
         if dialog.exec() != int(QDialog.DialogCode.Accepted):
             return
@@ -278,9 +279,8 @@ class SettingsTab(QWidget):
             self._tags_tab.prepare_for_database_reset()
 
         try:
-            result = reset_database(db_path, backup=backup)
+            result = self._view_model.reset_database(backup=backup)
         except Exception as exc:
-            logger.exception("Database reset failed for %s", db_path)
             if self._tags_tab is not None:
                 self._tags_tab.restore_connection()
             QMessageBox.critical(
@@ -319,20 +319,7 @@ class SettingsTab(QWidget):
             self._tagger_model_edit.setText(file_path)
 
     def _on_check_tagger_env(self) -> None:
-        try:
-            from tagger import wd14_onnx
-
-            providers = wd14_onnx.get_available_providers()
-        except RuntimeError as exc:
-            message = str(exc)
-            logger.warning("Tagger environment check failed: %s", exc)
-        else:
-            if providers:
-                joined = ", ".join(providers)
-            else:
-                joined = "<none>"
-            message = f"ONNX providers: {joined}"
-            logger.info("Available ONNX providers: %s", joined)
+        message = self._view_model.check_tagger_environment()
         self._show_environment_message(message)
 
     def _show_environment_message(self, message: str) -> None:

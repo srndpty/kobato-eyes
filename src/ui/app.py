@@ -9,6 +9,7 @@ from logging.handlers import RotatingFileHandler
 
 from utils.env import is_headless
 from utils.paths import ensure_dirs, get_app_paths, migrate_data_dir_if_needed
+from utils.paths import get_log_dir
 
 HEADLESS = is_headless()
 
@@ -97,6 +98,7 @@ else:
     from ui.dup_tab import DupTab
     from ui.settings_tab import SettingsTab
     from ui.tags_tab import TagsTab
+    from ui.viewmodels import MainViewModel
 
     def _install_crash_handlers():
         import atexit
@@ -156,30 +158,10 @@ else:
 
         atexit.register(lambda: f.write(f"\n==== process exit {time.ctime()} ====\n") or f.flush())
 
-    def _quick_settle_sqlite(db_path: str | os.PathLike) -> None:
-        try:
-            conn = get_conn(db_path)
-            try:
-                conn.execute("PRAGMA journal_mode=WAL")
-                conn.execute("PRAGMA busy_timeout=2000")
-                # まず PASSIVE で消化
-                conn.execute("PRAGMA wal_checkpoint(PASSIVE)")
-                # アイドルなら一気に 0 に（ダメでも害なし）
-                conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-                # FTS があれば軽く最適化（速い）
-                conn.execute("PRAGMA optimize")
-            finally:
-                conn.close()
-        except Exception:
-            # 起動ブロックは避けたいのでログだけで継続
-            import logging
-
-            logging.getLogger(__name__).exception("quick_settle_sqlite failed")
-
     class MainWindow(QMainWindow):
         """Main window presenting basic navigation tabs."""
 
-        def __init__(self) -> None:
+        def __init__(self, view_model: MainViewModel | None = None) -> None:
             super().__init__()
             migrate_data_dir_if_needed()
             ensure_dirs()
@@ -188,12 +170,16 @@ else:
             logger.info("DB at %s", db_path)
             _quick_settle_sqlite(db_path)
             bootstrap_if_needed(db_path)
+            self._view_model = view_model or MainViewModel(self)
+            self._tags_view_model = self._view_model.create_tags_view_model(self)
+            self._dup_view_model = self._view_model.create_dup_view_model(self)
+            self._settings_view_model = self._view_model.create_settings_view_model(self)
             self.setWindowTitle("kobato-eyes")
             self._tabs = QTabWidget()
-            self._tags_tab = TagsTab(self)
-            self._dup_tab = DupTab(self)
-            self._settings_tab = SettingsTab(self)
-            self._settings_tab.settings_applied.connect(self._on_settings_applied)
+            self._tags_tab = TagsTab(self, view_model=self._tags_view_model)
+            self._dup_tab = DupTab(self, view_model=self._dup_view_model)
+            self._settings_tab = SettingsTab(self, view_model=self._settings_view_model)
+            self._view_model.settings_changed.connect(self._tags_tab.reload_autocomplete)
             self._settings_tab.set_tags_tab(self._tags_tab)
             self._tabs.addTab(self._tags_tab, "Tags")
             self._tabs.addTab(self._dup_tab, "Duplicates")
@@ -211,9 +197,6 @@ else:
             log_dir = get_log_dir()
             log_dir.mkdir(parents=True, exist_ok=True)
             QDesktopServices.openUrl(QUrl.fromLocalFile(str(log_dir)))
-
-        def _on_settings_applied(self, settings: PipelineSettings) -> None:
-            self._tags_tab.reload_autocomplete(settings)
 
     def run() -> None:
         """Launch the kobato-eyes GUI application."""
