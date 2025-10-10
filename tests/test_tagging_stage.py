@@ -69,6 +69,23 @@ class FakeDBWriter(IDBWriterLike):
         pass
 
 
+class FakeWriteDeps:
+    def __init__(self, writer: IDBWriterLike) -> None:
+        self._writer = writer
+
+    def build_writer(self, *, ctx, progress_cb):
+        return self._writer
+
+    def begin_quiesce(self) -> None:
+        pass
+
+    def end_quiesce(self) -> None:
+        pass
+
+    def connect(self, db_path: str):
+        pass
+
+
 class NoopQuiesce(IQuiesceCtrl):
     def begin(self):
         pass
@@ -127,7 +144,7 @@ def test_tagging_stage_with_fakes():
         dbwriter_factory=lambda **kw: fake_db,
         quiesce=NoopQuiesce(),
     )
-    stage = TaggingStage(_ctx(), emitter, deps=deps)
+    stage = TaggingStage(_ctx(), emitter, deps=deps, writer_deps=FakeWriteDeps(fake_db))
     tagged, fts, _ = stage.run(recs)
 
     assert tagged == 2

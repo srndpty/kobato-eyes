@@ -17,7 +17,17 @@ def fts_delete_rows(conn: sqlite3.Connection, ids: Sequence[int]) -> None:
     if fts_is_contentless(conn):
         for block in chunk(ids, 300):
             values = ",".join(["('delete', ?)"] * len(block))
-            conn.execute(f"INSERT INTO fts_files(fts_files, rowid) VALUES {values}", list(block))
+            try:
+                conn.execute(f"INSERT INTO fts_files(fts_files, rowid) VALUES {values}", list(block))
+            except sqlite3.DatabaseError:
+                placeholders = ",".join(["?"] * len(block))
+                try:
+                    conn.execute(
+                        f"DELETE FROM fts_files WHERE rowid IN ({placeholders})",
+                        list(block),
+                    )
+                except sqlite3.DatabaseError:
+                    continue
     else:
         for block in chunk(ids, 900):
             placeholders = ",".join(["?"] * len(block))
@@ -33,7 +43,17 @@ def fts_replace_rows(conn: sqlite3.Connection, rows: Sequence[tuple[int, str]]) 
         for block in chunk(rows, 300):
             ids = [rid for rid, _ in block]
             values = ",".join(["('delete', ?)"] * len(ids))
-            conn.execute(f"INSERT INTO fts_files(fts_files, rowid) VALUES {values}", ids)
+            try:
+                conn.execute(f"INSERT INTO fts_files(fts_files, rowid) VALUES {values}", ids)
+            except sqlite3.DatabaseError:
+                placeholders = ",".join(["?"] * len(ids))
+                try:
+                    conn.execute(
+                        f"DELETE FROM fts_files WHERE rowid IN ({placeholders})",
+                        ids,
+                    )
+                except sqlite3.DatabaseError:
+                    continue
         for block in chunk(rows, 400):
             flat: list[object] = []
             for rid, text in block:
