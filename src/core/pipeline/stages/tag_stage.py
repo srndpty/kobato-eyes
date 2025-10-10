@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Iterable, Protocol
 
 import numpy as np
+from PIL import Image
 
 from core.db_writer import DBItem
 from core.pipeline.types import IndexPhase, IndexProgress, PipelineContext, ProgressEmitter, _FileRecord
@@ -149,7 +150,11 @@ class TagStage:
 
         loader = self._deps.loader_factory(tag_paths, tagger, current_batch, prefetch_depth, io_workers)
 
+        supports_prepared = callable(getattr(tagger, "infer_batch_prepared", None))
+
         def _infer_prepared_with_retry(np_batch: np.ndarray):
+            if not supports_prepared:
+                raise AttributeError("Tagger does not implement infer_batch_prepared")
             try:
                 return tagger.infer_batch_prepared(
                     np_batch, thresholds=thresholds or None, max_tags=max_tags_map or None
@@ -204,9 +209,17 @@ class TagStage:
                 logger.info("PIPE batch=%d wait_batch=%.2fms loader_qsize=%d", len(rgb_list), wait_batch_ms, qsz)
 
                 try:
-                    results = _infer_prepared_with_retry(batch_np_rgb)
+                    if supports_prepared:
+                        results = _infer_prepared_with_retry(batch_np_rgb)
+                    else:
+                        pil_batch = [
+                            Image.fromarray(np.clip(arr, 0.0, 255.0).astype(np.uint8)) for arr in rgb_list
+                        ]
+                        results = tagger.infer_batch(
+                            pil_batch, thresholds=thresholds or None, max_tags=max_tags_map or None
+                        )
                 except Exception:
-                    logger.exception("Tagger failed for a prepared batch")
+                    logger.exception("Tagger failed for a prepared batch" if supports_prepared else "Tagger fallback inference failed")
                     continue
 
                 now_ts = time.time()
