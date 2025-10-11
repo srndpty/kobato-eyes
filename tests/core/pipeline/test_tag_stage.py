@@ -154,6 +154,9 @@ class _RetryingLoader:
 class _RetryingDeps(TagStageDeps):
     """Dependency provider that returns the retrying loader."""
 
+    def __init__(self) -> None:
+        self.batch_sizes: list[int] = []
+
     def loader_factory(
         self,
         paths: list[str],
@@ -162,6 +165,7 @@ class _RetryingDeps(TagStageDeps):
         prefetch_batches: int,
         io_workers: int | None,
     ) -> _RetryingLoader:
+        self.batch_sizes.append(batch_size)
         return _RetryingLoader(list(paths))
 
 
@@ -207,12 +211,13 @@ class _DummyTaggerSettings:
 
 
 class _DummySettings:
-    def __init__(self) -> None:
+    def __init__(self, *, batch_size: int = 8) -> None:
         self.tagger = _DummyTaggerSettings()
+        self.batch_size = batch_size
 
 
-def _make_context(tagger: ITagger) -> PipelineContext:
-    settings = _DummySettings()
+def _make_context(tagger: ITagger, *, batch_size: int = 8) -> PipelineContext:
+    settings = _DummySettings(batch_size=batch_size)
     return PipelineContext(
         db_path=":memory:",
         settings=settings,
@@ -258,3 +263,38 @@ def test_tag_stage_retries_failed_prepared_batches() -> None:
     assert progress_events[0][0] == IndexPhase.TAG
     assert progress_events[-1][1] == len(records)
     assert progress_events[-1][2] == len(records)
+
+
+def test_tag_stage_uses_configured_batch_size() -> None:
+    records = [
+        _FileRecord(
+            file_id=1,
+            path=Path("single.jpg"),
+            size=1,
+            mtime=time.time(),
+            sha="sha1",
+            is_new=True,
+            changed=False,
+            tag_exists=False,
+            needs_tagging=True,
+        )
+    ]
+    emitter = ProgressEmitter(lambda _p: None)
+
+    deps = _RetryingDeps()
+    tagger = _FlakyTagger()
+    stage = TagStage(deps=deps)
+    ctx = _make_context(tagger, batch_size=17)
+
+    stage.run(ctx, emitter, records)
+
+    assert deps.batch_sizes and deps.batch_sizes[0] == 17
+
+    deps = _RetryingDeps()
+    tagger = _FlakyTagger()
+    stage = TagStage(deps=deps)
+    ctx = _make_context(tagger, batch_size=0)
+
+    stage.run(ctx, emitter, records)
+
+    assert deps.batch_sizes and deps.batch_sizes[0] == 1
