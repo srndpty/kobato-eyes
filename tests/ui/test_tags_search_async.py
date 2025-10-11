@@ -16,6 +16,7 @@ from core.config import PipelineSettings
 from db.schema import apply_schema
 from ui.tags_tab import TagsTab
 from ui.viewmodels import TagsViewModel
+from tagger.labels_util import TagMeta
 
 pytestmark = pytest.mark.gui
 
@@ -72,7 +73,6 @@ def tags_tab(qapp: QApplication, populated_db: Path) -> Iterable[TagsTab]:
         search_chunk_size=1,
         search_chunk_delay=0.01,
     )
-    widget._bootstrap_results_if_any = lambda: None  # type: ignore[attr-defined]
     try:
         yield widget
     finally:
@@ -120,3 +120,26 @@ def test_async_search_cancel(tags_tab: TagsTab, qapp: QApplication) -> None:
     tags_tab._cancel_active_search()
     _await_idle(tags_tab, qapp)
     assert tags_tab._last_search_cancelled
+
+
+def test_bootstrap_shows_idle_status(tags_tab: TagsTab, qapp: QApplication) -> None:
+    assert _wait_for(
+        lambda: tags_tab._status_label.text() == "Enter a query to search tags.",  # type: ignore[attr-defined]
+        qapp,
+        timeout=1.0,
+    )
+    assert not tags_tab._search_busy  # type: ignore[attr-defined]
+    assert tags_tab._search_worker is None  # type: ignore[attr-defined]
+    assert tags_tab._table_model.rowCount() == 0  # type: ignore[attr-defined]
+
+
+def test_typing_does_not_trigger_search(tags_tab: TagsTab, qapp: QApplication) -> None:
+    _await_idle(tags_tab, qapp)
+    tags_tab._completion_candidates = [TagMeta(name="tag0", category=0)]  # type: ignore[attr-defined]
+    tags_tab._query_edit.setText("tag")  # type: ignore[attr-defined]
+    tags_tab._on_query_text_edited("tag")
+
+    assert _wait_for(lambda: tags_tab._search_worker is None, qapp, timeout=0.5)  # type: ignore[attr-defined]
+    assert not tags_tab._search_busy  # type: ignore[attr-defined]
+    assert tags_tab._table_model.rowCount() == 0  # type: ignore[attr-defined]
+

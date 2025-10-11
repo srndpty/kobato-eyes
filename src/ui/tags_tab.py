@@ -705,10 +705,6 @@ class TagsTab(QWidget):
         self._autocomplete_timer.setSingleShot(True)
         self._autocomplete_timer.setInterval(150)
         self._autocomplete_timer.timeout.connect(self._refresh_completions)
-        self._search_timer = QTimer(self)
-        self._search_timer.setSingleShot(True)
-        self._search_timer.setInterval(300)
-        self._search_timer.timeout.connect(self._execute_debounced_search)
         self._query_edit.textEdited.connect(self._on_query_text_edited)
         self._all_tags: list[labels_util.TagMeta] = []
         self._completion_candidates: list[labels_util.TagMeta] = []
@@ -1124,24 +1120,13 @@ class TagsTab(QWidget):
 
     def _bootstrap_results_if_any(self) -> None:
         if self._db_has_files():
-            self._current_query = "*"
-            self._current_where = "1=1"
-            self._current_params = []
-            self._search_reset_pending = True
-            self._offset = 0
-            self._search_received_any = False
-            self._highlight_terms = []
-            self._positive_terms = []
-            self._relevance_thresholds = {}
-            self._use_relevance = False
             self._debug_where.setText("WHERE: 1=1")
             self._debug_params.setText("Params: []")
             self._debug_group.setVisible(False)
             self._show_placeholder(False)
-            self._status_label.setText("Searching…")
-            self._search_overlay.show("Searching… (Esc to cancel)")
-            self._set_busy(True)
-            self._start_async_search(reset=True)
+            self._status_label.setText("Enter a query to search tags.")
+            self._search_overlay.hide()
+            self._set_busy(False)
         else:
             self._show_placeholder(True)
             self._status_label.setText("No results yet. Click 'Index now' to scan your library.")
@@ -1191,7 +1176,7 @@ class TagsTab(QWidget):
             self._hide_completion_popup()
             return
         self._autocomplete_timer.start()
-        self._search_timer.start()
+        # 自動検索は行わない（補完リフレッシュのみ）
 
     def _refresh_completions(self) -> None:
         if not self._completion_candidates:
@@ -1667,15 +1652,7 @@ class TagsTab(QWidget):
         if worker is not None:
             worker.cancel()
 
-    def _execute_debounced_search(self) -> None:
-        self._search_timer.stop()
-        query = self._query_edit.text().strip()
-        if query == (self._current_query or "") and not self._search_busy:
-            return
-        self._on_search_clicked()
-
     def _on_search_clicked(self) -> None:
-        self._search_timer.stop()
         query = self._query_edit.text().strip()
         positive_terms = self._view_model.extract_positive_terms(query) if query else []
         self._highlight_terms = list(positive_terms)
