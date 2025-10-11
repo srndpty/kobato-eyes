@@ -19,31 +19,43 @@ def bulk_upsert_files_meta(
         return
     for start in range(0, len(rows), chunk):
         block = rows[start : start + chunk]
-        flat: list[object] = []
+        ids = [int(row[0]) for row in block]
+        existing: set[int] = set()
+        if ids:
+            placeholders = ",".join(["?"] * len(ids))
+            rows_found = conn.execute(
+                f"SELECT id FROM files WHERE id IN ({placeholders})",
+                ids,
+            ).fetchall()
+            existing = {int(row[0]) for row in rows_found}
+
+        to_update: list[tuple[int | None, int | None, str | None, float | None, int]] = []
+        to_insert: list[object] = []
         for fid, width, height, sig, ts in block:
-            flat.extend((int(fid), width, height, sig, float(ts)))
-        values = ",".join(["(?, ?, ?, ?, ?)"] * (len(flat) // 5))
-        if coalesce_wh:
-            sql = (
-                "INSERT INTO files (id, width, height, tagger_sig, last_tagged_at) "
-                f"VALUES {values} "
-                "ON CONFLICT(id) DO UPDATE SET "
-                "  width        = COALESCE(excluded.width,  files.width), "
-                "  height       = COALESCE(excluded.height, files.height), "
-                "  tagger_sig   = excluded.tagger_sig, "
-                "  last_tagged_at = excluded.last_tagged_at"
+            fid_int = int(fid)
+            ts_float = float(ts)
+            if fid_int in existing:
+                to_update.append((width, height, sig, ts_float, fid_int))
+            else:
+                existing.add(fid_int)
+                to_insert.extend(
+                    (fid_int, f"__bulk__:{fid_int}", width, height, sig, ts_float)
+                )
+
+        if to_insert:
+            values = ",".join(["(?, ?, ?, ?, ?, ?)"] * (len(to_insert) // 6))
+            conn.execute(
+                "INSERT INTO files (id, path, width, height, tagger_sig, last_tagged_at) "
+                f"VALUES {values}",
+                to_insert,
             )
-        else:
-            sql = (
-                "INSERT INTO files (id, width, height, tagger_sig, last_tagged_at) "
-                f"VALUES {values} "
-                "ON CONFLICT(id) DO UPDATE SET "
-                "  width        = excluded.width, "
-                "  height       = excluded.height, "
-                "  tagger_sig   = excluded.tagger_sig, "
-                "  last_tagged_at = excluded.last_tagged_at"
+
+        if to_update:
+            bulk_update_files_meta_by_id(
+                conn,
+                to_update,
+                coalesce_wh=coalesce_wh,
             )
-        conn.execute(sql, flat)
 
 
 def bulk_update_files_meta_by_id(
