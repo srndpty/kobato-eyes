@@ -42,6 +42,16 @@ class DummyTagger(ITagger):
         return [TagResult(tags=predictions) for _ in images]
 
 
+class DummyIndexer:
+    def __init__(self) -> None:
+        self.calls: list[list[Path]] = []
+
+    def index_paths(self, paths: Iterable[Path]) -> Sequence[int]:
+        resolved = [Path(p) for p in paths]
+        self.calls.append(resolved)
+        return [idx for idx, _ in enumerate(resolved, start=1)]
+
+
 def _create_test_image(path: Path) -> None:
     Image.new("RGB", (16, 16), color=(200, 20, 20)).save(path, format="PNG")
 
@@ -55,7 +65,9 @@ def _wait_for_completion(manager: JobManager, app: QCoreApplication, timeout: fl
             raise TimeoutError("Jobs did not finish in time")
 
 
-def test_pipeline_processes_paths(tmp_path: Path, qapp: QCoreApplication) -> None:
+def test_pipeline_processes_paths_without_indexer(
+    tmp_path: Path, qapp: QCoreApplication
+) -> None:
     db_path = tmp_path / "kobato.db"
     conn = get_conn(db_path)
     apply_schema(conn)
@@ -82,5 +94,35 @@ def test_pipeline_processes_paths(tmp_path: Path, qapp: QCoreApplication) -> Non
     conn.close()
 
     assert any(row["name"] == "color:red" for row in tags)
+
+    pipeline.shutdown()
+
+
+def test_pipeline_calls_indexer(tmp_path: Path, qapp: QCoreApplication) -> None:
+    db_path = tmp_path / "kobato.db"
+    conn = get_conn(db_path)
+    apply_schema(conn)
+    conn.close()
+
+    image_path = tmp_path / "sample.png"
+    _create_test_image(image_path)
+
+    tagger = DummyTagger()
+    indexer = DummyIndexer()
+
+    manager = JobManager(max_workers=1)
+    pipeline = ProcessingPipeline(
+        db_path=db_path,
+        tagger=tagger,
+        job_manager=manager,
+        indexer=indexer,
+        settings=PipelineSettings(),
+    )
+
+    pipeline.enqueue_path(image_path)
+    _wait_for_completion(manager, qapp)
+
+    assert len(indexer.calls) == 1, "Indexer should be invoked exactly once"
+    assert indexer.calls[0][0] == image_path
 
     pipeline.shutdown()
