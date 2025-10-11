@@ -1009,16 +1009,10 @@ class TagsTab(QWidget):
     def eventFilter(self, obj, event):
         if obj is self._query_edit and event.type() == QEvent.Type.KeyPress:
             e: QKeyEvent = event  # type: ignore[assignment]
-            # try:
-            #     name = obj.objectName()
-            # except Exception:
-            #     name = obj.__class__.__name__
-            # print(f"[filter] obj={name} key={e.key()} popupVisible={self._completer.popup().isVisible()}")
 
             key = e.key()
             popup = self._completer.popup()
             popup_visible = bool(popup and popup.isVisible())
-            # print(f"event:{event}, key:{key}")
 
             # ↓↑ は completer に任せる（表示している時）。非表示なら通常動作
             if key in (Qt.Key.Key_Down, Qt.Key.Key_Up):
@@ -1226,7 +1220,7 @@ class TagsTab(QWidget):
             token, start, end = replace_completion_token.extract_completion_token(base_text, len(base_text))
 
         new_text, cursor = replace_completion_token(base_text, start, end, completion_text)
-        print(f"base_text:{base_text}, new_text:{new_text}, cursor:{cursor}")
+        logger.debug(f"base_text:{base_text}, new_text:{new_text}, cursor:{cursor}")
         block = self._query_edit.blockSignals(True)
         self._query_edit.setText(new_text)
         self._query_edit.blockSignals(block)

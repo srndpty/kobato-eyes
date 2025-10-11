@@ -65,6 +65,7 @@ class SettingsViewModel(QObject):
         *,
         roots: Iterable[Path],
         excluded: Iterable[Path],
+        batch_size: int,
         tagger_name: str,
         model_path: str | None,
         previous_tagger: TaggerSettings,
@@ -80,6 +81,7 @@ class SettingsViewModel(QObject):
         settings = PipelineSettings(
             roots=list(roots),
             excluded=list(excluded),
+            batch_size=batch_size,
             tagger=tagger_settings,
         )
         return settings

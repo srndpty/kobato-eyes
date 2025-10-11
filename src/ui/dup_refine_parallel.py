@@ -1,8 +1,13 @@
-# dup_refine_parallel.py
+"""Parallel refinement helpers for duplicate detection in the UI."""
+
+from __future__ import annotations
+
 import logging
 import os
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
+from threading import Lock
 
 import numpy as np
 from PIL import Image, ImageOps
@@ -50,6 +55,20 @@ def _norm_path(p: Path) -> Path:
         return Path(os.path.normcase(os.path.abspath(str(p))))
 
 
+def _format_failure_summary(
+    counts: Counter[str],
+    samples: dict[str, Path | None],
+) -> str:
+    parts: list[str] = []
+    for err, count in counts.items():
+        sample = samples.get(err)
+        if sample is None:
+            parts.append(f"{count}×{err}")
+        else:
+            parts.append(f"{count}×{err} (例: {sample})")
+    return "; ".join(parts)
+
+
 def refine_by_tilehash_parallel(
     clusters,
     grid=4,
@@ -73,12 +92,14 @@ def refine_by_tilehash_parallel(
     log.info("TileHash phase1: %d files, threads=%d", total1, io_workers)
     cache: dict[Path, int] = {}
     done = 0
+    failure_counts: Counter[str] = Counter()
+    failure_samples: dict[str, Path | None] = {}
 
     def _work(p: Path):
         return p, tile_ahash_bits(p, grid=grid, tile=tile)
 
     with ThreadPoolExecutor(max_workers=io_workers) as ex:
-        futs = [ex.submit(_work, p) for p in uniq_paths]
+        futs = {ex.submit(_work, p): p for p in uniq_paths}
         for f in as_completed(futs):
             if is_cancelled and is_cancelled():
                 for ff in futs:
@@ -87,11 +108,24 @@ def refine_by_tilehash_parallel(
             try:
                 p, sig = f.result()
                 cache[p] = sig
-            except Exception:
-                pass
+            except Exception as exc:  # pragma: no cover - exercised via summary logging
+                path = futs.get(f)
+                key = f"{type(exc).__name__}: {exc}"
+                failure_counts[key] += 1
+                if key not in failure_samples:
+                    failure_samples[key] = path
             done += 1
             if tick and (done % 64 == 0 or done == total1):
                 tick(done, total1, phase=1)
+
+    if failure_counts:
+        total_failures = sum(failure_counts.values())
+        summary = _format_failure_summary(failure_counts, failure_samples)
+        log.warning(
+            "TileHash phase1 skipped %d file(s) due to errors: %s",
+            total_failures,
+            summary,
+        )
 
     # --- phase 2: クラスタ絞り込み ---
     out = []
@@ -149,6 +183,15 @@ def refine_by_pixels_parallel(
     if workers is None:
         workers = min(8, (os.cpu_count() or 4))  # CPU寄りなのでスレッド数は控えめでもOK
 
+    keeper_failure_counts: Counter[str] = Counter()
+    keeper_failure_samples: dict[str, Path | None] = {}
+    entry_failure_counts: Counter[str] = Counter()
+    entry_failure_samples: dict[str, Path | None] = {}
+    keeper_lock = Lock()
+    entry_lock = Lock()
+    future_failure_counts: Counter[str] = Counter()
+    future_failure_samples: dict[str, Path | None] = {}
+
     def _process_cluster(cl):
         if is_cancelled and is_cancelled():
             return None
@@ -157,7 +200,11 @@ def refine_by_pixels_parallel(
             return None
         try:
             base = _load_small_gray(keep.file.path, size=thumb_size)
-        except Exception:
+        except Exception as exc:
+            key = f"{type(exc).__name__}: {exc}"
+            with keeper_lock:
+                keeper_failure_counts[key] += 1
+                keeper_failure_samples.setdefault(key, keep.file.path)
             return None
 
         oks = []
@@ -166,8 +213,11 @@ def refine_by_pixels_parallel(
                 img = _load_small_gray(e.file.path, size=thumb_size)
                 if _mae01(img, base) <= mae_thr:
                     oks.append(e)
-            except Exception:
-                pass
+            except Exception as exc:
+                key = f"{type(exc).__name__}: {exc}"
+                with entry_lock:
+                    entry_failure_counts[key] += 1
+                    entry_failure_samples.setdefault(key, e.file.path)
         if len(oks) >= 2:
             return type(cl)(files=oks, keeper_id=cl.keeper_id)
         return None
@@ -175,7 +225,7 @@ def refine_by_pixels_parallel(
     out = []
     done = 0
     with ThreadPoolExecutor(max_workers=workers) as ex:
-        futs = [ex.submit(_process_cluster, cl) for cl in clusters]
+        futs = {ex.submit(_process_cluster, cl): cl for cl in clusters}
         for f in as_completed(futs):
             if is_cancelled and is_cancelled():
                 for ff in futs:
@@ -185,9 +235,39 @@ def refine_by_pixels_parallel(
                 r = f.result()
                 if r is not None:
                     out.append(r)
-            except Exception:
-                pass
+            except Exception as exc:  # pragma: no cover - exercised via summary logging
+                key = f"{type(exc).__name__}: {exc}"
+                future_failure_counts[key] += 1
+                future_failure_samples.setdefault(key, None)
             done += 1
             if tick and (done % 16 == 0 or done == total):
                 tick(done, total)
+
+    if future_failure_counts:
+        total_failures = sum(future_failure_counts.values())
+        summary = _format_failure_summary(future_failure_counts, future_failure_samples)
+        log.warning(
+            "Pixel MAE workers raised %d exception(s): %s",
+            total_failures,
+            summary,
+        )
+
+    if keeper_failure_counts:
+        total_failures = sum(keeper_failure_counts.values())
+        summary = _format_failure_summary(keeper_failure_counts, keeper_failure_samples)
+        log.warning(
+            "Pixel MAE skipped %d cluster(s) due to keeper load errors: %s",
+            total_failures,
+            summary,
+        )
+
+    if entry_failure_counts:
+        total_failures = sum(entry_failure_counts.values())
+        summary = _format_failure_summary(entry_failure_counts, entry_failure_samples)
+        log.warning(
+            "Pixel MAE excluded %d file(s) due to image load errors: %s",
+            total_failures,
+            summary,
+        )
+
     return out

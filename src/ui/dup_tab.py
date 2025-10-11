@@ -409,7 +409,7 @@ class _ThumbJob(QRunnable):
                 self._view_model.generate_thumbnail(self._path, self._cache_dir, size=self._size, format="WEBP")
             except Exception as e:
                 if DEBUG_THUMBS:
-                    print("thumb gen failed:", self._path, e)
+                    LOG.info("thumb gen failed:", self._path, e)
 
             # 直接 QImage を作る（GUIスレッドでの再デコードを避ける）
             with Image.open(self._path) as im:
@@ -419,16 +419,16 @@ class _ThumbJob(QRunnable):
                 qimg = ImageQt(im).copy()  # .copy() でバッファを独立させる
         except Exception as e:
             if DEBUG_THUMBS:
-                print("thumb worker error:", self._path, e)
+                LOG.info("thumb worker error:", self._path, e)
             qimg = None
         finally:
             try:
                 self._signals.done.emit(str(self._path), qimg)
                 if DEBUG_THUMBS:
-                    print("thumb emitted:", self._path, bool(qimg))
+                    LOG.info("thumb emitted:", self._path, bool(qimg))
             except Exception as e:
                 # ここに来ることはほぼ無いが保険
-                print("thumb emit failed:", e)
+                LOG.info("thumb emit failed:", e)
 
 
 class DupTab(QWidget):
@@ -927,7 +927,7 @@ class DupTab(QWidget):
         self._thumb_inflight.add(key)
         cache_dir = self._view_model.thumbnail_cache_dir()
         if DEBUG_THUMBS:
-            print(f"thumb enqueue: {key}")  # ← デバッグ
+            LOG.info(f"thumb enqueue: {key}")  # ← デバッグ
         job = _ThumbJob(
             self._view_model,
             path,
@@ -1074,7 +1074,7 @@ class DupTab(QWidget):
         self._thumb_done.add(path_str)
         self._maybe_start_more_thumbs()
         if DEBUG_THUMBS:
-            print(f"thumb applied: {path_str}")  # ← デバッグ
+            LOG.info(f"thumb applied: {path_str}")  # ← デバッグ
 
     def _update_action_states(self) -> None:
         has_clusters = bool(self._clusters)

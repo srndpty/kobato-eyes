@@ -144,7 +144,21 @@ class TagStage:
         rec_by_path: dict[str, _FileRecord] = {str(r.path): r for r in tag_records}
         tag_paths: list[str] = list(rec_by_path.keys())
         tag_paths.sort(key=self._sort_key)
-        current_batch = 32
+
+        configured_batch = getattr(settings, "batch_size", 32)
+        try:
+            current_batch = int(configured_batch)
+        except (TypeError, ValueError):
+            logger.warning(
+                "Invalid batch size configuration %r; falling back to default", configured_batch
+            )
+            current_batch = 32
+        if current_batch < 1:
+            logger.warning(
+                "Configured batch size %d is below 1; using minimum batch size of 1",
+                current_batch,
+            )
+            current_batch = 1
         prefetch_depth = int(os.environ.get("KE_PREFETCH_DEPTH", "128") or "128") or 128
         io_workers = int(os.environ.get("KE_IO_WORKERS", "12") or "12") or None
 

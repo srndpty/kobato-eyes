@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import logging
 import re
 import shlex
 from dataclasses import dataclass
 from typing import Mapping, Sequence
 
 from tagger.base import TagCategory
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -439,7 +442,7 @@ def translate_query(
     tokens = _tokenize(query)
     parser = _Parser(tokens)
     expr = parser.parse()
-    print(f"translate_query, tokens={tokens}, expr={expr}")
+    logger.debug(f"translate_query, tokens={tokens}, expr={expr}")
     return _build_sql(expr, file_alias=file_alias, thresholds=thresholds)
 
 
