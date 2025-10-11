@@ -102,3 +102,34 @@ def test_reset_database_with_backups(tmp_path: Path, monkeypatch: pytest.MonkeyP
         assert not original.exists()
 
     assert bootstrap_calls == [resolved_db_path]
+
+
+def test_reset_database_backup_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    db_path = tmp_path / "library.db"
+    wal_path = db_path.with_name("library.db-wal")
+    shm_path = db_path.with_name("library.db-shm")
+
+    for path in (db_path, wal_path, shm_path):
+        path.write_bytes(b"dummy")
+
+    error = OSError("no space left on device")
+
+    def _copy_backup(_path: Path, _suffix: str) -> Path:
+        raise error
+
+    bootstrap_calls: list[Path] = []
+
+    def _bootstrap(path: Path) -> None:
+        bootstrap_calls.append(path)
+
+    monkeypatch.setattr("db.admin._copy_backup", _copy_backup)
+    monkeypatch.setattr("db.connection.bootstrap_if_needed", _bootstrap)
+
+    with pytest.raises(OSError) as excinfo:
+        reset_database(db_path)
+
+    assert excinfo.value is error
+    assert bootstrap_calls == []
+
+    for path in (db_path, wal_path, shm_path):
+        assert path.exists()
