@@ -89,7 +89,7 @@ def test_run_tag_job_persists_predictions(memory_conn: sqlite3.Connection, tmp_p
 
     fts_row = memory_conn.execute(
         "SELECT rowid AS file_id FROM fts_files WHERE fts_files MATCH ?",
-        ("character:kobato",),
+        ("kobato",),
     ).fetchone()
     assert fts_row is not None
     assert fts_row["file_id"] == output.file_id
