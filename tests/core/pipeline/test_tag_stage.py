@@ -41,9 +41,7 @@ sys.modules.setdefault("core", _core_stub)
 
 _core_pipeline_stub = types.ModuleType("core.pipeline")
 _core_pipeline_stub.__path__ = [str(_repo_root / "src" / "core" / "pipeline")]
-_core_pipeline_stub.__spec__ = importlib.machinery.ModuleSpec(
-    "core.pipeline", loader=None, is_package=True
-)
+_core_pipeline_stub.__spec__ = importlib.machinery.ModuleSpec("core.pipeline", loader=None, is_package=True)
 sys.modules.setdefault("core.pipeline", _core_pipeline_stub)
 sys.modules.pop("core.pipeline.stages", None)
 
@@ -190,14 +188,7 @@ class _FlakyTagger(ITagger):
         if size > 1:
             raise RuntimeError("prepared batch too large")
         return [
-            TagResult(
-                tags=[
-                    TagPrediction(
-                        name="retry", score=0.99, category=TagCategory.GENERAL
-                    )
-                ]
-            )
-            for _ in range(size)
+            TagResult(tags=[TagPrediction(name="retry", score=0.99, category=TagCategory.GENERAL)]) for _ in range(size)
         ]
 
     def infer_batch(self, images, *, thresholds=None, max_tags=None):
@@ -290,11 +281,24 @@ def test_tag_stage_uses_configured_batch_size() -> None:
 
     assert deps.batch_sizes and deps.batch_sizes[0] == 17
 
+    # 1回目の実行で records[0].needs_tagging が False になっているため、
+    # 2回目は新しいレコードを作り直す
+    records = [
+        _FileRecord(
+            file_id=1,
+            path=Path("single.jpg"),
+            size=1,
+            mtime=time.time(),
+            sha="sha1",
+            is_new=True,
+            changed=False,
+            tag_exists=False,
+            needs_tagging=True,
+        )
+    ]
     deps = _RetryingDeps()
     tagger = _FlakyTagger()
     stage = TagStage(deps=deps)
     ctx = _make_context(tagger, batch_size=0)
-
     stage.run(ctx, emitter, records)
-
     assert deps.batch_sizes and deps.batch_sizes[0] == 1
