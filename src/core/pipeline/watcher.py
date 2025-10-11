@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Iterable, Optional, Set
+from typing import Iterable, Optional, Protocol, Sequence, Set
 
 from core.jobs import BatchJob, JobManager
 from core.scanner import DEFAULT_EXTENSIONS
@@ -29,6 +29,13 @@ else:  # pragma: no cover
 logger = logging.getLogger(__name__)
 
 
+class _Indexer(Protocol):
+    """Protocol describing the minimal interface for indexing paths."""
+
+    def index_paths(self, paths: Iterable[Path]) -> Sequence[int]:
+        """Index ``paths`` and return the indexed database identifiers."""
+
+
 class _FileProcessJob(BatchJob):
     def __init__(
         self,
@@ -37,11 +44,13 @@ class _FileProcessJob(BatchJob):
         db_path: Path,
         tagger: ITagger,
         tag_config: TagJobConfig,
+        indexer: _Indexer | None,
     ) -> None:
         super().__init__(list(paths))
         self._db_path = db_path
         self._tagger = tagger
         self._tag_config = tag_config
+        self._indexer = indexer
         self._conn = None
 
     def prepare(self) -> None:
@@ -52,7 +61,7 @@ class _FileProcessJob(BatchJob):
         return item
 
     def process_item(self, item: Path, loaded: Path) -> tuple[Path, Optional[int]] | None:
-        if self._conn is None or self._indexer is None:
+        if self._conn is None:
             logger.error("Job not prepared before processing")
             return None
         if not loaded.exists():
@@ -64,6 +73,9 @@ class _FileProcessJob(BatchJob):
             logger.exception("Tagging failed for %s", loaded)
             return None
         file_id = output.file_id if output else None
+        if self._indexer is None:
+            logger.debug("Indexer not configured; skipping duplicate indexing for %s", loaded)
+            return (loaded, file_id)
         try:
             indexed_ids = self._indexer.index_paths([loaded])
             if indexed_ids and file_id is None:
@@ -97,6 +109,7 @@ class ProcessingPipeline(QObject):
         db_path: Path,
         tagger: ITagger,
         job_manager: JobManager,
+        indexer: _Indexer | None = None,
         settings: PipelineSettings | None = None,
     ) -> None:
         super().__init__()
@@ -108,6 +121,7 @@ class ProcessingPipeline(QObject):
         self._db_path = resolved_db
         self._tagger = tagger
         self._job_manager = job_manager
+        self._indexer = indexer
         self._settings = settings or PipelineSettings()
         self._scheduled: Set[Path] = set()
         self._tag_config = TagJobConfig()
@@ -144,7 +158,12 @@ class ProcessingPipeline(QObject):
     def enqueue_path(self, path: Path) -> None:
         self.enqueue_index([path])
 
-    def enqueue_index(self, paths: Iterable[Path]) -> None:
+    def enqueue_index(
+        self,
+        paths: Iterable[Path],
+        *,
+        indexer: _Indexer | None = None,
+    ) -> None:
         bootstrap_if_needed(self._db_path)
         allow_exts = {ext.lower() for ext in (self._settings.allow_exts or DEFAULT_EXTENSIONS)}
         scheduled_now: set[Path] = set()
@@ -166,11 +185,13 @@ class ProcessingPipeline(QObject):
             return
         self._scheduled.update(scheduled_now)
         logger.debug("Scheduling processing for %d file(s)", len(resolved_paths))
+        active_indexer = indexer if indexer is not None else self._indexer
         job = _FileProcessJob(
             resolved_paths,
             db_path=self._db_path,
             tagger=self._tagger,
             tag_config=self._tag_config,
+            indexer=active_indexer,
         )
         signals = self._job_manager.submit(job)
 
