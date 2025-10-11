@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sqlite3
 import time
+from pathlib import Path
 from typing import Iterable
 from unittest import mock
 from unittest.mock import patch
@@ -13,6 +14,7 @@ import pytest
 pytest.importorskip("PyQt6.QtWidgets", reason="PyQt6 widgets required", exc_type=ImportError)
 from PyQt6.QtWidgets import QApplication
 
+from core.config import PipelineSettings
 from db.schema import apply_schema
 from tagger.wd14_onnx import ONNXRUNTIME_MISSING_MESSAGE
 from ui.tags_tab import TagsTab
@@ -33,6 +35,9 @@ def tags_tab(qapp: QApplication):
     apply_schema(conn)
     with patch("ui.tags_tab.get_conn", return_value=conn):
         widget = TagsTab()
+        widget._view_model.load_settings = mock.MagicMock(  # type: ignore[attr-defined]
+            return_value=PipelineSettings(roots=[str(Path.cwd())])
+        )
         try:
             yield widget
         finally:
