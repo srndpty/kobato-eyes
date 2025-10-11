@@ -21,8 +21,9 @@ sys.modules.pop("db", None)
 sys.modules.pop("db.schema", None)
 sys.modules.pop("db.repository", None)
 
+import core.pipeline.manual_refresh as manual_refresh
 from core.config import AppPaths, PipelineSettings
-from core.pipeline import scan_and_tag
+from core.pipeline.manual_refresh import scan_and_tag
 from db.connection import get_conn
 from db.repository import replace_file_tags, upsert_file, upsert_tags
 from utils import paths
@@ -56,9 +57,7 @@ def test_scan_and_tag_missing_root_returns_empty_stats(tmp_path: Path) -> None:
     }
 
 
-def test_scan_and_tag_unsupported_extension_returns_early(
-    temp_env: Path, tmp_path: Path
-) -> None:
+def test_scan_and_tag_unsupported_extension_returns_early(temp_env: Path, tmp_path: Path) -> None:
     root = tmp_path / "library"
     root.mkdir()
     unsupported = root / "note.txt"
@@ -74,9 +73,7 @@ def test_scan_and_tag_unsupported_extension_returns_early(
     assert stats["elapsed_sec"] >= 0.0
 
 
-def test_scan_and_tag_deduplicates_paths(
-    temp_env: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_scan_and_tag_deduplicates_paths(temp_env: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     root = tmp_path / "library"
     root.mkdir()
     image_path = root / "untagged.png"
@@ -105,8 +102,8 @@ def test_scan_and_tag_deduplicates_paths(
         call_args.append(Path(args[1]))
         return object()
 
-    monkeypatch.setattr("core.pipeline.manual_refresh.run_tag_job", fake_run_tag_job)
-    monkeypatch.setattr("core.pipeline.manual_refresh._resolve_tagger", lambda *a, **k: object())
+    monkeypatch.setattr(manual_refresh, "run_tag_job", fake_run_tag_job)
+    monkeypatch.setattr(manual_refresh, "_resolve_tagger", lambda *a, **k: object())
 
     stats = scan_and_tag(root)
 
