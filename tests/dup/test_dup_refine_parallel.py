@@ -10,12 +10,7 @@ import pytest
 pytest.importorskip("PIL")
 from PIL import Image
 
-from ui.dup_refine_parallel import (
-    refine_by_pixels_parallel,
-    refine_by_tilehash_parallel,
-    tile_ahash_bits,
-    tile_hamming,
-)
+from ui.dup_refine_parallel import refine_by_pixels_parallel, refine_by_tilehash_parallel, tile_ahash_bits, tile_hamming
 
 
 @dataclass
@@ -46,9 +41,15 @@ def _save_split_image(path: Path, light: int = 230, dark: int = 20, size: int = 
     """Create a grayscale image whose top half is bright and bottom half is dark."""
 
     image = Image.new("L", (size, size), color=dark)
-    for y in range(size // 2):
+    px = image.load()
+    half = size // 2
+    for y in range(half):
         for x in range(size):
-            image.putpixel((x, y), light)
+            px[x, y] = light
+    # ★ 回転で位置が変わる縦ストライプ（2px）を追加して非一様にする
+    for y in range(size):
+        px[0, y] = light
+        px[1, y] = light
     image.save(path, format="PNG")
 
 
@@ -58,10 +59,15 @@ def _save_tile_variant(path: Path, source: Path, color: int = 255) -> None:
     with Image.open(source) as image:
         variant = image.copy()
     width, height = variant.size
-    tile_size = width // 4
-    for y in range(height - tile_size, height):
-        for x in range(width - tile_size, width):
-            variant.putpixel((x, y), color)
+    grid = 4
+    tile_size = width // grid  # 8 (32x32 の時)
+    x0 = width - tile_size
+    y0 = height - tile_size
+    px = variant.load()
+    # ★ タイル全体ではなく、右下タイルの左上 4x4 だけ明るくする
+    for y in range(y0, y0 + tile_size // 2):
+        for x in range(x0, x0 + tile_size // 2):
+            px[x, y] = color
     variant.save(path, format="PNG")
 
 
@@ -119,7 +125,11 @@ def test_refine_by_tilehash_parallel_threshold_and_callbacks(tmp_path: Path) -> 
 
     _save_split_image(base_path)
     _save_rotated(rotated_path, base_path)
-    _save_tile_variant(variant_path, base_path)
+    # max_bits=0 で {1,2} が残ることを確認したいので、variant は完全コピーにする
+    _copy_image(variant_path, base_path)
+    # 期待形: variant はタイルハッシュ完全一致、rotated は不一致
+    assert tile_hamming(tile_ahash_bits(base_path), tile_ahash_bits(variant_path)) == 0
+    assert tile_hamming(tile_ahash_bits(base_path), tile_ahash_bits(rotated_path)) > 0
 
     cluster = DummyCluster(
         files=[
