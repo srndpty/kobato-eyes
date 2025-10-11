@@ -63,3 +63,42 @@ def test_reset_creates_empty_schema(tmp_path: Path) -> None:
         fresh.close()
 
     assert int(version) == CURRENT_SCHEMA_VERSION
+
+
+def test_reset_database_with_backups(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    db_path = tmp_path / "library.db"
+    wal_path = db_path.with_name("library.db-wal")
+    shm_path = db_path.with_name("library.db-shm")
+
+    for path in (db_path, wal_path, shm_path):
+        path.write_bytes(b"dummy")
+
+    resolved_db_path = db_path.resolve()
+    backup_suffix = "fixed-suffix"
+    monkeypatch.setattr("db.admin._format_backup_suffix", lambda: backup_suffix)
+
+    bootstrap_calls: list[Path] = []
+
+    def _bootstrap(path: Path) -> None:
+        bootstrap_calls.append(path)
+
+    monkeypatch.setattr("db.connection.bootstrap_if_needed", _bootstrap)
+
+    result = reset_database(db_path)
+
+    expected_backups = [
+        db_path.with_name(f"{db_path.name}.{backup_suffix}"),
+        wal_path.with_name(f"{wal_path.name}.{backup_suffix}"),
+        shm_path.with_name(f"{shm_path.name}.{backup_suffix}"),
+    ]
+
+    assert result["db"] == resolved_db_path
+    assert result["backup_paths"] == expected_backups
+
+    for backup_path in expected_backups:
+        assert backup_path.exists()
+
+    for original in (db_path, wal_path, shm_path):
+        assert not original.exists()
+
+    assert bootstrap_calls == [resolved_db_path]
