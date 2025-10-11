@@ -174,6 +174,7 @@ class FakeTagStage:
     def __init__(self) -> None:
         self.called = False
         self.received: list[_FileRecord] | None = None
+        self.called = False
 
     def run(self, ctx: PipelineContext, emitter, records):
         self.called = True
@@ -185,6 +186,7 @@ class FakeWriteStage:
     def __init__(self) -> None:
         self.called = False
         self.received = None
+        self.called = False
 
     def run(self, ctx: PipelineContext, emitter, tag_result):
         self.called = True
