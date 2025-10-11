@@ -1297,8 +1297,48 @@ class TagsTab(QWidget):
             self._stack.setCurrentWidget(target)
         self._update_control_states()
 
+    def _prepare_settings_for_index(
+        self, settings: PipelineSettings | None = None
+    ) -> PipelineSettings | None:
+        """Return usable settings when at least one scan root exists."""
+
+        try:
+            effective = settings or self._view_model.load_settings()
+        except Exception as exc:  # pragma: no cover - defensive logging
+            logger.exception("Failed to load pipeline settings")
+            QMessageBox.critical(
+                self,
+                "Indexing",
+                f"Failed to load pipeline settings:\n{exc}",
+            )
+            return None
+
+        raw_roots = [Path(root).expanduser() for root in effective.roots if root]
+        valid_roots = [root for root in raw_roots if root.exists()]
+        if valid_roots:
+            return effective
+
+        if raw_roots:
+            configured = "\n".join(f"• {root}" for root in raw_roots)
+            message = (
+                "None of the configured scan roots are available.\n"
+                "Update Settings → Roots to reference folders that exist.\n\n"
+                f"Configured roots:\n{configured}"
+            )
+        else:
+            message = (
+                "No scan roots are configured.\n"
+                "Open Settings → Roots and add at least one folder before indexing."
+            )
+
+        QMessageBox.warning(self, "Configure scan roots", message)
+        return None
+
     def _on_index_now(self) -> None:
         if self._indexing_active:
+            return
+        settings = self._prepare_settings_for_index()
+        if settings is None:
             return
         self._retag_active = False
         self._db_path = self._resolve_db_path()
@@ -1307,7 +1347,7 @@ class TagsTab(QWidget):
             self.prepare_for_database_reset()
         except Exception:
             pass
-        task = IndexRunnable(self._view_model, self._db_path)
+        task = IndexRunnable(self._view_model, self._db_path, settings=settings)
         self._start_indexing_task(task)
 
     def _run_retag(
@@ -1320,7 +1360,9 @@ class TagsTab(QWidget):
         if self._indexing_active:
             return
         self._db_path = self._resolve_db_path()
-        settings = self._view_model.load_settings()
+        settings = self._prepare_settings_for_index()
+        if settings is None:
+            return
         params_list = list(params or [])
 
         def _pre_run() -> dict[str, object]:
