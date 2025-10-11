@@ -25,7 +25,7 @@ def begin_quiesce() -> None:
     global _QUIESCE
     with _QUIESCE_LOCK:
         _QUIESCE = True
-    print("begin_quiesce()")
+    logger.info("begin_quiesce(): quiesce=%s", _QUIESCE)
 
 
 def end_quiesce() -> None:
@@ -33,7 +33,7 @@ def end_quiesce() -> None:
     global _QUIESCE
     with _QUIESCE_LOCK:
         _QUIESCE = False
-    print("end_quiesce()")
+    logger.info("end_quiesce(): quiesce=%s", _QUIESCE)
 
 
 def _ensure_indexes(conn: sqlite3.Connection) -> None:
