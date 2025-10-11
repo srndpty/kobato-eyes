@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import importlib.util
+import queue
 import sys
+import threading
+import time
 import types
 from dataclasses import dataclass
 from pathlib import Path
@@ -43,8 +46,10 @@ if "core.pipeline.contracts" not in sys.modules:
         spec.loader.exec_module(contracts_mod)
         pipeline_pkg.contracts = contracts_mod
 
+from core.pipeline.contracts import DBFlush, DBItem, DBStop
 from db.connection import get_conn
 from db.repository import upsert_file
+import services.db_writing as db_writing_module
 from services.db_writing import DBWritingService
 
 
@@ -121,6 +126,112 @@ def test_flush_batch_standard_inserts_tags_and_fts(tmp_path: Path) -> None:
         assert meta["last_tagged_at"] == pytest.approx(1234.5)
     finally:
         conn.close()
+
+
+def test_start_spawns_worker_and_processes_queue(monkeypatch: pytest.MonkeyPatch) -> None:
+    removed_items: list[object] = []
+
+    class _RecordingQueue(queue.Queue):
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            super().__init__(*args, **kwargs)
+
+        def get(self, block: bool = True, timeout: float | None = None) -> object:
+            item = super().get(block=block, timeout=timeout)
+            removed_items.append(item)
+            return item
+
+    monkeypatch.setattr(db_writing_module.queue, "Queue", _RecordingQueue)
+
+    start_evt = threading.Event()
+    flush_evt = threading.Event()
+    close_evt = threading.Event()
+    join_timeouts: list[float | None] = []
+    flush_calls: list[tuple[DBItem, ...]] = []
+
+    class _DummyConn:
+        def close(self) -> None:
+            close_evt.set()
+
+    def _fake_open_connection(self: DBWritingService) -> _DummyConn:
+        start_evt.set()
+        return _DummyConn()
+
+    def _fake_apply_pragmas(self: DBWritingService, conn: _DummyConn) -> None:  # noqa: ARG001
+        return None
+
+    def _fake_flush_batch(
+        self: DBWritingService,
+        conn: _DummyConn,  # noqa: ARG001
+        items: Sequence[DBItem],
+    ) -> None:
+        flush_calls.append(tuple(items))
+        flush_evt.set()
+
+    monkeypatch.setattr(DBWritingService, "_open_connection", _fake_open_connection)
+    monkeypatch.setattr(DBWritingService, "_apply_pragmas", _fake_apply_pragmas)
+    monkeypatch.setattr(DBWritingService, "_flush_batch", _fake_flush_batch)
+
+    service = DBWritingService("ignored.db", flush_chunk=10)
+
+    orig_put = service._queue.put
+
+    def _recording_put(item: object, block: bool = True, timeout: float | None = None) -> None:
+        orig_put(item, block=block, timeout=timeout)
+        if isinstance(item, DBFlush):
+            time.sleep(0.05)
+
+    monkeypatch.setattr(service._queue, "put", _recording_put)
+
+    orig_join = service._thread.join
+
+    def _join_wrapper(timeout: float | None = None) -> None:
+        join_timeouts.append(timeout)
+        orig_join(timeout=timeout)
+
+    monkeypatch.setattr(service._thread, "join", _join_wrapper)
+
+    service.start()
+    assert start_evt.wait(1.0)
+
+    item = DBItem(1, [("tag", 0.5, 0)], None, None, None, None)
+    service.put(item)
+
+    for _ in range(100):
+        if service.qsize() == 0:
+            break
+        time.sleep(0.01)
+    else:
+        service.stop(wait_forever=True)
+        pytest.fail("DBWritingService worker did not consume the queued DBItem in time")
+
+    service.stop(wait_forever=True)
+
+    assert flush_evt.wait(1.0)
+    assert flush_calls == [(item,)]
+    assert close_evt.wait(1.0)
+    assert service._stop_evt.is_set()
+    assert join_timeouts and all(timeout == 1.0 for timeout in join_timeouts)
+    assert [type(msg) for msg in removed_items[:3]] == [DBItem, DBFlush, DBStop]
+
+
+def test_stop_wait_forever_false_uses_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
+    service = DBWritingService("ignored.db")
+
+    join_timeouts: list[float | None] = []
+
+    class _DummyThread:
+        def join(self, timeout: float | None = None) -> None:
+            join_timeouts.append(timeout)
+
+        def is_alive(self) -> bool:
+            return False
+
+    service._thread = _DummyThread()  # type: ignore[assignment]
+
+    service.stop(wait_forever=False)
+
+    assert join_timeouts == [10.0]
+    assert service._stop_evt.is_set()
 
 
 def test_flush_batch_skips_fts_when_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
