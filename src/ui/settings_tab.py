@@ -20,6 +20,7 @@ from PyQt6.QtWidgets import (
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
+    QSpinBox,
     QToolTip,
     QVBoxLayout,
     QWidget,
@@ -144,6 +145,11 @@ class SettingsTab(QWidget):
         self._excluded_edit = QPlainTextEdit(self)
         self._excluded_edit.setPlaceholderText("Paths to ignore")
 
+        self._batch_size_spin = QSpinBox(self)
+        self._batch_size_spin.setRange(1, 512)
+        self._batch_size_spin.setValue(8)
+        self._batch_size_spin.setToolTip("Number of images processed per inference batch")
+
         self._device_combo = QComboBox(self)
         self._device_combo.addItem("Auto", "auto")
         self._device_combo.addItem("CUDA", "cuda")
@@ -181,6 +187,7 @@ class SettingsTab(QWidget):
         form = QFormLayout()
         form.addRow(QLabel("Roots"), self._roots_edit)
         form.addRow(QLabel("Excluded"), self._excluded_edit)
+        form.addRow("Batch size", self._batch_size_spin)
         form.addRow("Device", self._device_combo)
         form.addRow("Tagger", self._tagger_combo)
         form.addRow("Model path", tagger_model_row)
@@ -205,6 +212,7 @@ class SettingsTab(QWidget):
         self._view_model.set_current_settings(settings)
         self._roots_edit.setPlainText("\n".join(str(path) for path in settings.roots))
         self._excluded_edit.setPlainText("\n".join(str(path) for path in settings.excluded))
+        self._batch_size_spin.setValue(settings.batch_size)
 
         tagger_index = self._tagger_combo.findText(settings.tagger.name)
         if tagger_index >= 0:
@@ -224,6 +232,7 @@ class SettingsTab(QWidget):
         settings = self._view_model.build_settings(
             roots=[Path(line) for line in self._lines(self._roots_edit) if line],
             excluded=[Path(line) for line in self._lines(self._excluded_edit) if line],
+            batch_size=self._batch_size_spin.value(),
             tagger_name=tagger_name,
             model_path=model_path,
             previous_tagger=previous_tagger,

@@ -151,6 +151,7 @@ def test_settings_view_model_build_and_reset(tmp_path: Path) -> None:
     settings = view_model.build_settings(
         roots=[Path("/data")],
         excluded=[Path("/ignore")],
+        batch_size=16,
         tagger_name="wd14-onnx",
         model_path="/model.onnx",
         previous_tagger=previous,
@@ -159,6 +160,7 @@ def test_settings_view_model_build_and_reset(tmp_path: Path) -> None:
 
     assert [Path(p) for p in emitted[-1].roots] == [Path("/data")]
     assert Path(emitted[-1].tagger.model_path).name == "model.onnx"
+    assert emitted[-1].batch_size == 16
 
     message = view_model.check_tagger_environment()
     assert "ONNX providers" in message
