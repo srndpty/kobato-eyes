@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import base64
 import hashlib
 import sys
 from pathlib import Path
 
 import pytest
+
+pytest.importorskip("pydantic")
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 SRC_DIR = PROJECT_ROOT / "src"
@@ -36,6 +39,81 @@ def temp_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
 
 def _make_sha(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def test_scan_and_tag_missing_root_returns_empty_stats(tmp_path: Path) -> None:
+    missing_root = tmp_path / "does-not-exist"
+
+    stats = scan_and_tag(missing_root)
+
+    assert stats == {
+        "queued": 0,
+        "tagged": 0,
+        "elapsed_sec": 0.0,
+        "missing": 0,
+        "soft_deleted": 0,
+        "hard_deleted": 0,
+    }
+
+
+def test_scan_and_tag_unsupported_extension_returns_early(
+    temp_env: Path, tmp_path: Path
+) -> None:
+    root = tmp_path / "library"
+    root.mkdir()
+    unsupported = root / "note.txt"
+    unsupported.write_text("hello", encoding="utf-8")
+
+    stats = scan_and_tag(unsupported)
+
+    assert stats["queued"] == 0
+    assert stats["tagged"] == 0
+    assert stats["missing"] == 0
+    assert stats["soft_deleted"] == 0
+    assert stats["hard_deleted"] == 0
+    assert stats["elapsed_sec"] >= 0.0
+
+
+def test_scan_and_tag_deduplicates_paths(
+    temp_env: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "library"
+    root.mkdir()
+    image_path = root / "untagged.png"
+    png_bytes = base64.b64decode(
+        b"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR4nGNgYAAAAAMAASsJTYQAAAAASUVORK5CYII="
+    )
+    image_path.write_bytes(png_bytes)
+
+    db_path = paths.get_db_path()
+    conn = get_conn(db_path)
+    try:
+        stat_result = image_path.stat()
+        upsert_file(
+            conn,
+            path=str(image_path.resolve()),
+            size=stat_result.st_size,
+            mtime=stat_result.st_mtime,
+            sha256=_make_sha(image_path),
+        )
+    finally:
+        conn.close()
+
+    call_args: list[Path] = []
+
+    def fake_run_tag_job(*args, **kwargs):
+        call_args.append(Path(args[1]))
+        return object()
+
+    monkeypatch.setattr("core.pipeline.manual_refresh.run_tag_job", fake_run_tag_job)
+    monkeypatch.setattr("core.pipeline.manual_refresh._resolve_tagger", lambda *a, **k: object())
+
+    stats = scan_and_tag(root)
+
+    assert stats["queued"] == 1
+    assert stats["tagged"] == 1
+    assert len(call_args) == 1
+    assert call_args[0] == image_path.resolve()
 
 
 def test_scan_and_tag_soft_deletes_missing(temp_env: Path, tmp_path: Path) -> None:
