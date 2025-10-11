@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import sqlite3
+import sys
+from types import ModuleType, SimpleNamespace
 from typing import Iterator
 
 import pytest
@@ -80,6 +82,87 @@ def tagging_dataset(
     update_fts(memory_conn, second_file, "old text two")
 
     return memory_conn, {"first": first_file, "second": second_file}, tags
+
+
+def test_build_where_uses_thresholds(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Ensure thresholds are passed through when loading succeeds."""
+
+    conn = sqlite3.connect(":memory:")
+
+    def fake_load(connection: sqlite3.Connection) -> dict[int, float]:
+        assert connection is conn
+        return {1: 0.42}
+
+    def fake_translate(
+        query: str,
+        *,
+        file_alias: str,
+        thresholds: dict[int, float],
+    ) -> SimpleNamespace:
+        assert query == "score>0"
+        assert file_alias == "x"
+        assert thresholds == {1: 0.42}
+        return SimpleNamespace(where="x.score > ?", params=[0.5])
+
+    monkeypatch.setattr(repository_mod, "_load_tag_thresholds", fake_load)
+    stub_query_module = ModuleType("core.query")
+    stub_query_module.translate_query = fake_translate
+    stub_core_package = ModuleType("core")
+    stub_core_package.__path__ = []  # mark as package for submodule imports
+    stub_core_package.query = stub_query_module
+    monkeypatch.setitem(sys.modules, "core", stub_core_package)
+    monkeypatch.setitem(sys.modules, "core.query", stub_query_module)
+
+    try:
+        where, params = repository_mod.build_where_and_params_for_query(
+            conn,
+            "score>0",
+            alias_file="x",
+        )
+    finally:
+        conn.close()
+
+    assert where == "x.score > ?"
+    assert params == [0.5]
+
+
+def test_build_where_falls_back_on_threshold_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When loading thresholds fails, fall back to empty values."""
+
+    conn = sqlite3.connect(":memory:")
+
+    def fake_load(connection: sqlite3.Connection) -> dict[int, float]:
+        raise RuntimeError("thresholds unavailable")
+
+    def fake_translate(
+        query: str,
+        *,
+        file_alias: str,
+        thresholds: dict[int, float],
+    ) -> SimpleNamespace:
+        assert thresholds == {}
+        assert file_alias == "f"
+        return SimpleNamespace(where="  ", params=("value",))
+
+    monkeypatch.setattr(repository_mod, "_load_tag_thresholds", fake_load)
+    stub_query_module = ModuleType("core.query")
+    stub_query_module.translate_query = fake_translate
+    stub_core_package = ModuleType("core")
+    stub_core_package.__path__ = []  # mark as package for submodule imports
+    stub_core_package.query = stub_query_module
+    monkeypatch.setitem(sys.modules, "core", stub_core_package)
+    monkeypatch.setitem(sys.modules, "core.query", stub_query_module)
+
+    try:
+        where, params = repository_mod.build_where_and_params_for_query(conn, "")
+    finally:
+        conn.close()
+
+    assert where == "1=1"
+    assert isinstance(params, list)
+    assert params == ["value"]
 
 
 def test_repository_roundtrip(memory_conn: sqlite3.Connection) -> None:
