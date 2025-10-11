@@ -3,10 +3,17 @@ from __future__ import annotations
 import time
 
 import numpy as np
+from PIL import Image
 
 from core.pipeline.tagging import TaggingStage
 from core.pipeline.testhooks import IDBWriterLike, IQuiesceCtrl, TaggingDeps
-from core.pipeline.types import IndexPhase, PipelineContext, ProgressEmitter, _FileRecord
+from core.pipeline.types import (
+    IndexPhase,
+    IndexProgress,
+    PipelineContext,
+    ProgressEmitter,
+    _FileRecord,
+)
 from core.config import PipelineSettings
 from tagger.base import ITagger, TagCategory, TagPrediction, TagResult
 
@@ -26,6 +33,34 @@ class FakeTagger(ITagger):
         res = []
         for _ in range(B):
             res.append(TagResult(tags=[TagPrediction(name="unit_test_tag", score=0.99, category=TagCategory.GENERAL)]))
+        return res
+
+
+class FakeFallbackTagger:
+    def __init__(self) -> None:
+        self.seen_images: list[Image.Image] = []
+
+    def infer_batch(
+        self,
+        images,
+        *,
+        thresholds=None,
+        max_tags=None,
+    ) -> list[TagResult]:
+        self.seen_images = list(images)
+        res: list[TagResult] = []
+        for _img in self.seen_images:
+            res.append(
+                TagResult(
+                    tags=[
+                        TagPrediction(
+                            name="fallback_tag",
+                            score=0.75,
+                            category=TagCategory.GENERAL,
+                        )
+                    ]
+                )
+            )
         return res
 
 
@@ -94,7 +129,7 @@ class NoopQuiesce(IQuiesceCtrl):
         pass
 
 
-def _ctx():
+def _ctx(tagger_override: ITagger | None = None):
     s = PipelineSettings()
     s.tagger.name = "wd14-onnx"
     s.tagger.thresholds = {"general": 0.35}
@@ -104,7 +139,7 @@ def _ctx():
         thresholds={TagCategory.GENERAL: 0.35},
         max_tags_map={},
         tagger_sig="unittest:sig",
-        tagger_override=FakeTagger(),
+        tagger_override=tagger_override or FakeTagger(),
         progress_cb=None,
         is_cancelled=None,
     )
@@ -154,3 +189,65 @@ def test_tagging_stage_with_fakes():
     assert ids == [1, 2]
     # 進捗が少なくとも TAG フェーズで1回以上通知される
     assert any(ph == IndexPhase.TAG for (ph, _, _) in prog)
+
+
+class FakeRGBLoader:
+    def __init__(self, paths, *_, **__):
+        self._paths = list(paths)
+        self._done = False
+
+    def __iter__(self):
+        if self._done:
+            return iter(())
+        self._done = True
+        rgb_array = np.zeros((33, 65, 3), dtype=np.float32)
+        yield (self._paths, np.expand_dims(rgb_array, axis=0), [(1, 1)])
+
+    def close(self):
+        pass
+
+
+def test_tagging_stage_with_pil_fallback():
+    record = _FileRecord(
+        file_id=10,
+        path="fallback.jpg",
+        size=1,
+        mtime=time.time(),
+        sha="z",
+        is_new=True,
+        changed=False,
+        tag_exists=False,
+        needs_tagging=True,
+        width=None,
+        height=None,
+    )
+    progress_events: list[IndexProgress] = []
+    emitter = ProgressEmitter(lambda p: progress_events.append(p))
+    fake_db = FakeDBWriter()
+    fallback_tagger = FakeFallbackTagger()
+    deps = TaggingDeps(
+        loader_factory=lambda paths, tagger, B, depth, io: FakeRGBLoader(paths),
+        dbwriter_factory=lambda **kw: fake_db,
+        quiesce=NoopQuiesce(),
+    )
+    stage = TaggingStage(
+        _ctx(tagger_override=fallback_tagger),
+        emitter,
+        deps=deps,
+        writer_deps=FakeWriteDeps(fake_db),
+    )
+
+    tagged, fts, _ = stage.run([record])
+
+    assert tagged == 1
+    assert fts == 0
+    assert len(fake_db.items) == 1
+    db_item = fake_db.items[0]
+    assert db_item.width == 65
+    assert db_item.height == 33
+    assert db_item.tags == [("fallback_tag", 0.75, int(TagCategory.GENERAL))]
+    assert progress_events[0].phase == IndexPhase.TAG
+    assert progress_events[0].done == 0
+    assert progress_events[-1].done == 1
+    assert all(isinstance(img, Image.Image) for img in fallback_tagger.seen_images)
+    assert not hasattr(fallback_tagger, "infer_batch_prepared")
