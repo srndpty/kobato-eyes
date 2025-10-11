@@ -2,15 +2,16 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 import importlib.util
 import sys
 import types
+from dataclasses import dataclass
+from pathlib import Path
 from typing import Sequence
 
-from pathlib import Path
-
 import pytest
+
+from db.schema import apply_schema
 
 _THIS_FILE = Path(__file__).resolve()
 for _candidate in _THIS_FILE.parents:
@@ -60,6 +61,7 @@ class _TestDBItem:
 def _prepare_db(db_path: str, path: str) -> int:
     conn = get_conn(db_path)
     try:
+        apply_schema(conn)
         file_id = upsert_file(conn, path=path)
     finally:
         conn.close()
@@ -188,9 +190,7 @@ def test_flush_batch_unsafe_fast_merges_into_persistent(tmp_path: Path) -> None:
         conn.close()
 
 
-def test_flush_batch_triggers_checkpoint_when_wal_large(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
+def test_flush_batch_triggers_checkpoint_when_wal_large(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     db_path = tmp_path / "checkpoint.db"
     file_id = _prepare_db(str(db_path), "C:/images/checkpoint.png")
 
