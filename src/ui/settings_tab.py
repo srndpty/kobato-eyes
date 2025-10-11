@@ -106,7 +106,6 @@ class ResetDatabaseDialog(QDialog):
         layout = QVBoxLayout(self)
         layout.addWidget(description)
         layout.addWidget(self._backup_check)
-        layout.addWidget(self._purge_check)
         layout.addWidget(self._rescan_check)
         layout.addWidget(confirm_label)
         layout.addWidget(self._confirm_edit)
