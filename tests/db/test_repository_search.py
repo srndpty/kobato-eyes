@@ -5,7 +5,10 @@ from __future__ import annotations
 import pytest
 
 import sys
+import importlib.util
+from enum import IntEnum
 from pathlib import Path
+from types import ModuleType, SimpleNamespace
 
 SRC_DIR = Path(__file__).resolve().parents[2] / "src"
 if str(SRC_DIR) not in sys.path:
@@ -21,9 +24,42 @@ for module_name in (
 ):
     sys.modules.pop(module_name, None)
 
+CORE_DIR = SRC_DIR / "core"
+core_pkg = ModuleType("core")
+core_pkg.__path__ = [str(CORE_DIR)]
+sys.modules.setdefault("core", core_pkg)
+
+tagger_pkg = ModuleType("tagger")
+tagger_pkg.__path__ = []  # type: ignore[attr-defined]
+
+
+class _TagCategoryStub(IntEnum):
+    GENERAL = 0
+    CHARACTER = 1
+    RATING = 2
+    COPYRIGHT = 3
+    ARTIST = 4
+    META = 5
+
+
+tagger_base = ModuleType("tagger.base")
+tagger_base.TagCategory = _TagCategoryStub  # type: ignore[attr-defined]
+tagger_pkg.base = tagger_base  # type: ignore[attr-defined]
+
+sys.modules.setdefault("tagger", tagger_pkg)
+sys.modules.setdefault("tagger.base", tagger_base)
+
+query_spec = importlib.util.spec_from_file_location("core.query", CORE_DIR / "query.py")
+if query_spec is None or query_spec.loader is None:
+    raise RuntimeError("Failed to load core.query module for tests")
+core_query = importlib.util.module_from_spec(query_spec)
+sys.modules["core.query"] = core_query
+query_spec.loader.exec_module(core_query)
+core_pkg.query = core_query  # type: ignore[attr-defined]
+
 from core.query import translate_query
 from db.connection import get_conn
-from db.repository import search_files
+from db.repository import build_where_and_params_for_query, search_files
 from db.schema import apply_schema
 
 
@@ -154,3 +190,70 @@ def test_search_files_excludes_missing_records(conn) -> None:
     results = search_files(conn, "1=1", [])
 
     assert results == []
+
+
+def test_build_where_and_params_uses_thresholds(monkeypatch, conn) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_load_thresholds(connection):
+        captured["connection"] = connection
+        return {"general": 0.75}
+
+    def fake_translate(query, *, file_alias, thresholds):
+        captured["query"] = query
+        captured["alias"] = file_alias
+        captured["thresholds"] = thresholds
+        return SimpleNamespace(where="ft.score > ?", params=[0.5])
+
+    monkeypatch.setattr("db.repository._load_tag_thresholds", fake_load_thresholds)
+    monkeypatch.setattr("core.query.translate_query", fake_translate)
+
+    where, params = build_where_and_params_for_query(conn, "score>0.5", alias_file="files")
+
+    assert where == "ft.score > ?"
+    assert params == [0.5]
+    assert captured["connection"] is conn
+    assert captured["query"] == "score>0.5"
+    assert captured["alias"] == "files"
+    assert captured["thresholds"] == {"general": 0.75}
+
+
+def test_build_where_and_params_fallback_on_threshold_error(monkeypatch, conn) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_load_thresholds(_connection):
+        raise RuntimeError("boom")
+
+    def fake_translate(_query, *, file_alias, thresholds):
+        captured["alias"] = file_alias
+        captured["thresholds"] = thresholds
+        return SimpleNamespace(where="", params=None)
+
+    monkeypatch.setattr("db.repository._load_tag_thresholds", fake_load_thresholds)
+    monkeypatch.setattr("core.query.translate_query", fake_translate)
+
+    where, params = build_where_and_params_for_query(conn, "anything", alias_file="f")
+
+    assert where == "1=1"
+    assert params == []
+    assert captured["alias"] == "f"
+    assert captured["thresholds"] == {}
+
+
+@pytest.mark.parametrize("where_fragment", ["", "   "])
+def test_build_where_and_params_fallback_on_blank_fragment(monkeypatch, conn, where_fragment) -> None:
+    def fake_load_thresholds(connection):
+        return {"general": 0.3}
+
+    def fake_translate(_query, *, file_alias, thresholds):
+        assert thresholds == {"general": 0.3}
+        assert file_alias == "f"
+        return SimpleNamespace(where=where_fragment, params=[])
+
+    monkeypatch.setattr("db.repository._load_tag_thresholds", fake_load_thresholds)
+    monkeypatch.setattr("core.query.translate_query", fake_translate)
+
+    where, params = build_where_and_params_for_query(conn, "", alias_file="f")
+
+    assert where == "1=1"
+    assert params == []
