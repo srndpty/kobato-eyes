@@ -93,32 +93,23 @@ def _await_idle(tab: TagsTab, qapp: QApplication, timeout: float = 3.0) -> None:
     assert _wait_for(lambda: not tab._search_busy and tab._search_worker is None, qapp, timeout)
 
 
-def test_async_search_streams_results(tags_tab: TagsTab, qapp: QApplication) -> None:
+def test_async_search_returns_first_page_and_loads_more(tags_tab: TagsTab, qapp: QApplication) -> None:
     _await_idle(tags_tab, qapp)
-    tags_tab._search_timer.stop()
-    tags_tab._cancel_active_search()
-    _await_idle(tags_tab, qapp)
-
     tags_tab._query_edit.setText("test")  # type: ignore[attr-defined]
     tags_tab._on_search_clicked()
 
-    row_counts: list[int] = []
+    assert _wait_for(lambda: not tags_tab._search_busy and tags_tab._search_worker is None, qapp, timeout=4.0)
+    assert tags_tab._table_model.rowCount() == tags_tab._search_chunk_size  # type: ignore[attr-defined]
+    assert tags_tab._offset == tags_tab._search_chunk_size  # type: ignore[attr-defined]
+    assert tags_tab._can_load_more  # type: ignore[attr-defined]
+    assert tags_tab._status_label.text() == "Showing 1 result(s) for 'test'"  # type: ignore[attr-defined]
 
-    def record_count() -> None:
-        count = tags_tab._table_model.rowCount()  # type: ignore[attr-defined]
-        if not row_counts or row_counts[-1] != count:
-            row_counts.append(count)
-
-    assert _wait_for(
-        lambda: record_count() or (not tags_tab._search_busy and tags_tab._search_worker is None),
-        qapp,
-        timeout=4.0,
-    )
-    _await_idle(tags_tab, qapp)
-    record_count()
-
-    assert row_counts[-1] == 6
-    assert len([value for value in row_counts if value]) >= 2
+    tags_tab._on_load_more_clicked()
+    assert _wait_for(lambda: not tags_tab._search_busy and tags_tab._search_worker is None, qapp, timeout=4.0)
+    assert tags_tab._table_model.rowCount() == 2  # type: ignore[attr-defined]
+    assert tags_tab._offset == 2  # type: ignore[attr-defined]
+    assert tags_tab._status_label.text() == "Showing 2 result(s) for 'test'"  # type: ignore[attr-defined]
+    assert tags_tab._can_load_more  # type: ignore[attr-defined]
 
 
 def test_async_search_cancel(tags_tab: TagsTab, qapp: QApplication) -> None:
@@ -129,14 +120,3 @@ def test_async_search_cancel(tags_tab: TagsTab, qapp: QApplication) -> None:
     tags_tab._cancel_active_search()
     _await_idle(tags_tab, qapp)
     assert tags_tab._last_search_cancelled
-
-
-def test_async_search_indeterminate_when_count_disabled(tags_tab: TagsTab, qapp: QApplication) -> None:
-    _await_idle(tags_tab, qapp)
-    tags_tab._search_count_timeout = 0.0
-    tags_tab._query_edit.setText("no-count")  # type: ignore[attr-defined]
-    tags_tab._on_search_clicked()
-    assert _wait_for(lambda: tags_tab._table_model.rowCount() > 0, qapp, timeout=2.0)  # type: ignore[attr-defined]
-    assert not tags_tab._search_overlay.is_determinate()
-    _await_idle(tags_tab, qapp)
-    assert not tags_tab._search_overlay.isVisible()

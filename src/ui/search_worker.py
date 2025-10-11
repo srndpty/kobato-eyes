@@ -32,7 +32,6 @@ class SearchWorker(QObject):
     """Run tag searches against SQLite in a background thread."""
 
     chunkReady = pyqtSignal(list)
-    totalKnown = pyqtSignal(int)
     finished = pyqtSignal(bool, bool)
     error = pyqtSignal(str)
 
@@ -48,8 +47,6 @@ class SearchWorker(QObject):
         chunk: int = 200,
         offset: int = 0,
         max_rows: int | None = None,
-        include_total: bool = True,
-        count_timeout: float = 0.25,
         chunk_delay: float = 0.0,
     ) -> None:
         super().__init__()
@@ -66,13 +63,9 @@ class SearchWorker(QObject):
             max_rows=max_rows if max_rows is None else max(0, int(max_rows)),
         )
         self._db_path = str(Path(db_path))
-        self._include_total = bool(include_total)
-        self._count_timeout = max(0.0, float(count_timeout))
         self._chunk_delay = max(0.0, float(chunk_delay))
         self._cancel = threading.Event()
         self._connection: sqlite3.Connection | None = None
-        self._count_deadline: float | None = None
-        self._count_timed_out = False
 
     @pyqtSlot()
     def run(self) -> None:
@@ -90,10 +83,6 @@ class SearchWorker(QObject):
         conn.set_progress_handler(self._progress_handler, 10_000)
 
         try:
-            total = self._try_count_with_timeout(conn) if self._include_total else None
-            if total is not None:
-                self.totalKnown.emit(int(total))
-
             params = self._params
             emitted = 0
             offset = params.offset
@@ -124,10 +113,12 @@ class SearchWorker(QObject):
                 offset += len(rows)
                 if self._chunk_delay:
                     time.sleep(self._chunk_delay)
+                if params.max_rows is not None and emitted >= params.max_rows:
+                    break
                 if len(rows) < limit:
                     break
         except sqlite3.OperationalError as exc:
-            if "interrupted" in str(exc).lower() and (self._cancel.is_set() or self._count_timed_out):
+            if "interrupted" in str(exc).lower() and self._cancel.is_set():
                 self.finished.emit(False, True)
             else:
                 self.error.emit(str(exc))
@@ -143,8 +134,6 @@ class SearchWorker(QObject):
                 conn.close()
             finally:
                 self._connection = None
-                self._count_deadline = None
-                self._count_timed_out = False
 
     def cancel(self) -> None:
         """Signal the worker to stop as soon as possible."""
@@ -158,38 +147,7 @@ class SearchWorker(QObject):
                 pass
 
     def _progress_handler(self) -> int:
-        if self._cancel.is_set():
-            return 1
-        if self._count_deadline is not None and time.perf_counter() >= self._count_deadline:
-            self._count_timed_out = True
-            self._count_deadline = None
-            return 1
-        return 0
-
-    def _try_count_with_timeout(self, conn: sqlite3.Connection) -> int | None:
-        if self._count_timeout <= 0:
-            return None
-        self._count_timed_out = False
-        self._count_deadline = time.perf_counter() + self._count_timeout
-        cursor = conn.cursor()
-        try:
-            where_sql = self._params.where_sql.strip() or "1=1"
-            query = (
-                "SELECT COUNT(*) FROM files f "
-                "WHERE (" + where_sql + ") AND f.is_present = 1"
-            )
-            cursor.execute(query, self._params.params)
-            row = cursor.fetchone()
-            if row is None:
-                return 0
-            return int(row[0])
-        except sqlite3.OperationalError as exc:
-            if "interrupted" in str(exc).lower() and self._count_timed_out:
-                return None
-            raise
-        finally:
-            self._count_deadline = None
-            cursor.close()
+        return 1 if self._cancel.is_set() else 0
 
 
 __all__ = ["SearchWorker"]

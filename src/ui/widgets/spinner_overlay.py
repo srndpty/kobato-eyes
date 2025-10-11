@@ -7,7 +7,7 @@ from PyQt6.QtWidgets import QLabel, QProgressBar, QVBoxLayout, QWidget
 
 
 class SpinnerOverlay(QWidget):
-    """Display indeterminate or determinate progress above a widget."""
+    """Display an indeterminate progress indicator above a widget."""
 
     def __init__(self, parent: QWidget) -> None:
         super().__init__(parent)
@@ -20,9 +20,8 @@ class SpinnerOverlay(QWidget):
         self._message_label.setStyleSheet("color: white; font-weight: 500;")
         self._progress = QProgressBar(self)
         self._progress.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._progress.setTextVisible(True)
+        self._progress.setTextVisible(False)
         self._progress.setRange(0, 0)
-        self._progress.setFormat("%p%")
         layout = QVBoxLayout(self)
         layout.setContentsMargins(48, 48, 48, 48)
         layout.addStretch(1)
@@ -31,7 +30,6 @@ class SpinnerOverlay(QWidget):
         layout.addWidget(self._progress, 0, Qt.AlignmentFlag.AlignCenter)
         layout.addStretch(1)
         self.hide()
-        self._determinate = False
         parent.installEventFilter(self)
 
     def eventFilter(self, obj, event):  # type: ignore[override]
@@ -39,40 +37,20 @@ class SpinnerOverlay(QWidget):
             self.setGeometry(self.parentWidget().rect())
         return super().eventFilter(obj, event)
 
-    def show_indeterminate(self, message: str) -> None:
-        self._determinate = False
-        self._message_label.setText(message)
+    def show(self, message: str | None = None) -> None:  # type: ignore[override]
+        if message is not None:
+            self._message_label.setText(message)
         self._progress.setRange(0, 0)
-        self._progress.setFormat("%p%")
         self._progress.setValue(0)
         self._reposition()
-        self.show()
+        super().show()
         self.raise_()
 
-    def show_determinate(self, message: str, maximum: int) -> None:
-        self._determinate = True
+    def set_message(self, message: str) -> None:
         self._message_label.setText(message)
-        maximum = max(0, int(maximum))
-        self._progress.setRange(0, maximum if maximum > 0 else 1)
-        if maximum <= 0:
-            self._progress.setValue(0)
-        self._reposition()
-        self.show()
-        self.raise_()
 
-    def update_value(self, value: int) -> None:
-        if not self._determinate:
-            return
-        maximum = self._progress.maximum()
-        clamped = max(0, min(int(value), maximum))
-        self._progress.setValue(clamped)
-
-    def hide_overlay(self) -> None:
-        self.hide()
-        self._determinate = False
-
-    def is_determinate(self) -> bool:
-        return self._determinate
+    def hide(self) -> None:  # type: ignore[override]
+        super().hide()
 
     def _reposition(self) -> None:
         parent = self.parentWidget()
