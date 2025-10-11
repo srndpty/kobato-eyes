@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -10,7 +11,12 @@ import pytest
 pytest.importorskip("PIL")
 from PIL import Image
 
-from ui.dup_refine_parallel import refine_by_pixels_parallel, refine_by_tilehash_parallel, tile_ahash_bits, tile_hamming
+from ui.dup_refine_parallel import (
+    refine_by_pixels_parallel,
+    refine_by_tilehash_parallel,
+    tile_ahash_bits,
+    tile_hamming,
+)
 
 
 @dataclass
@@ -197,6 +203,64 @@ def test_refine_by_pixels_parallel_filters_and_callbacks(tmp_path: Path) -> None
     assert {entry.file.file_id for entry in refined[0].files} == {1, 2}
     assert ticks == [(1, 1)]
 
+
+def test_refine_by_tilehash_parallel_logs_failures(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    missing_path = tmp_path / "missing.png"
+    cluster = DummyCluster(files=[_make_entry(missing_path, 1)], keeper_id=1)
+
+    caplog.set_level(logging.WARNING, logger="ui.dup_refine")
+    refined = refine_by_tilehash_parallel([cluster])
+
+    assert refined == []
+
+    warnings = [rec for rec in caplog.records if rec.levelno == logging.WARNING]
+    assert warnings, "Expected a warning log for tilehash failures"
+    message = warnings[0].getMessage()
+    assert "TileHash phase1" in message
+    assert "FileNotFoundError" in message
+    assert str(missing_path) in message
+
+
+def test_refine_by_pixels_parallel_logs_failures(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    base_path = tmp_path / "base.png"
+    duplicate_path = tmp_path / "duplicate.png"
+    missing_keeper_path = tmp_path / "missing_keeper.png"
+    missing_member_path = tmp_path / "missing_member.png"
+
+    _save_split_image(base_path)
+    _copy_image(duplicate_path, base_path)
+
+    keeper_missing_cluster = DummyCluster(
+        files=[
+            _make_entry(missing_keeper_path, 10),
+            _make_entry(duplicate_path, 11),
+        ],
+        keeper_id=10,
+    )
+
+    member_missing_cluster = DummyCluster(
+        files=[
+            _make_entry(base_path, 20),
+            _make_entry(duplicate_path, 21),
+            _make_entry(missing_member_path, 22),
+        ],
+        keeper_id=20,
+    )
+
+    caplog.set_level(logging.WARNING, logger="ui.dup_refine")
+    refined = refine_by_pixels_parallel(
+        [keeper_missing_cluster, member_missing_cluster],
+        mae_thr=0.001,
+    )
+
+    assert len(refined) == 1
+    assert {entry.file.file_id for entry in refined[0].files} == {20, 21}
+
+    warning_messages = [rec.getMessage() for rec in caplog.records if rec.levelno == logging.WARNING]
+    assert any("keeper load errors" in msg for msg in warning_messages)
+    assert any(str(missing_keeper_path) in msg for msg in warning_messages)
+    assert any("image load errors" in msg for msg in warning_messages)
+    assert any(str(missing_member_path) in msg for msg in warning_messages)
 
 def test_refine_by_pixels_parallel_cancelled(tmp_path: Path) -> None:
     base_path = tmp_path / "base.png"
