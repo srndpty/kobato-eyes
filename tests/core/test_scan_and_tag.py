@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import sys
 from pathlib import Path
+from typing import Iterable
 
 import pytest
 
@@ -36,6 +37,75 @@ def temp_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
 
 def _make_sha(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def test_scan_and_tag_skips_missing_path(temp_env: Path, tmp_path: Path) -> None:
+    missing = tmp_path / "does-not-exist"
+
+    stats = scan_and_tag(missing)
+
+    assert stats == {
+        "queued": 0,
+        "tagged": 0,
+        "elapsed_sec": 0.0,
+        "missing": 0,
+        "soft_deleted": 0,
+        "hard_deleted": 0,
+    }
+
+
+def test_scan_and_tag_skips_unsupported_extension(temp_env: Path, tmp_path: Path) -> None:
+    unsupported = tmp_path / "note.txt"
+    unsupported.write_text("dummy")
+
+    stats = scan_and_tag(unsupported)
+
+    assert stats["queued"] == 0
+    assert stats["tagged"] == 0
+    assert stats["missing"] == 0
+    assert stats["soft_deleted"] == 0
+    assert stats["hard_deleted"] == 0
+    assert stats["elapsed_sec"] >= 0.0
+
+
+def test_scan_and_tag_deduplicates_candidates(
+    temp_env: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "library"
+    root.mkdir()
+    first = root / "first.png"
+    first.write_bytes(b"first")
+    second = root / "second.png"
+    second.write_bytes(b"second")
+
+    duplicates = [
+        (1, str(first)),
+        (2, str(first)),
+        (3, str(second)),
+    ]
+
+    monkeypatch.setattr(
+        "core.pipeline.manual_refresh.list_untagged_under_path",
+        lambda conn, pattern: duplicates,
+    )
+
+    def fake_iter_images(paths_in: Iterable[Path], excluded: list[Path], extensions: set[str]):
+        yield from (first, first, second)
+
+    monkeypatch.setattr("core.pipeline.manual_refresh.iter_images", fake_iter_images)
+    monkeypatch.setattr("core.pipeline.manual_refresh.get_file_by_path", lambda conn, literal: None)
+    monkeypatch.setattr(
+        "core.pipeline.manual_refresh._resolve_tagger",
+        lambda settings, *args, **kwargs: object(),
+    )
+    monkeypatch.setattr(
+        "core.pipeline.manual_refresh.run_tag_job",
+        lambda tagger, path_obj, conn, config=None: None,
+    )
+
+    stats = scan_and_tag(root, batch_size=1)
+
+    assert stats["queued"] == 2
 
 
 def test_scan_and_tag_soft_deletes_missing(temp_env: Path, tmp_path: Path) -> None:
