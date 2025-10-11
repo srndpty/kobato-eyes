@@ -19,6 +19,7 @@ from db.repository import (
     upsert_file,
     upsert_signatures,
     upsert_tags,
+    write_tagging_batch,
 )
 from db.schema import apply_schema
 from db.tags import upsert_tags as tags_upsert
@@ -33,6 +34,52 @@ def memory_conn() -> Iterator[sqlite3.Connection]:
         yield conn
     finally:
         conn.close()
+
+
+@pytest.fixture()
+def tagging_dataset(
+    memory_conn: sqlite3.Connection,
+) -> tuple[sqlite3.Connection, dict[str, int], dict[str, int]]:
+    """Seed files, tags, and FTS rows for write_tagging_batch tests."""
+
+    first_file = upsert_file(
+        memory_conn,
+        path="C:/images/first.png",
+        size=111,
+        mtime=11.0,
+        sha256="oldhash1",
+        width=640,
+        height=480,
+        tagger_sig="sig-old-1",
+        last_tagged_at=111.1,
+    )
+    second_file = upsert_file(
+        memory_conn,
+        path="C:/images/second.png",
+        size=222,
+        mtime=22.0,
+        sha256="oldhash2",
+        width=1024,
+        height=768,
+        tagger_sig="sig-old-2",
+        last_tagged_at=222.2,
+    )
+
+    tags = upsert_tags(
+        memory_conn,
+        [
+            {"name": "general:old", "category": 0},
+            {"name": "character:kobato", "category": 1},
+            {"name": "rating:safe", "category": 0},
+        ],
+    )
+
+    replace_file_tags(memory_conn, first_file, [(tags["general:old"], 0.25)])
+    replace_file_tags(memory_conn, second_file, [(tags["general:old"], 0.5)])
+    update_fts(memory_conn, first_file, "old text one")
+    update_fts(memory_conn, second_file, "old text two")
+
+    return memory_conn, {"first": first_file, "second": second_file}, tags
 
 
 def test_repository_roundtrip(memory_conn: sqlite3.Connection) -> None:
@@ -186,3 +233,97 @@ def test_repository_module_reexports() -> None:
     assert repository_mod.upsert_tags is tags_upsert
     assert repository_mod.bulk_update_files_meta_by_id is files_bulk_update
     assert repository_mod.fts_replace_rows is fts_replace
+
+
+def test_write_tagging_batch_updates_related_tables(
+    tagging_dataset: tuple[sqlite3.Connection, dict[str, int], dict[str, int]],
+) -> None:
+    conn, files, tags = tagging_dataset
+
+    count = write_tagging_batch(
+        conn,
+        [
+            {
+                "file_id": files["first"],
+                "file_meta": {
+                    "size": 333,
+                    "mtime": 3333.3,
+                    "sha256": "newhash1",
+                    "width": 800,
+                    "height": 600,
+                    "tagger_sig": "sig-new-1",
+                    "last_tagged_at": 9999.9,
+                },
+                "tags": [
+                    (tags["character:kobato"], 0.95),
+                    (tags["rating:safe"], 0.75),
+                ],
+                "fts_text": "kobato safe newtext",
+            },
+            {
+                "file_id": files["second"],
+                "file_meta": {
+                    "size": 444,
+                    "mtime": 4444.4,
+                    "sha256": "newhash2",
+                },
+                "tags": [],
+                "fts_text": None,
+            },
+        ],
+    )
+
+    assert count == 2
+
+    first_row = conn.execute(
+        "SELECT size, mtime, sha256, width, height, tagger_sig, last_tagged_at, is_present"
+        " FROM files WHERE id = ?",
+        (files["first"],),
+    ).fetchone()
+    assert first_row is not None
+    assert first_row["size"] == 333
+    assert first_row["mtime"] == pytest.approx(3333.3)
+    assert first_row["sha256"] == "newhash1"
+    assert first_row["width"] == 800
+    assert first_row["height"] == 600
+    assert first_row["tagger_sig"] == "sig-new-1"
+    assert first_row["last_tagged_at"] == pytest.approx(9999.9)
+    assert first_row["is_present"] == 1
+
+    second_row = conn.execute(
+        "SELECT size, mtime, sha256, width, height, tagger_sig, last_tagged_at, is_present"
+        " FROM files WHERE id = ?",
+        (files["second"],),
+    ).fetchone()
+    assert second_row is not None
+    assert second_row["size"] == 444
+    assert second_row["mtime"] == pytest.approx(4444.4)
+    assert second_row["sha256"] == "newhash2"
+    assert second_row["width"] == 1024
+    assert second_row["height"] == 768
+    assert second_row["tagger_sig"] == "sig-old-2"
+    assert second_row["last_tagged_at"] == pytest.approx(222.2)
+    assert second_row["is_present"] == 1
+
+    first_tag_rows = conn.execute(
+        "SELECT tag_id, score FROM file_tags WHERE file_id = ?",
+        (files["first"],),
+    ).fetchall()
+    assert len(first_tag_rows) == 2
+    first_scores = {row["tag_id"]: row["score"] for row in first_tag_rows}
+    assert tags["general:old"] not in first_scores
+    assert first_scores[tags["character:kobato"]] == pytest.approx(0.95)
+    assert first_scores[tags["rating:safe"]] == pytest.approx(0.75)
+
+    second_tag_rows = conn.execute(
+        "SELECT tag_id, score FROM file_tags WHERE file_id = ?",
+        (files["second"],),
+    ).fetchall()
+    assert second_tag_rows == []
+
+    first_match = conn.execute(
+        "SELECT rowid FROM fts_files WHERE fts_files MATCH ?",
+        ("kobato",),
+    ).fetchone()
+    assert first_match is not None
+    assert first_match["rowid"] == files["first"]
