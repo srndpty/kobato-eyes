@@ -6,7 +6,7 @@ from typing import Iterable, Optional, Set
 
 from core.jobs import BatchJob, JobManager
 from core.scanner import DEFAULT_EXTENSIONS
-from core.settings import PipelineSettings
+from core.config import PipelineSettings
 from core.tag_job import TagJobConfig, run_tag_job
 from db.connection import bootstrap_if_needed, get_conn
 from tagger.base import ITagger

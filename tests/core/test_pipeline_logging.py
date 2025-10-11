@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 
 from core.pipeline import _build_max_tags_map, _build_threshold_map, _resolve_tagger
-from core.settings import PipelineSettings, TaggerSettings
+from core.config import PipelineSettings, TaggerSettings
 
 
 def test_resolve_tagger_logs_active_choice(caplog) -> None:

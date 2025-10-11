@@ -14,6 +14,30 @@ from hypothesis import strategies as st
 from core.scanner import DEFAULT_EXTENSIONS, iter_images
 
 WINDOWS_INVALID_CHARS = '<>:"/\\|?*'
+WINDOWS_RESERVED_NAMES = {
+    "CON",
+    "PRN",
+    "AUX",
+    "NUL",
+    "COM1",
+    "COM2",
+    "COM3",
+    "COM4",
+    "COM5",
+    "COM6",
+    "COM7",
+    "COM8",
+    "COM9",
+    "LPT1",
+    "LPT2",
+    "LPT3",
+    "LPT4",
+    "LPT5",
+    "LPT6",
+    "LPT7",
+    "LPT8",
+    "LPT9",
+}
 ALLOWED_EXTENSIONS = ["jpg", "jpeg", "png", "gif", "bmp", "webp", "tiff"]
 
 pytest.importorskip("hypothesis")
@@ -73,6 +97,8 @@ def _valid_segment(text: str) -> bool:
     if text in {".", ".."}:
         return False
     if text[-1] in {" ", "."}:
+        return False
+    if text.rstrip(" .").upper() in WINDOWS_RESERVED_NAMES:
         return False
     if all(char.isspace() for char in text):
         return False

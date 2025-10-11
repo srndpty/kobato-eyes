@@ -7,7 +7,7 @@ import numpy as np
 from core.pipeline.tagging import TaggingStage
 from core.pipeline.testhooks import IDBWriterLike, IQuiesceCtrl, TaggingDeps
 from core.pipeline.types import IndexPhase, PipelineContext, ProgressEmitter, _FileRecord
-from core.settings import PipelineSettings
+from core.config import PipelineSettings
 from tagger.base import ITagger, TagCategory, TagPrediction, TagResult
 
 
@@ -69,6 +69,23 @@ class FakeDBWriter(IDBWriterLike):
         pass
 
 
+class FakeWriteDeps:
+    def __init__(self, writer: IDBWriterLike) -> None:
+        self._writer = writer
+
+    def build_writer(self, *, ctx, progress_cb):
+        return self._writer
+
+    def begin_quiesce(self) -> None:
+        pass
+
+    def end_quiesce(self) -> None:
+        pass
+
+    def connect(self, db_path: str):
+        pass
+
+
 class NoopQuiesce(IQuiesceCtrl):
     def begin(self):
         pass
@@ -87,6 +104,7 @@ def _ctx():
         thresholds={TagCategory.GENERAL: 0.35},
         max_tags_map={},
         tagger_sig="unittest:sig",
+        tagger_override=FakeTagger(),
         progress_cb=None,
         is_cancelled=None,
     )
@@ -126,7 +144,7 @@ def test_tagging_stage_with_fakes():
         dbwriter_factory=lambda **kw: fake_db,
         quiesce=NoopQuiesce(),
     )
-    stage = TaggingStage(_ctx(), emitter, deps=deps)
+    stage = TaggingStage(_ctx(), emitter, deps=deps, writer_deps=FakeWriteDeps(fake_db))
     tagged, fts, _ = stage.run(recs)
 
     assert tagged == 2

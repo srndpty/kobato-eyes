@@ -1,4 +1,4 @@
-"""Benchmark throughput of tagging, embedding, and search operations."""
+"""Benchmark throughput of tagging and search operations."""
 
 from __future__ import annotations
 
@@ -53,7 +53,6 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("images", nargs="+", type=Path, help="Image files to benchmark")
     parser.add_argument("--repeats", type=int, default=5, help="Number of benchmark iterations")
-    parser.add_argument("--model", default="clip-vit", help="Model name for embedder")
     parser.add_argument("--db", type=Path, default=Path("bench.db"), help="Temporary database path")
     args = parser.parse_args()
 

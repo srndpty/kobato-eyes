@@ -66,20 +66,15 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from core.config import load_settings
-from core.pipeline import IndexProgress, retag_all, retag_query, run_index_once, scan_and_tag
-from core.query import extract_positive_tag_terms, translate_query
-from core.settings import PipelineSettings
-from db.connection import get_conn
-from db.repository import _load_tag_thresholds, iter_paths_for_search, list_tag_names, search_files
+from core.config import PipelineSettings
+from core.pipeline import IndexProgress
 from tagger import labels_util
 from tagger.base import TagCategory
 from tagger.wd14_onnx import ONNXRUNTIME_MISSING_MESSAGE
 from ui.autocomplete import abbreviate_count, extract_completion_token, replace_completion_token
 from ui.tag_stats import TagStatsDialog
+from ui.viewmodels import TagsViewModel
 from utils.image_io import get_thumbnail
-from utils.paths import ensure_dirs, get_db_path
-from utils.search_export import make_export_dir
 
 logger = logging.getLogger(__name__)
 
@@ -112,9 +107,8 @@ _CATEGORY_KEY_LOOKUP = {
 }
 
 
-def _category_thresholds() -> dict[TagCategory, float]:
-    s = load_settings()
-    th = {k.lower(): float(v) for k, v in (s.tagger.thresholds or {}).items()}
+def _category_thresholds(settings: PipelineSettings) -> dict[TagCategory, float]:
+    th = {k.lower(): float(v) for k, v in (settings.tagger.thresholds or {}).items()}
 
     def get(name, default=0.0):
         return th.get(name, default)
@@ -217,8 +211,15 @@ class _CopySignals(QObject):
 
 # --- バックグラウンドコピー ---------------------------------------------
 class _CopyRunnable(QRunnable):
-    def __init__(self, db_path: Path, query: str, dest_dir: Path) -> None:
+    def __init__(
+        self,
+        view_model: TagsViewModel,
+        db_path: Path,
+        query: str,
+        dest_dir: Path,
+    ) -> None:
         super().__init__()
+        self._view_model = view_model
         self.db_path = db_path
         self.query = query
         self.dest_dir = dest_dir
@@ -239,8 +240,8 @@ class _CopyRunnable(QRunnable):
     def run(self) -> None:
         try:
             # 1) パス列挙
-            with get_conn(self.db_path) as conn:
-                paths = list(iter_paths_for_search(conn, self.query))
+            with self._view_model.open_connection(self.db_path) as conn:
+                paths = self._view_model.iter_paths_for_search(conn, self.query)
             total = len(paths)
             self.signals.progress.emit(0, total)
             ok = ng = 0
@@ -496,12 +497,14 @@ class IndexRunnable(QRunnable):
 
     def __init__(
         self,
+        view_model: TagsViewModel,
         db_path: Path,
         *,
         settings: PipelineSettings | None = None,
         pre_run: Callable[[], dict[str, object]] | None = None,
     ) -> None:
         super().__init__()
+        self._view_model = view_model
         self._db_path = Path(db_path)
         self._settings = settings
         self._pre_run = pre_run
@@ -529,7 +532,7 @@ class IndexRunnable(QRunnable):
             extra: dict[str, object] = {}
             if self._pre_run is not None:
                 extra = self._pre_run()
-            stats = run_index_once(
+            stats = self._view_model.run_index_once(
                 self._db_path,
                 settings=self._settings,
                 progress_cb=self._emit_progress,
@@ -553,6 +556,7 @@ class RefreshRunnable(QRunnable):
 
     def __init__(
         self,
+        view_model: TagsViewModel,
         folder: Path,
         *,
         recursive: bool = True,
@@ -560,6 +564,7 @@ class RefreshRunnable(QRunnable):
         hard_delete: bool = False,
     ) -> None:
         super().__init__()
+        self._view_model = view_model
         self._folder = Path(folder)
         self._recursive = recursive
         self._batch_size = batch_size
@@ -568,7 +573,7 @@ class RefreshRunnable(QRunnable):
 
     def run(self) -> None:  # noqa: D401
         try:
-            stats = scan_and_tag(
+            stats = self._view_model.scan_and_tag(
                 self._folder,
                 recursive=self._recursive,
                 batch_size=self._batch_size,
@@ -639,8 +644,14 @@ class TagsTab(QWidget):
     _PAGE_SIZE = 200
     _THUMB_SIZE = 128
 
-    def __init__(self, parent: QWidget | None = None) -> None:
+    def __init__(
+        self,
+        parent: QWidget | None = None,
+        *,
+        view_model: TagsViewModel | None = None,
+    ) -> None:
         super().__init__(parent)
+        self._view_model = view_model or TagsViewModel(self)
         self._query_edit = QLineEdit(self)
         self._query_edit.setPlaceholderText("Search tags…")
         self._tag_model = self.TagListModel(parent=self)
@@ -858,13 +869,13 @@ class TagsTab(QWidget):
         self._results_cache: list[dict[str, object]] = []
         self._tag_thresholds: dict[TagCategory, float] = {}
 
-        ensure_dirs()
-        self._db_display = str(get_db_path())
+        self._view_model.ensure_directories()
+        self._db_display = str(self._view_model.db_path)
         self._conn: sqlite3.Connection | None = None
         self._open_connection()
         self._db_path = self._resolve_db_path()
         self.destroyed.connect(self._close_connection)
-        self._update_thresholds(load_settings())
+        self._update_thresholds(self._view_model.load_settings())
 
         self._thumb_pool = QThreadPool(self)
         self._thumb_pool.setMaxThreadCount(min(4, self._thumb_pool.maxThreadCount()))
@@ -922,8 +933,8 @@ class TagsTab(QWidget):
 
         # 件数の事前確認（UI表示用）
         try:
-            with get_conn(self._db_path) as conn:
-                total = sum(1 for _ in iter_paths_for_search(conn, query))
+            with self._view_model.open_connection(self._db_path) as conn:
+                total = len(self._view_model.iter_paths_for_search(conn, query))
         except Exception as e:
             QMessageBox.critical(self, "Copy results", f"Failed to enumerate results:\n{e}")
             return
@@ -932,7 +943,7 @@ class TagsTab(QWidget):
             QMessageBox.information(self, "Copy results", "No results to copy.")
             return
 
-        dest = make_export_dir(query)
+        dest = self._view_model.make_export_dir(query)
         choice = QMessageBox.question(
             self,
             "Copy results",
@@ -943,7 +954,7 @@ class TagsTab(QWidget):
         if choice != QMessageBox.StandardButton.Yes:
             return
 
-        runnable = _CopyRunnable(self._db_path, query, dest)
+        runnable = _CopyRunnable(self._view_model, self._db_path, query, dest)
         runnable.signals.progress.connect(lambda cur, tot: self._status_label.setText(f"Copying… {cur}/{tot}"))
         runnable.signals.error.connect(lambda msg: QMessageBox.critical(self, "Copy results", msg))
 
@@ -1076,13 +1087,13 @@ class TagsTab(QWidget):
         QTimer.singleShot(0, apply)
 
     def _initialise_autocomplete(self) -> None:
-        settings = load_settings()
+        settings = self._view_model.load_settings()
         self.reload_autocomplete(settings)
 
     def _open_connection(self) -> None:
         if self._conn is not None:
             return
-        self._conn = get_conn(get_db_path())
+        self._conn = self._view_model.open_connection()
 
     def _db_has_files(self) -> bool:
         if self._conn is None:
@@ -1140,7 +1151,7 @@ class TagsTab(QWidget):
         self._pending_thumbs.clear()
         self._status_label.setText("Database reset. Run indexing to populate results.")
         self._show_placeholder(True)
-        self.reload_autocomplete(load_settings())
+        self.reload_autocomplete(self._view_model.load_settings())
 
     def restore_connection(self) -> None:
         self._open_connection()
@@ -1261,7 +1272,7 @@ class TagsTab(QWidget):
         db_tags: list[str] = []
         if self._conn is not None:
             try:
-                db_tags = list_tag_names(self._conn)
+                db_tags = self._view_model.list_tag_names(self._conn)
             except Exception as exc:  # pragma: no cover - defensive logging
                 logger.warning("Failed to load tag names from database: %s", exc)
         for name in db_tags:
@@ -1302,7 +1313,7 @@ class TagsTab(QWidget):
             self.prepare_for_database_reset()
         except Exception:
             pass
-        task = IndexRunnable(self._db_path)
+        task = IndexRunnable(self._view_model, self._db_path)
         self._start_indexing_task(task)
 
     def _run_retag(
@@ -1315,17 +1326,18 @@ class TagsTab(QWidget):
         if self._indexing_active:
             return
         self._db_path = self._resolve_db_path()
-        settings = load_settings()
+        settings = self._view_model.load_settings()
         params_list = list(params or [])
 
         def _pre_run() -> dict[str, object]:
             if predicate is None:
-                marked = retag_all(self._db_path, force=force_all, settings=settings)
+                marked = self._view_model.retag_all(self._db_path, force=force_all, settings=settings)
             else:
-                marked = retag_query(self._db_path, predicate, params_list)
+                marked = self._view_model.retag_query(self._db_path, predicate, params_list)
             return {"retagged_marked": marked}
 
         task = IndexRunnable(
+            self._view_model,
             self._db_path,
             settings=settings,
             pre_run=_pre_run,
@@ -1373,7 +1385,7 @@ class TagsTab(QWidget):
     def _start_refresh_task(self, folder: Path, *, hard_delete: bool = False) -> None:
         self._refresh_active = True
         self._active_refresh_folder = folder
-        task = RefreshRunnable(folder, hard_delete=hard_delete)
+        task = RefreshRunnable(self._view_model, folder, hard_delete=hard_delete)
         self._current_refresh_task = task
         task.signals.finished.connect(self._handle_refresh_finished)
         task.signals.error.connect(self._handle_refresh_failed)
@@ -1572,10 +1584,10 @@ class TagsTab(QWidget):
             self._table_button.setChecked(False)
 
     def _open_stats(self) -> None:
-        db_path = self._db_path if self._db_path is not None else Path(get_db_path())
+        db_path = self._db_path if self._db_path is not None else self._view_model.db_path
 
         def _conn_factory() -> sqlite3.Connection:
-            return get_conn(db_path)
+            return self._view_model.open_connection(db_path)
 
         dialog = TagStatsDialog(_conn_factory, parent=self)
         dialog.setModal(True)
@@ -1589,13 +1601,13 @@ class TagsTab(QWidget):
 
     def _on_search_clicked(self) -> None:
         query = self._query_edit.text().strip()
-        positive_terms = extract_positive_tag_terms(query) if query else []
+        positive_terms = self._view_model.extract_positive_terms(query) if query else []
         self._highlight_terms = list(positive_terms)
         self._positive_terms = positive_terms
         self._use_relevance = bool(positive_terms)
         if self._conn is not None:
             try:
-                self._relevance_thresholds = _load_tag_thresholds(self._conn)
+                self._relevance_thresholds = self._view_model.load_tag_thresholds(self._conn)
             except sqlite3.Error:
                 self._relevance_thresholds = {}
         else:
@@ -1603,7 +1615,7 @@ class TagsTab(QWidget):
         self._set_busy(True)
         thresholds = {int(category): float(value) for category, value in (self._tag_thresholds or {}).items()}
         try:
-            fragment = translate_query(
+            fragment = self._view_model.translate_query(
                 query,
                 file_alias="f",
                 thresholds=thresholds,
@@ -1650,7 +1662,7 @@ class TagsTab(QWidget):
             self._set_busy(False)
             return
         try:
-            rows = search_files(
+            rows = self._view_model.search_files(
                 self._conn,
                 self._current_where,
                 self._current_params,
@@ -1807,7 +1819,7 @@ class TagsTab(QWidget):
 
     def _update_thresholds(self, settings: PipelineSettings | None = None) -> None:
         if settings is None:
-            settings = load_settings()
+            settings = self._view_model.load_settings()
         mapping: dict[TagCategory, float] = {}
         threshold_source = getattr(settings.tagger, "thresholds", {}) if settings else {}
         for key, value in (threshold_source or {}).items():
@@ -2037,7 +2049,7 @@ class TagsTab(QWidget):
 
     def _resolve_db_path(self) -> Path:
         if self._conn is None:
-            fallback = Path(get_db_path()).expanduser()
+            fallback = Path(self._view_model.db_path).expanduser()
             self._db_display = str(fallback)
             return fallback
         db_row = self._conn.execute("PRAGMA database_list").fetchone()
@@ -2048,8 +2060,8 @@ class TagsTab(QWidget):
             return path
         if literal == ":memory:":
             self._db_display = ":memory:"
-            return Path(get_db_path()).expanduser()
-        fallback = Path(get_db_path()).expanduser()
+            return Path(self._view_model.db_path).expanduser()
+        fallback = Path(self._view_model.db_path).expanduser()
         self._db_display = str(fallback)
         return fallback
 

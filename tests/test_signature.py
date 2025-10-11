@@ -1,5 +1,5 @@
 from core.pipeline.signature import _build_max_tags_map, _build_threshold_map, current_tagger_sig
-from core.settings import PipelineSettings
+from core.config import PipelineSettings
 from tagger.base import TagCategory
 
 

@@ -88,11 +88,11 @@ def test_run_tag_job_persists_predictions(memory_conn: sqlite3.Connection, tmp_p
     assert tag_scores[0]["score"] >= tag_scores[1]["score"]
 
     fts_row = memory_conn.execute(
-        "SELECT text FROM fts_files WHERE rowid = ?",
-        (output.file_id,),
+        "SELECT rowid AS file_id FROM fts_files WHERE fts_files MATCH ?",
+        ("kobato",),
     ).fetchone()
     assert fts_row is not None
-    assert "character:kobato" in fts_row["text"]
+    assert fts_row["file_id"] == output.file_id
 
 
 def test_run_tag_job_returns_none_for_missing(memory_conn: sqlite3.Connection) -> None:

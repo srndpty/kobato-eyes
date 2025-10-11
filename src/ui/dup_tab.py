@@ -55,12 +55,9 @@ from PyQt6.QtWidgets import (
 )
 from send2trash import send2trash
 
-from db.connection import get_conn
-from db.repository import iter_files_for_dup, mark_files_absent
-from dup.scanner import DuplicateCluster, DuplicateClusterEntry, DuplicateFile, DuplicateScanConfig, DuplicateScanner
+from dup.scanner import DuplicateCluster, DuplicateClusterEntry, DuplicateFile, DuplicateScanConfig
 from ui.dup_refine_parallel import refine_by_pixels_parallel, refine_by_tilehash_parallel
-from utils.image_io import generate_thumbnail, get_thumbnail  # 既存ユーティリティを再利用
-from utils.paths import get_cache_dir, get_db_path
+from ui.viewmodels import DupViewModel
 
 LOG = logging.getLogger("dup")
 if not LOG.handlers:
@@ -324,8 +321,14 @@ class DuplicateScanSignals(QObject):
 class DuplicateScanRunnable(QRunnable):
     """Background runnable that loads file metadata and clusters duplicates."""
 
-    def __init__(self, db_path: Path, request: DuplicateScanRequest) -> None:
+    def __init__(
+        self,
+        view_model: DupViewModel,
+        db_path: Path,
+        request: DuplicateScanRequest,
+    ) -> None:
         super().__init__()
+        self._view_model = view_model
         self._db_path = db_path
         self._request = request
         self.signals = DuplicateScanSignals()
@@ -336,8 +339,8 @@ class DuplicateScanRunnable(QRunnable):
             # settings = load_settings()
 
             # conn はこの with（closing）ブロック内でだけ使う
-            with closing(get_conn(self._db_path)) as conn:
-                rows = list(iter_files_for_dup(conn, self._request.path_like))
+            with closing(self._view_model.open_connection(self._db_path)) as conn:
+                rows = self._view_model.iter_files_for_dup(conn, self._request.path_like)
                 LOG.info("scan: rows loaded = %d", len(rows))
 
             total = len(rows)
@@ -360,7 +363,7 @@ class DuplicateScanRunnable(QRunnable):
 
             LOG.info("cluster: building ...")
             t0 = time.perf_counter()
-            clusters = DuplicateScanner(config).build_clusters(files)
+            clusters = self._view_model.build_clusters(config, files)
             LOG.info("cluster: done; n=%d, %.2fs", len(clusters), time.perf_counter() - t0)
 
             self.signals.finished.emit(clusters)
@@ -383,8 +386,16 @@ class _ThumbJob(QRunnable):
     QPixmapはGUIスレッドで作るので、ここでは使わない。
     """
 
-    def __init__(self, path: Path, size: tuple[int, int], cache_dir: Path, signals: _ThumbSignals) -> None:
+    def __init__(
+        self,
+        view_model: DupViewModel,
+        path: Path,
+        size: tuple[int, int],
+        cache_dir: Path,
+        signals: _ThumbSignals,
+    ) -> None:
         super().__init__()
+        self._view_model = view_model
         self._path = path
         self._size = size
         self._cache_dir = cache_dir
@@ -395,7 +406,7 @@ class _ThumbJob(QRunnable):
         try:
             # 将来の再利用用にディスクサムネは作っておく（失敗してもOK）
             try:
-                generate_thumbnail(self._path, self._cache_dir, size=self._size, format="WEBP")
+                self._view_model.generate_thumbnail(self._path, self._cache_dir, size=self._size, format="WEBP")
             except Exception as e:
                 if DEBUG_THUMBS:
                     print("thumb gen failed:", self._path, e)
@@ -423,9 +434,15 @@ class _ThumbJob(QRunnable):
 class DupTab(QWidget):
     """Provide controls for duplicate search and clustering."""
 
-    def __init__(self, parent: QWidget | None = None) -> None:
+    def __init__(
+        self,
+        parent: QWidget | None = None,
+        *,
+        view_model: DupViewModel | None = None,
+    ) -> None:
         super().__init__(parent)
-        self._db_path = get_db_path()
+        self._view_model = view_model or DupViewModel(self)
+        self._db_path = self._view_model.db_path
         self._pool = QThreadPool(self)
         self._clusters: list[DuplicateCluster] = []
         self._active_scan: DuplicateScanRunnable | None = None
@@ -778,7 +795,7 @@ class DupTab(QWidget):
         # 既に done 済みなら即適用
         if key in self._thumb_done:
             try:
-                pix = get_thumbnail(key, self._icon_size.width(), self._icon_size.height())
+                pix = self._view_model.get_thumbnail(Path(key), self._icon_size.width(), self._icon_size.height())
                 tile.set_pixmap(pix, self._placeholder_icon)
             except Exception:
                 tile.set_pixmap(None, self._placeholder_icon)
@@ -787,7 +804,7 @@ class DupTab(QWidget):
         slots = self._thumb_pool.maxThreadCount() - self._thumb_pool.activeThreadCount()
         # 1 ティックの上限（スクロール直後のスパイク抑止）
         slots = min(slots, self._thumb_budget)
-        cache_dir = get_cache_dir() / "thumbs"
+        cache_dir = self._view_model.thumbnail_cache_dir()
         size = (self._icon_size.width(), self._icon_size.height())
 
         while slots > 0 and self._thumb_pending:
@@ -795,7 +812,7 @@ class DupTab(QWidget):
             if key in self._thumb_inflight or key in self._thumb_done:
                 continue
             path = Path(key)
-            job = _ThumbJob(path, size, cache_dir, self._thumb_signals)
+            job = _ThumbJob(self._view_model, path, size, cache_dir, self._thumb_signals)
             self._thumb_inflight.add(key)
             self._thumb_pool.start(job)
             slots -= 1
@@ -898,7 +915,7 @@ class DupTab(QWidget):
         # ★ 追加：すでに done 済みなら即適用（親で読み終わっているケースを拾う）
         if key in self._thumb_done:
             try:
-                pix = get_thumbnail(key, self._icon_size.width(), self._icon_size.height())
+                pix = self._view_model.get_thumbnail(Path(key), self._icon_size.width(), self._icon_size.height())
                 item.setIcon(0, QIcon(pix))
             except Exception:
                 item.setIcon(0, self._placeholder_icon)
@@ -908,10 +925,16 @@ class DupTab(QWidget):
         if key in self._thumb_inflight:
             return
         self._thumb_inflight.add(key)
-        cache_dir = get_cache_dir() / "thumbs"
+        cache_dir = self._view_model.thumbnail_cache_dir()
         if DEBUG_THUMBS:
             print(f"thumb enqueue: {key}")  # ← デバッグ
-        job = _ThumbJob(path, (self._icon_size.width(), self._icon_size.height()), cache_dir, self._thumb_signals)
+        job = _ThumbJob(
+            self._view_model,
+            path,
+            (self._icon_size.width(), self._icon_size.height()),
+            cache_dir,
+            self._thumb_signals,
+        )
         self._thumb_pool.start(job)  # ← こっちのプールで
 
     # ウィジェット表示時にも走らせる（保険）
@@ -1041,7 +1064,7 @@ class DupTab(QWidget):
             if qimg is not None:
                 pix = QPixmap.fromImage(qimg)
             else:
-                pix = get_thumbnail(path_str, self._icon_size.width(), self._icon_size.height())
+                pix = self._view_model.get_thumbnail(Path(path_str), self._icon_size.width(), self._icon_size.height())
         except Exception:
             pix = None
 
@@ -1070,7 +1093,7 @@ class DupTab(QWidget):
         self._progress.setMaximum(1)
         self._progress.setValue(0)
         self._status_label.setText("Scanning duplicates…")
-        runnable = DuplicateScanRunnable(self._db_path, request)
+        runnable = DuplicateScanRunnable(self._view_model, self._db_path, request)
         runnable.signals.progress.connect(self._on_scan_progress)
         runnable.signals.finished.connect(self._on_scan_finished)
         runnable.signals.error.connect(self._on_scan_error)
@@ -1372,11 +1395,8 @@ class DupTab(QWidget):
                 failures.append((entry, str(exc)))
         if successes:
             try:
-                conn = get_conn(self._db_path)
-                try:
-                    mark_files_absent(conn, [entry.file.file_id for entry in successes])
-                finally:
-                    conn.close()
+                with closing(self._view_model.open_connection(self._db_path)) as conn:
+                    self._view_model.mark_files_absent(conn, [entry.file.file_id for entry in successes])
             except Exception as exc:  # pragma: no cover - database errors surfaced via UI
                 failures.extend((entry, str(exc)) for entry in successes)
                 successes.clear()

@@ -6,19 +6,20 @@ from pathlib import Path
 
 import pytest
 
+from core.config import AppPaths
 from utils import paths
 
 
 @pytest.mark.parametrize("extra", ["", "subdir"])
 def test_get_data_dir_env_override(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, extra: str) -> None:
     override = tmp_path / "data" / extra
-    monkeypatch.setenv("KOE_DATA_DIR", str(override))
+    monkeypatch.setattr(paths, "_APP_PATHS", AppPaths(env={"KOE_DATA_DIR": str(override)}))
     assert paths.get_data_dir() == override.expanduser()
 
 
 def test_ensure_dirs_creates_structure(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     data_dir = tmp_path / "custom_data"
-    monkeypatch.setenv("KOE_DATA_DIR", str(data_dir))
+    monkeypatch.setattr(paths, "_APP_PATHS", AppPaths(env={"KOE_DATA_DIR": str(data_dir)}))
 
     target_db = paths.get_db_path()
     cache_dir = paths.get_cache_dir()

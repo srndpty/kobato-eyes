@@ -9,7 +9,7 @@ import pytest
 from PIL import Image
 
 from core.pipeline import current_tagger_sig, run_index_once
-from core.settings import PipelineSettings, TaggerSettings
+from core.config import PipelineSettings, TaggerSettings
 from db.connection import get_conn
 from tagger.base import ITagger, TagCategory, TagPrediction, TagResult
 

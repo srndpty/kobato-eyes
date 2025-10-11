@@ -2,8 +2,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import numpy as np
-
 from dup.scanner import DuplicateFile, DuplicateScanConfig, DuplicateScanner
 
 
@@ -15,7 +13,7 @@ def make_file(
     width: int,
     height: int,
     phash: int,
-    embedding: np.ndarray | None = None,
+    embedding: tuple[float, ...] | None = None,
 ) -> DuplicateFile:
     return DuplicateFile(
         file_id=file_id,
@@ -38,7 +36,6 @@ def test_scanner_clusters_and_keeper_selection() -> None:
             width=640,
             height=480,
             phash=base_hash,
-            embedding=np.array([1.0, 0.0], dtype=np.float32),
         ),
         make_file(
             2,
@@ -47,7 +44,6 @@ def test_scanner_clusters_and_keeper_selection() -> None:
             width=640,
             height=480,
             phash=base_hash ^ 0x1,
-            embedding=np.array([0.9, 0.1], dtype=np.float32),
         ),
         make_file(
             3,
@@ -56,7 +52,6 @@ def test_scanner_clusters_and_keeper_selection() -> None:
             width=800,
             height=600,
             phash=base_hash ^ 0x2,
-            embedding=np.array([0.95, 0.05], dtype=np.float32),
         ),
     ]
     scanner = DuplicateScanner(DuplicateScanConfig(hamming_threshold=4))
@@ -74,9 +69,6 @@ def test_scanner_clusters_and_keeper_selection() -> None:
 
 def test_scanner_honours_ratio_and_cosine_thresholds() -> None:
     base_hash = 0xAAAA_AAAA_AAAA_AAAA
-    good_embedding_a = np.array([1.0, 0.0], dtype=np.float32)
-    good_embedding_b = np.array([0.8, 0.6], dtype=np.float32)
-    bad_embedding = np.array([-1.0, 0.0], dtype=np.float32)
     files = [
         make_file(1, path="small.jpg", size=100, width=100, height=100, phash=base_hash),
         make_file(
@@ -86,7 +78,7 @@ def test_scanner_honours_ratio_and_cosine_thresholds() -> None:
             width=100,
             height=100,
             phash=base_hash,
-            embedding=good_embedding_b,
+            embedding=(0.9, 0.1),
         ),
         make_file(
             3,
@@ -95,7 +87,7 @@ def test_scanner_honours_ratio_and_cosine_thresholds() -> None:
             width=200,
             height=200,
             phash=base_hash ^ 0x1,
-            embedding=good_embedding_a,
+            embedding=(0.89, 0.11),
         ),
         make_file(
             4,
@@ -104,7 +96,7 @@ def test_scanner_honours_ratio_and_cosine_thresholds() -> None:
             width=200,
             height=200,
             phash=base_hash ^ 0x2,
-            embedding=good_embedding_b,
+            embedding=(0.88, 0.12),
         ),
         make_file(
             5,
@@ -113,11 +105,11 @@ def test_scanner_honours_ratio_and_cosine_thresholds() -> None:
             width=200,
             height=200,
             phash=base_hash ^ 0x3,
-            embedding=bad_embedding,
+            embedding=(-0.5, 0.3),
         ),
     ]
     scanner = DuplicateScanner(
-        DuplicateScanConfig(hamming_threshold=4, size_ratio=0.5, cosine_threshold=0.5)
+        DuplicateScanConfig(hamming_threshold=4, size_ratio=0.5, cosine_threshold=0.9)
     )
     clusters = scanner.build_clusters(files)
     assert len(clusters) == 1
