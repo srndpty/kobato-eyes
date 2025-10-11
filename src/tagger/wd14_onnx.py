@@ -159,12 +159,10 @@ class WD14Tagger(ITagger):
                 break
         if session is None or chosen_providers is None:
             raise RuntimeError("WD14: failed to initialise ONNX Runtime session") from last_error
-        if requested_providers is None and chosen_providers == [_CUDA_PROVIDER]:
-            print("WD14: using %s", _CUDA_PROVIDER)
-        elif requested_providers is None and chosen_providers == [_CPU_PROVIDER]:
-            print("WD14: using %s", _CPU_PROVIDER)
+        if len(chosen_providers) == 1:
+            logger.info("WD14: using %s", chosen_providers[0])
         else:
-            print("WD14: using providers %s", chosen_providers)
+            logger.info("WD14: using providers %s", ", ".join(chosen_providers))
         self._session = session
         self._input_name = self._session.get_inputs()[0].name
         self._output_names = [output.name for output in self._session.get_outputs()]
