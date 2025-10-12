@@ -92,7 +92,6 @@ else:
 
     QGuiApplication.setAttribute(Qt.ApplicationAttribute.AA_UseSoftwareOpenGL)
 
-    from core.config import PipelineSettings
     from ui.dup_tab import DupTab
     from ui.settings_tab import SettingsTab
     from ui.tags_tab import TagsTab
@@ -212,6 +211,7 @@ else:
 
         app.aboutToQuit.connect(_finalise_onnx_profiles)
         window = MainWindow()
+        window.resize(1024, 768)
         window.show()
         sys.exit(app.exec())
 
