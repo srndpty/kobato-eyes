@@ -1120,13 +1120,23 @@ class TagsTab(QWidget):
 
     def _bootstrap_results_if_any(self) -> None:
         if self._db_has_files():
-            self._debug_where.setText("WHERE: 1=1")
-            self._debug_params.setText("Params: []")
+            self._debug_where.setText("WHERE: 1=1\nORDER: f.mtime DESC")
+            self._debug_params.setText("Params: []\nRelevance terms: []")
             self._debug_group.setVisible(False)
             self._show_placeholder(False)
-            self._status_label.setText("Enter a query to search tags.")
-            self._search_overlay.hide()
-            self._set_busy(False)
+            self._current_query = "*"
+            self._current_where = "1=1"
+            self._current_params = []
+            self._highlight_terms = []
+            self._positive_terms = []
+            self._use_relevance = False
+            self._relevance_thresholds = {}
+            self._offset = 0
+            self._search_reset_pending = True
+            self._status_label.setText("Searching…")
+            self._search_overlay.show("Loading latest… (Esc to cancel)")
+            self._set_busy(True)
+            self._start_async_search(reset=True)
         else:
             self._show_placeholder(True)
             self._status_label.setText("No results yet. Click 'Index now' to scan your library.")

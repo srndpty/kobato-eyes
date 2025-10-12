@@ -116,30 +116,30 @@ def test_async_search_cancel(tags_tab: TagsTab, qapp: QApplication) -> None:
     _await_idle(tags_tab, qapp)
     tags_tab._query_edit.setText("again")  # type: ignore[attr-defined]
     tags_tab._on_search_clicked()
-    assert _wait_for(lambda: tags_tab._table_model.rowCount() > 0, qapp, timeout=2.0)  # type: ignore[attr-defined]
+    assert _wait_for(lambda: tags_tab._search_busy, qapp, timeout=1.0)
     tags_tab._cancel_active_search()
     _await_idle(tags_tab, qapp)
     assert tags_tab._last_search_cancelled
 
 
-def test_bootstrap_shows_idle_status(tags_tab: TagsTab, qapp: QApplication) -> None:
-    assert _wait_for(
-        lambda: tags_tab._status_label.text() == "Enter a query to search tags.",  # type: ignore[attr-defined]
-        qapp,
-        timeout=1.0,
-    )
+def test_bootstrap_shows_latest_page(tags_tab: TagsTab, qapp: QApplication) -> None:
+    _await_idle(tags_tab, qapp)
+    assert tags_tab._table_model.rowCount() == tags_tab._search_chunk_size  # type: ignore[attr-defined]
+    assert tags_tab._offset == tags_tab._search_chunk_size  # type: ignore[attr-defined]
+    expected = f"Showing {tags_tab._search_chunk_size} result(s) for '*'"  # type: ignore[attr-defined]
+    assert tags_tab._status_label.text() == expected  # type: ignore[attr-defined]
     assert not tags_tab._search_busy  # type: ignore[attr-defined]
     assert tags_tab._search_worker is None  # type: ignore[attr-defined]
-    assert tags_tab._table_model.rowCount() == 0  # type: ignore[attr-defined]
 
 
 def test_typing_does_not_trigger_search(tags_tab: TagsTab, qapp: QApplication) -> None:
     _await_idle(tags_tab, qapp)
+    initial_rows = tags_tab._table_model.rowCount()  # type: ignore[attr-defined]
     tags_tab._completion_candidates = [TagMeta(name="tag0", category=0)]  # type: ignore[attr-defined]
     tags_tab._query_edit.setText("tag")  # type: ignore[attr-defined]
     tags_tab._on_query_text_edited("tag")
 
     assert _wait_for(lambda: tags_tab._search_worker is None, qapp, timeout=0.5)  # type: ignore[attr-defined]
     assert not tags_tab._search_busy  # type: ignore[attr-defined]
-    assert tags_tab._table_model.rowCount() == 0  # type: ignore[attr-defined]
+    assert tags_tab._table_model.rowCount() == initial_rows  # type: ignore[attr-defined]
 
