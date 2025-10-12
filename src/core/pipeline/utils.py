@@ -4,7 +4,9 @@ import hashlib
 from pathlib import Path
 from typing import Mapping
 
+from core.config import PipelineSettings
 from tagger.base import TagCategory
+from tagger.labels_util import discover_labels_csv, load_selected_tags
 
 # ---- formatting / digest helpers ------------------------------------------------
 
@@ -67,10 +69,30 @@ def _serialise_max_tags(
     return {category.name.lower(): int(value) for category, value in max_tags.items()}
 
 
+def detect_tagger_provider(settings: PipelineSettings) -> str:
+    """Return the effective tagger provider after considering auto-detection."""
+
+    configured = str(getattr(settings.tagger, "provider", "auto") or "auto").lower()
+    if configured in {"wd14", "pixai"}:
+        return configured
+    if configured not in {"", "auto"}:
+        return "wd14"
+
+    csv_candidate = discover_labels_csv(settings.tagger.model_path, settings.tagger.tags_csv)
+    if csv_candidate is None:
+        return "wd14"
+    try:
+        tags = load_selected_tags(csv_candidate)
+    except Exception:
+        return "wd14"
+    return "pixai" if any(tag.ips for tag in tags) else "wd14"
+
+
 __all__ = [
     "_format_sig_mapping",
     "_normalise_sig_source",
     "_digest_identifier",
     "_serialise_thresholds",
     "_serialise_max_tags",
+    "detect_tagger_provider",
 ]
