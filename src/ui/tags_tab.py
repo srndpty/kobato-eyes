@@ -26,6 +26,7 @@ from PyQt6.QtCore import (
     QRunnable,
     QSize,
     Qt,
+    QThread,
     QThreadPool,
     QTimer,
     pyqtSignal,
@@ -72,8 +73,10 @@ from tagger import labels_util
 from tagger.base import TagCategory
 from tagger.wd14_onnx import ONNXRUNTIME_MISSING_MESSAGE
 from ui.autocomplete import abbreviate_count, extract_completion_token, replace_completion_token
+from ui.search_worker import SearchWorker
 from ui.tag_stats import TagStatsDialog
 from ui.viewmodels import TagsViewModel
+from ui.widgets.spinner_overlay import SpinnerOverlay
 from utils.image_io import get_thumbnail
 
 logger = logging.getLogger(__name__)
@@ -649,9 +652,13 @@ class TagsTab(QWidget):
         parent: QWidget | None = None,
         *,
         view_model: TagsViewModel | None = None,
+        search_chunk_size: int | None = None,
+        search_chunk_delay: float = 0.0,
     ) -> None:
         super().__init__(parent)
         self._view_model = view_model or TagsViewModel(self)
+        self._search_chunk_size = max(1, int(search_chunk_size or self._PAGE_SIZE))
+        self._search_chunk_delay = max(0.0, float(search_chunk_delay))
         self._query_edit = QLineEdit(self)
         self._query_edit.setPlaceholderText("Search tags…")
         self._tag_model = self.TagListModel(parent=self)
@@ -827,6 +834,8 @@ class TagsTab(QWidget):
         self._stack.addWidget(self._placeholder)
         self._stack.addWidget(self._table_view)
         self._stack.addWidget(self._grid_view)
+        self._search_overlay = SpinnerOverlay(self._stack)
+        self._search_overlay.hide()
 
         search_layout = QHBoxLayout()
         search_layout.addWidget(self._query_edit)
@@ -854,6 +863,9 @@ class TagsTab(QWidget):
         self._search_button.clicked.connect(self._on_search_clicked)
         self._load_more_button.clicked.connect(self._on_load_more_clicked)
         self._query_edit.returnPressed.connect(self._on_search_clicked)
+        self._cancel_search_shortcut = QShortcut(QKeySequence(Qt.Key.Key_Escape), self)
+        self._cancel_search_shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        self._cancel_search_shortcut.activated.connect(self._cancel_active_search)
         self._retag_all_action.triggered.connect(self._on_retag_all)
         self._retag_results_action.triggered.connect(self._on_retag_results)
         self._table_button.toggled.connect(self._on_table_toggled)
@@ -868,12 +880,20 @@ class TagsTab(QWidget):
         self._offset = 0
         self._results_cache: list[dict[str, object]] = []
         self._tag_thresholds: dict[TagCategory, float] = {}
+        self._search_thread: QThread | None = None
+        self._search_worker: SearchWorker | None = None
+        self._search_generation = 0
+        self._search_reset_pending = False
+        self._search_received_any = False
+        self._search_generations_reset: dict[int, bool] = {}
+        self._last_search_cancelled = False
 
         self._view_model.ensure_directories()
         self._db_display = str(self._view_model.db_path)
         self._conn: sqlite3.Connection | None = None
         self._open_connection()
         self._db_path = self._resolve_db_path()
+        self.destroyed.connect(self._cancel_active_search)
         self.destroyed.connect(self._close_connection)
         self._update_thresholds(self._view_model.load_settings())
 
@@ -1100,23 +1120,23 @@ class TagsTab(QWidget):
 
     def _bootstrap_results_if_any(self) -> None:
         if self._db_has_files():
+            self._debug_where.setText("WHERE: 1=1\nORDER: f.mtime DESC")
+            self._debug_params.setText("Params: []\nRelevance terms: []")
+            self._debug_group.setVisible(False)
+            self._show_placeholder(False)
             self._current_query = "*"
             self._current_where = "1=1"
             self._current_params = []
-            self._offset = 0
-            self._results_cache.clear()
-            self._pending_thumbs.clear()
-            self._table_model.removeRows(0, self._table_model.rowCount())
-            self._grid_model.removeRows(0, self._grid_model.rowCount())
             self._highlight_terms = []
             self._positive_terms = []
-            self._relevance_thresholds = {}
             self._use_relevance = False
-            self._debug_where.setText("WHERE: 1=1")
-            self._debug_params.setText("Params: []")
-            self._debug_group.setVisible(False)
-            self._show_placeholder(False)
-            self._fetch_results(reset=True)
+            self._relevance_thresholds = {}
+            self._offset = 0
+            self._search_reset_pending = True
+            self._status_label.setText("Searching…")
+            self._search_overlay.show("Loading latest… (Esc to cancel)")
+            self._set_busy(True)
+            self._start_async_search(reset=True)
         else:
             self._show_placeholder(True)
             self._status_label.setText("No results yet. Click 'Index now' to scan your library.")
@@ -1130,6 +1150,7 @@ class TagsTab(QWidget):
             self._conn = None
 
     def prepare_for_database_reset(self) -> None:
+        self._cancel_active_search()
         self._close_connection()
 
     def handle_database_reset(self) -> None:
@@ -1165,6 +1186,7 @@ class TagsTab(QWidget):
             self._hide_completion_popup()
             return
         self._autocomplete_timer.start()
+        # 自動検索は行わない（補完リフレッシュのみ）
 
     def _refresh_completions(self) -> None:
         if not self._completion_candidates:
@@ -1635,6 +1657,11 @@ class TagsTab(QWidget):
             self._can_load_more = False
         self._update_control_states()
 
+    def _cancel_active_search(self) -> None:
+        worker = self._search_worker
+        if worker is not None:
+            worker.cancel()
+
     def _on_search_clicked(self) -> None:
         query = self._query_edit.text().strip()
         positive_terms = self._view_model.extract_positive_terms(query) if query else []
@@ -1648,7 +1675,6 @@ class TagsTab(QWidget):
                 self._relevance_thresholds = {}
         else:
             self._relevance_thresholds = {}
-        self._set_busy(True)
         thresholds = {int(category): float(value) for category, value in (self._tag_thresholds or {}).items()}
         try:
             fragment = self._view_model.translate_query(
@@ -1659,8 +1685,7 @@ class TagsTab(QWidget):
         except ValueError as exc:
             self._status_label.setText(str(exc))
             self._set_busy(False)
-            self._table_view.viewport().update()
-            self._grid_view.viewport().update()
+            self._search_overlay.hide()
             return
 
         order_clause = "relevance DESC, f.mtime DESC" if self._use_relevance else "f.mtime DESC"
@@ -1672,59 +1697,142 @@ class TagsTab(QWidget):
         self._current_query = query
         self._current_where = fragment.where
         self._current_params = list(fragment.params)
+        self._search_reset_pending = True
         self._offset = 0
-        self._results_cache.clear()
-        self._pending_thumbs.clear()
-        self._table_model.removeRows(0, self._table_model.rowCount())
-        self._grid_model.removeRows(0, self._grid_model.rowCount())
-        self._fetch_results(reset=True)
-        self._table_view.viewport().update()
-        self._grid_view.viewport().update()
+        self._search_received_any = False
+        self._last_search_cancelled = False
+        self._status_label.setText("Searching…")
+        self._search_overlay.show("Searching… (Esc to cancel)")
+        self._set_busy(True)
+        self._start_async_search(reset=True)
 
     def _on_load_more_clicked(self) -> None:
-        if not self._current_where:
+        if not self._current_where or self._search_busy:
             return
+        self._status_label.setText("Searching…")
+        self._search_overlay.show("Searching… (Esc to cancel)")
         self._set_busy(True)
-        self._fetch_results(reset=False)
+        self._start_async_search(reset=False)
 
-    def _fetch_results(self, *, reset: bool) -> None:
+    def _start_async_search(self, *, reset: bool) -> None:
         if not self._current_where:
             self._status_label.setText("Enter a query to search tags.")
+            self._search_overlay.hide()
             self._set_busy(False)
             self._show_placeholder(True)
             return
-        if self._conn is None:
-            self._status_label.setText("Database connection unavailable.")
-            self._set_busy(False)
-            return
-        try:
-            rows = self._view_model.search_files(
-                self._conn,
-                self._current_where,
-                self._current_params,
-                tags_for_relevance=self._positive_terms,
-                thresholds=self._relevance_thresholds,
-                order="relevance" if self._use_relevance else "mtime",
-                limit=self._PAGE_SIZE,
-                offset=self._offset,
-            )
-        except Exception as exc:  # pragma: no cover
-            self._status_label.setText(f"Search failed: {exc}")
+        if self._db_path is None:
+            self._db_path = self._resolve_db_path()
+        if self._db_path is None:
+            self._status_label.setText("Database path unavailable.")
+            self._search_overlay.hide()
             self._set_busy(False)
             return
 
-        if reset and not rows:
-            self._status_label.setText("No results. Try indexing your library.")
-            self._show_placeholder(True)
-        else:
-            total = self._offset + len(rows)
-            self._status_label.setText(f"Showing {total} result(s) for '{self._current_query or '*'}'")
-            self._show_placeholder(False)
+        self._cancel_active_search()
+        self._search_generation += 1
+        generation = self._search_generation
+        self._search_generations_reset[generation] = bool(reset)
+        self._search_received_any = False
+
+        offset = 0 if reset else max(0, int(self._offset))
+        thresholds = self._relevance_thresholds if self._relevance_thresholds else None
+        tags_for_relevance = tuple(self._positive_terms) if self._use_relevance else tuple()
+
+        worker = SearchWorker(
+            self._db_path,
+            self._current_where or "1=1",
+            tuple(self._current_params),
+            tags_for_relevance=tags_for_relevance,
+            thresholds=thresholds,
+            order="relevance" if self._use_relevance else "mtime",
+            chunk=self._search_chunk_size,
+            offset=offset,
+            max_rows=self._search_chunk_size,
+            chunk_delay=self._search_chunk_delay,
+        )
+        thread = QThread(self)
+        worker.moveToThread(thread)
+        self._search_worker = worker
+        self._search_thread = thread
+
+        worker.chunkReady.connect(lambda rows, g=generation: self._handle_search_chunk(rows, g))
+        worker.finished.connect(lambda success, cancelled, g=generation: self._handle_search_finished(success, cancelled, g))
+        worker.error.connect(lambda message, g=generation: self._handle_search_error(message, g))
+
+        thread.started.connect(worker.run)
+        worker.finished.connect(worker.deleteLater)
+        worker.finished.connect(thread.quit)
+        thread.finished.connect(thread.deleteLater)
+        thread.start()
+
+    def _handle_search_chunk(self, rows: list[dict[str, object]], generation: int) -> None:
+        if generation != self._search_generation:
+            return
+        if self._search_reset_pending:
+            self._clear_results_for_new_search()
+            self._search_reset_pending = False
+        if not rows:
+            return
+        self._search_received_any = True
         self._append_rows(rows)
         self._offset += len(rows)
-        self._can_load_more = len(rows) == self._PAGE_SIZE
+        self._can_load_more = len(rows) == self._search_chunk_size
+        query_label = self._current_query or "*"
+        self._status_label.setText(f"Showing {self._offset} result(s) for '{query_label}'")
+        self._show_placeholder(False)
+
+    def _handle_search_error(self, message: str, generation: int) -> None:
+        self._search_generations_reset.pop(generation, None)
+        if generation != self._search_generation:
+            return
+        self._search_overlay.hide()
         self._set_busy(False)
+        self._can_load_more = False
+        self._status_label.setText(f"Search failed: {message}")
         self._update_control_states()
+
+    def _handle_search_finished(self, success: bool, cancelled: bool, generation: int) -> None:
+        was_reset = self._search_generations_reset.pop(generation, False)
+        if generation != self._search_generation:
+            return
+        self._search_worker = None
+        self._search_thread = None
+        self._search_overlay.hide()
+        self._set_busy(False)
+        self._last_search_cancelled = bool(cancelled)
+        if cancelled:
+            self._status_label.setText("Search cancelled.")
+            self._can_load_more = False
+        elif success and not self._search_received_any:
+            if self._search_reset_pending or was_reset:
+                self._clear_results_for_new_search()
+                self._search_reset_pending = False
+                self._status_label.setText("No results. Try indexing your library.")
+                self._show_placeholder(True)
+                self._can_load_more = False
+            else:
+                query_label = self._current_query or "*"
+                self._status_label.setText(f"Showing {self._offset} result(s) for '{query_label}'")
+                self._can_load_more = False
+        elif success:
+            query_label = self._current_query or "*"
+            self._status_label.setText(f"Showing {self._offset} result(s) for '{query_label}'")
+        else:
+            self._can_load_more = False
+        self._update_control_states()
+
+    def _clear_results_for_new_search(self) -> None:
+        self._results_cache.clear()
+        self._pending_thumbs.clear()
+        try:
+            self._thumb_pool.clear()
+        except Exception:
+            pass
+        self._table_model.removeRows(0, self._table_model.rowCount())
+        self._grid_model.removeRows(0, self._grid_model.rowCount())
+        self._table_view.viewport().update()
+        self._grid_view.viewport().update()
 
     def _append_rows(self, rows: Iterable[dict[str, object]]) -> None:
         for record in rows:
@@ -1955,8 +2063,8 @@ class TagsTab(QWidget):
         self._grid_view.viewport().update()
 
     def _update_control_states(self) -> None:
-        search_enabled = not self._search_busy and not self._indexing_active
-        input_enabled = not self._indexing_active and not self._search_busy
+        search_enabled = not self._indexing_active
+        input_enabled = not self._indexing_active
         self._search_button.setEnabled(search_enabled)
         self._query_edit.setEnabled(input_enabled)
         self._load_more_button.setEnabled(self._can_load_more and not self._indexing_active and not self._search_busy)
