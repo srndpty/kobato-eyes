@@ -19,6 +19,28 @@ logger = logging.getLogger(__name__)
 class PixaiOnnxTagger(WD14Tagger):
     """PixAI ONNX tagger that derives copyrights from character predictions."""
 
+    def _resolve_output_names(self, output_names: list[str]) -> list[str]:
+        """Select the PixAI prediction tensor from the available outputs."""
+
+        if not output_names:
+            raise RuntimeError("PixAI: model does not expose any outputs")
+
+        preferred_order = ("prediction", "logits")
+        for name in preferred_order:
+            if name in output_names:
+                if len(output_names) > 1:
+                    logger.info(
+                        "PixAI: selecting output '%s' from available tensors %s", name, output_names
+                    )
+                return [name]
+
+        if len(output_names) == 1:
+            return output_names
+
+        raise RuntimeError(
+            "PixAI: unable to determine prediction tensor from outputs " f"{output_names}"
+        )
+
     def __init__(
         self,
         model_path: str | Path,
