@@ -165,7 +165,15 @@ class WD14Tagger(ITagger):
             logger.info("WD14: using providers %s", ", ".join(chosen_providers))
         self._session = session
         self._input_name = self._session.get_inputs()[0].name
-        self._output_names = [output.name for output in self._session.get_outputs()]
+        input_shape = tuple(self._session.get_inputs()[0].shape)
+        self._input_layout = self._infer_input_layout(input_shape)
+        inferred_height, inferred_width = self._infer_spatial_dims(input_shape, self._input_layout)
+        self._input_height = inferred_height or self._input_size
+        self._input_width = inferred_width or self._input_height
+        if inferred_height:
+            self._input_size = int(inferred_height)
+        raw_output_names = [output.name for output in self._session.get_outputs()]
+        self._output_names = self._resolve_output_names(raw_output_names)
 
         # ==== 追加: ベクトル化用の前計算（名前/カテゴリ/カテゴリ→index配列） ====
         # Python ループ削減のため、一度だけ NumPy 配列化して保持
@@ -203,17 +211,91 @@ class WD14Tagger(ITagger):
         self._batch_seq = 0
         self._last_batch_end = None
 
-        if len(self._output_names) != 1:
-            raise RuntimeError("Expected a single output tensor from WD14 ONNX model, got " f"{self._output_names}")
+        if not self._output_names:
+            raise RuntimeError("WD14: no output tensors were selected for inference")
+
+    def _resolve_output_names(self, output_names: list[str]) -> list[str]:
+        """Select the ONNX output tensors to fetch for inference.
+
+        Subclasses can override this hook to down-select tensors when a model
+        exposes auxiliary outputs. The default implementation keeps the
+        original behaviour by requiring exactly one tensor.
+        """
+
+        if len(output_names) != 1:
+            raise RuntimeError(
+                "Expected a single output tensor from WD14 ONNX model, got " f"{output_names}"
+            )
+        return output_names
+
+    @staticmethod
+    def _coerce_dim_value(dim: object) -> int | None:
+        if isinstance(dim, (int, np.integer)):
+            return int(dim)
+        if dim is None:
+            return None
+        try:
+            return int(str(dim))
+        except (TypeError, ValueError):
+            return None
+
+    @classmethod
+    def _infer_input_layout(cls, shape: tuple[object, ...]) -> str:
+        if len(shape) != 4:
+            return "NHWC"
+        channel_first = cls._coerce_dim_value(shape[1])
+        channel_last = cls._coerce_dim_value(shape[3])
+        if channel_first in (1, 3):
+            return "NCHW"
+        if channel_last in (1, 3):
+            return "NHWC"
+        return "NHWC"
+
+    @classmethod
+    def _infer_spatial_dims(
+        cls, shape: tuple[object, ...], layout: str
+    ) -> tuple[int | None, int | None]:
+        if len(shape) != 4:
+            return (None, None)
+        if layout == "NCHW":
+            height = cls._coerce_dim_value(shape[2])
+            width = cls._coerce_dim_value(shape[3])
+        else:
+            height = cls._coerce_dim_value(shape[1])
+            width = cls._coerce_dim_value(shape[2])
+        return (height, width)
+
+    def _format_for_session_input(self, batch: np.ndarray) -> np.ndarray:
+        arr = np.asarray(batch, dtype=np.float32)
+        if arr.ndim != 4:
+            raise RuntimeError(
+                f"WD14: expected 4D batch input, got shape {arr.shape if hasattr(arr, 'shape') else type(batch)}"
+            )
+        layout = getattr(self, "_input_layout", "NHWC")
+        if layout == "NHWC":
+            if arr.shape[-1] == 3:
+                return np.ascontiguousarray(arr, dtype=np.float32)
+            if arr.shape[1] == 3 and arr.shape[-1] not in (3,):
+                converted = np.transpose(arr, (0, 2, 3, 1))
+                return np.ascontiguousarray(converted, dtype=np.float32)
+            raise RuntimeError(f"WD14: cannot adapt batch with shape {arr.shape} to NHWC layout")
+
+        # NCHW layout expected
+        if arr.shape[1] == 3:
+            return np.ascontiguousarray(arr, dtype=np.float32)
+        if arr.shape[-1] == 3:
+            converted = np.transpose(arr, (0, 3, 1, 2))
+            return np.ascontiguousarray(converted, dtype=np.float32)
+        raise RuntimeError(f"WD14: cannot adapt batch with shape {arr.shape} to NCHW layout")
 
     @property
     def input_size_px(self) -> int:
-        return int(self._input_size)
+        return int(self._input_height)
 
     # ---- 追加: BGR(0..255 or uint8) のリストをまとめてモデル入力に整形 ----
     def prepare_batch_from_bgr(self, bgr_list: List[np.ndarray]) -> np.ndarray:
-        H = self._session.get_inputs()[0].shape[1] or self._input_size
-        out = np.empty((len(bgr_list), H, H, 3), dtype=np.float32)
+        height = int(self._input_height)
+        out = np.empty((len(bgr_list), height, height, 3), dtype=np.float32)
         for i, im in enumerate(bgr_list):
             if im is None:
                 # ダミーで白
@@ -230,7 +312,7 @@ class WD14Tagger(ITagger):
 
             # 正方形パディング
             h, w = bgr.shape[:2]
-            side = max(h, w, H)
+            side = max(h, w, height)
             top = (side - h) // 2
             left = (side - w) // 2
             sq = cv2.copyMakeBorder(
@@ -238,14 +320,13 @@ class WD14Tagger(ITagger):
             )
 
             # resize（元と比べて拡大: CUBIC / 縮小: AREA）
-            interp = cv2.INTER_CUBIC if side < H else cv2.INTER_AREA
-            resized = cv2.resize(sq, (H, H), interpolation=interp)
+            interp = cv2.INTER_CUBIC if side < height else cv2.INTER_AREA
+            resized = cv2.resize(sq, (height, height), interpolation=interp)
 
             out[i] = resized.astype(np.float32)  # 正規化は元実装に合わせず(=そのまま0..255)
         return out  # (B,H,W,3) float32
 
     def prepare_batch_pil(self, images: list[Image.Image]) -> np.ndarray:
-        _, H, _, _ = self._session.get_inputs()[0].shape
         batch = np.vstack([self._preprocess(im) for im in images])  # (B,H,W,3) float32
         return batch
 
@@ -254,7 +335,7 @@ class WD14Tagger(ITagger):
         Loader から受け取った RGB uint8 の np.ndarray 群を、
         既存 _preprocess(PIL) と完全同一ロジックで (B,H,W,3) float32 に整形する。
         """
-        _, height, _, _ = self._session.get_inputs()[0].shape  # NHWC 前提
+        height = int(self._input_height)
         B = len(imgs_rgb)
         out = np.empty((B, height, height, 3), dtype=np.float32)
 
@@ -304,7 +385,7 @@ class WD14Tagger(ITagger):
         if self._last_batch_end is not None:
             idle_ms = (start - self._last_batch_end) * 1000.0
 
-        batch = np.ascontiguousarray(batch_bgr_or_rgb_prepared, dtype=np.float32)
+        batch = self._format_for_session_input(batch_bgr_or_rgb_prepared)
         ort_start = perf_counter()
         outputs = self._session.run(self._output_names, {self._input_name: batch})
         ort_ms = (perf_counter() - ort_start) * 1000.0
@@ -507,7 +588,7 @@ class WD14Tagger(ITagger):
     # バッチ用の「1枚→(H,W,3) float32」を返す軽量版を追加
     def _preprocess_np(self, image: Image.Image) -> np.ndarray:
         """1枚ぶんを (H, W, 3) float32 (BGR, 0..255) で返す。"""
-        height = self._input_size
+        height = int(self._input_height)
 
         # alpha to white（PillowはC実装でGIL解放）
         image = image.convert("RGBA")
@@ -609,7 +690,7 @@ class WD14Tagger(ITagger):
 
     # borrowed from: https://huggingface.co/spaces/deepghs/wd14_tagging_online/blob/main/app.py
     def _preprocess(self, image: Image.Image) -> np.ndarray:
-        _, height, _, _ = self._session.get_inputs()[0].shape
+        height = int(self._input_height)
 
         # alpha to white
         image = image.convert("RGBA")
@@ -658,7 +739,7 @@ class WD14Tagger(ITagger):
         # ---------- 並列前処理 ----------
         preprocess_start = perf_counter()
         B = len(image_list)
-        H = self._input_size
+        H = int(self._input_height)
         # 事前確保した一塊のバッファ（再利用はタグ付け側のバッチライフサイクル次第）
         batch = np.empty((B, H, H, 3), dtype=np.float32)
 
@@ -680,8 +761,9 @@ class WD14Tagger(ITagger):
         preprocess_ms = (perf_counter() - preprocess_start) * 1000.0
 
         # ---------- 推論 ----------
+        formatted_batch = self._format_for_session_input(batch)
         ort_start = perf_counter()
-        outputs = self._session.run(self._output_names, {self._input_name: batch})
+        outputs = self._session.run(self._output_names, {self._input_name: formatted_batch})
         ort_ms = (perf_counter() - ort_start) * 1000.0
         logits = outputs[0]
 

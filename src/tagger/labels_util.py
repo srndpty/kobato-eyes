@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import csv
+import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Iterator
@@ -36,6 +37,7 @@ class TagMeta:
     name: str
     category: int
     count: int | None = None
+    ips: tuple[str, ...] = ()
 
 
 def _looks_like_int(value: str) -> bool:
@@ -96,10 +98,36 @@ def _iter_csv_rows(csv_path: Path) -> Iterator[list[str]]:
             yield cells
 
 
+def _parse_ips(value: str | None) -> tuple[str, ...]:
+    if not value:
+        return ()
+    candidate = value.strip()
+    if not candidate:
+        return ()
+    try:
+        parsed = json.loads(candidate)
+    except Exception:
+        return ()
+    if isinstance(parsed, str):
+        cleaned = parsed.strip()
+        return (cleaned,) if cleaned else ()
+    if isinstance(parsed, (list, tuple)):
+        ips: list[str] = []
+        for item in parsed:
+            if not isinstance(item, str):
+                continue
+            cleaned = item.strip()
+            if cleaned:
+                ips.append(cleaned)
+        return tuple(ips)
+    return ()
+
+
 def _parse_row(cells: list[str]) -> TagMeta | None:
     name = ""
     category = 0
     count = 0
+    ips: tuple[str, ...] = ()
     cell_count = len(cells)
     if cell_count == 1:
         name = cells[0]
@@ -111,10 +139,11 @@ def _parse_row(cells: list[str]) -> TagMeta | None:
             name = first
             category = _parse_category(second)
     elif cell_count >= 3 and _looks_like_int(cells[0]):
-        padded = (cells + ["", "", "", ""])[:4]
-        name = padded[1]
-        category = _parse_category(padded[2])
-        count = _parse_count(padded[3])
+        name = cells[2] if cell_count > 2 else ""
+        category = _parse_category(cells[3] if cell_count > 3 else None)
+        count = _parse_count(cells[4] if cell_count > 4 else None)
+        if cell_count > 5:
+            ips = _parse_ips(cells[5])
     else:
         first = cells[0]
         name = first
@@ -123,10 +152,12 @@ def _parse_row(cells: list[str]) -> TagMeta | None:
         category = _parse_category(second)
         if cell_count > 2:
             count = _parse_count(third)
+        if cell_count > 3:
+            ips = _parse_ips(cells[3])
     cleaned = name.strip()
     if not cleaned:
         return None
-    return TagMeta(name=cleaned, category=category, count=count)
+    return TagMeta(name=cleaned, category=category, count=count, ips=ips)
 
 
 def load_selected_tags(csv_path: str | Path) -> list[TagMeta]:

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Literal, Mapping
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -61,6 +61,7 @@ class TaggerSettings(BaseModel):
     name: str = "dummy"
     model_path: str | None = None
     tags_csv: str | None = None
+    provider: Literal["auto", "wd14", "pixai"] = "auto"
     thresholds: dict[str, float] = Field(default_factory=_default_thresholds)
 
     @field_validator("model_path", "tags_csv", mode="before")
