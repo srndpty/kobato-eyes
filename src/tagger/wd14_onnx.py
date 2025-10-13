@@ -165,7 +165,8 @@ class WD14Tagger(ITagger):
             logger.info("WD14: using providers %s", ", ".join(chosen_providers))
         self._session = session
         self._input_name = self._session.get_inputs()[0].name
-        self._output_names = [output.name for output in self._session.get_outputs()]
+        raw_output_names = [output.name for output in self._session.get_outputs()]
+        self._output_names = self._resolve_output_names(raw_output_names)
 
         # ==== 追加: ベクトル化用の前計算（名前/カテゴリ/カテゴリ→index配列） ====
         # Python ループ削減のため、一度だけ NumPy 配列化して保持
@@ -203,8 +204,22 @@ class WD14Tagger(ITagger):
         self._batch_seq = 0
         self._last_batch_end = None
 
-        if len(self._output_names) != 1:
-            raise RuntimeError("Expected a single output tensor from WD14 ONNX model, got " f"{self._output_names}")
+        if not self._output_names:
+            raise RuntimeError("WD14: no output tensors were selected for inference")
+
+    def _resolve_output_names(self, output_names: list[str]) -> list[str]:
+        """Select the ONNX output tensors to fetch for inference.
+
+        Subclasses can override this hook to down-select tensors when a model
+        exposes auxiliary outputs. The default implementation keeps the
+        original behaviour by requiring exactly one tensor.
+        """
+
+        if len(output_names) != 1:
+            raise RuntimeError(
+                "Expected a single output tensor from WD14 ONNX model, got " f"{output_names}"
+            )
+        return output_names
 
     @property
     def input_size_px(self) -> int:

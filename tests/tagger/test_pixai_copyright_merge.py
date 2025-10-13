@@ -13,6 +13,18 @@ def _make_tagger(meta: dict[str, TagMeta]) -> PixaiOnnxTagger:
     return tagger  # type: ignore[return-value]
 
 
+def test_resolve_output_names_prefers_prediction() -> None:
+    tagger = PixaiOnnxTagger.__new__(PixaiOnnxTagger)
+    selected = tagger._resolve_output_names(["embedding", "logits", "prediction"])
+    assert selected == ["prediction"]
+
+
+def test_resolve_output_names_falls_back_to_logits() -> None:
+    tagger = PixaiOnnxTagger.__new__(PixaiOnnxTagger)
+    selected = tagger._resolve_output_names(["embedding", "logits"])
+    assert selected == ["logits"]
+
+
 def test_merge_adds_missing_copyright_and_uses_max_score() -> None:
     meta = {
         "character_a": TagMeta(name="character_a", category=1, count=0, ips=("ip1", "ip2")),
