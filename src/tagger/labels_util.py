@@ -101,25 +101,32 @@ def _iter_csv_rows(csv_path: Path) -> Iterator[list[str]]:
 def _parse_ips(value: str | None) -> tuple[str, ...]:
     if not value:
         return ()
-    candidate = value.strip()
-    if not candidate:
+    raw = value.strip()
+    if not raw:
         return ()
-    try:
-        parsed = json.loads(candidate)
-    except Exception:
-        return ()
-    if isinstance(parsed, str):
-        cleaned = parsed.strip()
-        return (cleaned,) if cleaned else ()
-    if isinstance(parsed, (list, tuple)):
-        ips: list[str] = []
-        for item in parsed:
-            if not isinstance(item, str):
-                continue
-            cleaned = item.strip()
-            if cleaned:
-                ips.append(cleaned)
-        return tuple(ips)
+    # CSV 由来のいろいろな形に耐えるため複数の候補で試す
+    attempts = [raw]
+    # 囲みのクォートを外した版
+    if (raw.startswith('"') and raw.endswith('"')) or (raw.startswith("'") and raw.endswith("'")):
+        attempts.append(raw[1:-1])
+    # Excel 形式の二重クォート → 正常な JSON に
+    if '""' in raw:
+        attempts.append(raw.replace('""', '"'))
+    for text in attempts:
+        try:
+            parsed = json.loads(text)
+        except Exception:
+            continue
+        if isinstance(parsed, str):
+            cleaned = parsed.strip()
+            return (cleaned,) if cleaned else ()
+        if isinstance(parsed, (list, tuple)):
+            out: list[str] = []
+            for item in parsed:
+                s = str(item).strip()
+                if s:
+                    out.append(s)
+            return tuple(out)
     return ()
 
 
@@ -139,11 +146,17 @@ def _parse_row(cells: list[str]) -> TagMeta | None:
             name = first
             category = _parse_category(second)
     elif cell_count >= 3 and _looks_like_int(cells[0]):
-        name = cells[2] if cell_count > 2 else ""
-        category = _parse_category(cells[3] if cell_count > 3 else None)
-        count = _parse_count(cells[4] if cell_count > 4 else None)
-        if cell_count > 5:
-            ips = _parse_ips(cells[5])
+        # 先頭が数値のとき:
+        #   パターンA: [id, name, category, count, (ips)]
+        #   パターンB: [id, tag_id, name, category, count, (ips)]
+        offset = 1
+        if cell_count > 2 and _looks_like_int(cells[1]) and not _looks_like_int(cells[2]):
+            offset = 2
+        name = cells[offset] if cell_count > offset else ""
+        category = _parse_category(cells[offset + 1] if cell_count > offset + 1 else None)
+        count = _parse_count(cells[offset + 2] if cell_count > offset + 2 else None)
+        if cell_count > offset + 3:
+            ips = _parse_ips(cells[offset + 3])
     else:
         first = cells[0]
         name = first

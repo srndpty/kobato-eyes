@@ -63,8 +63,8 @@ def test_load_selected_tags_parses_pixai_ips(tmp_path: Path) -> None:
     csv_path.write_text(
         """id,tag_id,name,category,count,ips
 0,1,char_empty,1,10,[]
-1,2,char_plain,1,20,[\"ip-one\"]
-2,3,char_escaped,1,30,"[\"ip-a\", \"ip-b\"]"
+1,2,char_plain,1,20,"[""ip-one""]"
+2,3,char_escaped,1,30,"[""ip-a"", ""ip-b""]"
 """,
         encoding="utf-8",
     )
