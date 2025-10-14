@@ -9,7 +9,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from time import perf_counter
-from typing import Iterable, List, Sequence
+from typing import Any, Iterable, List, Sequence
 
 import cv2
 import numpy as np
@@ -49,6 +49,7 @@ class _Label:
     name: str
     category: TagCategory
     count: int = 0
+    ips: tuple[str, ...] = ()
 
 
 def _sigmoid(x: np.ndarray) -> np.ndarray:
@@ -164,8 +165,29 @@ class WD14Tagger(ITagger):
         else:
             logger.info("WD14: using providers %s", ", ".join(chosen_providers))
         self._session = session
-        self._input_name = self._session.get_inputs()[0].name
-        self._output_names = [output.name for output in self._session.get_outputs()]
+        inputs = self._session.get_inputs()
+        if not inputs:
+            raise RuntimeError("WD14: ONNX model exposes no inputs")
+        self._input_node = inputs[0]
+        self._input_name = self._input_node.name
+        self._output_nodes = list(self._session.get_outputs())
+        if not self._output_nodes:
+            raise RuntimeError("WD14: ONNX model exposes no outputs")
+        self._output_names = [output.name for output in self._output_nodes]
+
+        self._channels_last = True
+        self._input_height, self._input_width = self._infer_input_dimensions(self._input_node.shape)
+        self._prep_size = max(self._input_height, self._input_width)
+        self._logits_index = self._select_output_index(self._output_nodes)
+        self._fetch_names = [self._output_names[self._logits_index]]
+        if len(self._output_names) > 1:
+            selected = self._output_nodes[self._logits_index]
+            logger.info(
+                "WD14: selected output '%s' (index %d of %d)",
+                getattr(selected, "name", f"output_{self._logits_index}"),
+                self._logits_index,
+                len(self._output_names),
+            )
 
         # ==== 追加: ベクトル化用の前計算（名前/カテゴリ/カテゴリ→index配列） ====
         # Python ループ削減のため、一度だけ NumPy 配列化して保持
@@ -203,17 +225,104 @@ class WD14Tagger(ITagger):
         self._batch_seq = 0
         self._last_batch_end = None
 
-        if len(self._output_names) != 1:
-            raise RuntimeError("Expected a single output tensor from WD14 ONNX model, got " f"{self._output_names}")
-
     @property
     def input_size_px(self) -> int:
-        return int(self._input_size)
+        return int(self._prep_size)
+
+    @staticmethod
+    def _coerce_dim(value: Any) -> int | None:
+        if isinstance(value, (int, np.integer)):
+            candidate = int(value)
+        else:
+            try:
+                candidate = int(value)  # type: ignore[arg-type]
+            except (TypeError, ValueError):
+                return None
+        if candidate <= 0:
+            return None
+        return candidate
+
+    @staticmethod
+    def _dim_is_three(value: Any) -> bool:
+        if isinstance(value, (int, np.integer)):
+            return int(value) == 3
+        if isinstance(value, str):
+            stripped = value.strip()
+            return stripped == "3"
+        return False
+
+    @staticmethod
+    def _dim_matches(value: Any, expected: int) -> bool:
+        coerced = WD14Tagger._coerce_dim(value)
+        if coerced is None:
+            return False
+        return coerced == expected
+
+    def _infer_input_dimensions(self, shape: Sequence[Any] | None) -> tuple[int, int]:
+        height = int(self._input_size)
+        width = int(self._input_size)
+        dims = list(shape or [])
+        if len(dims) >= 4:
+            spatial = dims[1:4]
+            if self._dim_is_three(spatial[0]) and not self._dim_is_three(spatial[-1]):
+                self._channels_last = False
+                height = self._coerce_dim(spatial[1]) or height
+                width = self._coerce_dim(spatial[2]) or height
+            else:
+                self._channels_last = True
+                height = self._coerce_dim(spatial[0]) or height
+                width = self._coerce_dim(spatial[1]) or height
+        elif len(dims) >= 3:
+            self._channels_last = True
+            height = self._coerce_dim(dims[1]) or height
+            width = self._coerce_dim(dims[2]) or height
+        return max(1, height), max(1, width)
+
+    def _format_for_session(self, batch: np.ndarray) -> np.ndarray:
+        formatted = np.ascontiguousarray(batch, dtype=np.float32)
+        if not self._channels_last:
+            formatted = np.transpose(formatted, (0, 3, 1, 2))
+        return formatted
+
+    def _select_output_index(self, outputs: Sequence[Any]) -> int:
+        if not outputs:
+            return 0
+        label_count = len(self._labels)
+        info: list[tuple[int, str, bool]] = []
+        for idx, node in enumerate(outputs):
+            name = getattr(node, "name", f"output_{idx}")
+            lower = name.lower()
+            shape = getattr(node, "shape", None)
+            matches = False
+            if isinstance(shape, (list, tuple)) and shape:
+                matches = self._dim_matches(shape[-1], label_count)
+            info.append((idx, lower, matches))
+
+        def _candidates(keywords: tuple[str, ...], require_match: bool) -> list[int]:
+            return [
+                idx
+                for idx, lower, matches in info
+                if any(keyword in lower for keyword in keywords) and (matches or not require_match)
+            ]
+
+        for keywords, require_match in (
+            (("logits", "logit"), True),
+            (("logits", "logit"), False),
+            (("prediction", "predict", "prob"), True),
+            ((), True),
+        ):
+            if keywords:
+                candidates = _candidates(keywords, require_match)
+            else:
+                candidates = [idx for idx, _, matches in info if matches]
+            if candidates:
+                return candidates[0]
+        return 0
 
     # ---- 追加: BGR(0..255 or uint8) のリストをまとめてモデル入力に整形 ----
     def prepare_batch_from_bgr(self, bgr_list: List[np.ndarray]) -> np.ndarray:
-        H = self._session.get_inputs()[0].shape[1] or self._input_size
-        out = np.empty((len(bgr_list), H, H, 3), dtype=np.float32)
+        target = self._prep_size
+        out = np.empty((len(bgr_list), target, target, 3), dtype=np.float32)
         for i, im in enumerate(bgr_list):
             if im is None:
                 # ダミーで白
@@ -230,7 +339,7 @@ class WD14Tagger(ITagger):
 
             # 正方形パディング
             h, w = bgr.shape[:2]
-            side = max(h, w, H)
+            side = max(h, w, target)
             top = (side - h) // 2
             left = (side - w) // 2
             sq = cv2.copyMakeBorder(
@@ -238,14 +347,13 @@ class WD14Tagger(ITagger):
             )
 
             # resize（元と比べて拡大: CUBIC / 縮小: AREA）
-            interp = cv2.INTER_CUBIC if side < H else cv2.INTER_AREA
-            resized = cv2.resize(sq, (H, H), interpolation=interp)
+            interp = cv2.INTER_CUBIC if side < target else cv2.INTER_AREA
+            resized = cv2.resize(sq, (target, target), interpolation=interp)
 
             out[i] = resized.astype(np.float32)  # 正規化は元実装に合わせず(=そのまま0..255)
         return out  # (B,H,W,3) float32
 
     def prepare_batch_pil(self, images: list[Image.Image]) -> np.ndarray:
-        _, H, _, _ = self._session.get_inputs()[0].shape
         batch = np.vstack([self._preprocess(im) for im in images])  # (B,H,W,3) float32
         return batch
 
@@ -254,7 +362,7 @@ class WD14Tagger(ITagger):
         Loader から受け取った RGB uint8 の np.ndarray 群を、
         既存 _preprocess(PIL) と完全同一ロジックで (B,H,W,3) float32 に整形する。
         """
-        _, height, _, _ = self._session.get_inputs()[0].shape  # NHWC 前提
+        height = self._prep_size
         B = len(imgs_rgb)
         out = np.empty((B, height, height, 3), dtype=np.float32)
 
@@ -304,9 +412,9 @@ class WD14Tagger(ITagger):
         if self._last_batch_end is not None:
             idle_ms = (start - self._last_batch_end) * 1000.0
 
-        batch = np.ascontiguousarray(batch_bgr_or_rgb_prepared, dtype=np.float32)
+        batch = self._format_for_session(batch_bgr_or_rgb_prepared)
         ort_start = perf_counter()
-        outputs = self._session.run(self._output_names, {self._input_name: batch})
+        outputs = self._session.run(self._fetch_names, {self._input_name: batch})
         ort_ms = (perf_counter() - ort_start) * 1000.0
         logits = outputs[0]
         # 以降は従来 infer_batch() の後半（post）と同じ処理へ
@@ -369,7 +477,7 @@ class WD14Tagger(ITagger):
         cats = self._label_cats
 
         for b in range(order.shape[0]):
-            picks_idx, picks_score = [], []
+            picks: list[tuple[int, float, str]] = []
             remaining = np.full(8, np.iinfo(np.int32).max, dtype=np.int32)
             for cat, lim in resolved_limits.items():
                 if lim is not None:
@@ -385,15 +493,22 @@ class WD14Tagger(ITagger):
                 c = cats[j]
                 if remaining[c] <= 0:
                     continue
-                picks_idx.append(int(j))
-                picks_score.append(float(s))
+                raw_name = self._label_names[j]
+                if raw_name is None:
+                    continue
+                tag_name = str(raw_name).strip()
+                if not tag_name:
+                    continue
+                picks.append((int(j), float(s), tag_name))
                 remaining[c] -= 1
 
             preds = [
                 TagPrediction(
-                    name=str(self._label_names[i]), score=picks_score[k], category=TagCategory(int(self._label_cats[i]))
+                    name=tag_name,
+                    score=score,
+                    category=TagCategory(int(self._label_cats[idx])),
                 )
-                for k, i in enumerate(picks_idx)
+                for idx, score, tag_name in picks
             ]
             results.append(TagResult(tags=preds))
         post_ms = (perf_counter() - post_start) * 1000.0
@@ -478,6 +593,7 @@ class WD14Tagger(ITagger):
 
             picks_idx: list[int] = []
             picks_score: list[float] = []
+            picks: list[tuple[int, float, str, int]] = []
             for j in cand_sorted:
                 c = int(cats[j])
                 if c < remaining.size and remaining[c] <= 0:
@@ -485,19 +601,23 @@ class WD14Tagger(ITagger):
                 s = float(scores[j])
                 if not np.isfinite(s) or s < float(thr_vec[j]):  # 念のための防御
                     continue
-                picks_idx.append(int(j))
-                picks_score.append(s)
+                raw_name = names[j]
+                if raw_name is None:
+                    continue
+                tag_name = str(raw_name).strip()
+                if not tag_name:
+                    continue
+                picks.append((int(j), s, tag_name, c))
                 if c < remaining.size:
                     remaining[c] -= 1
 
-            # TagResult へ（名前/カテゴリはベクトルから引くので高速）
             preds = [
                 TagPrediction(
-                    name=str(names[i]),
-                    score=picks_score[k],
-                    category=TagCategory(int(cats[i])),
+                    name=tag_name,
+                    score=score,
+                    category=TagCategory(int(cats[idx])),
                 )
-                for k, i in enumerate(picks_idx)
+                for idx, score, tag_name, _ in picks
             ]
             results.append(TagResult(tags=preds))
 
@@ -507,7 +627,7 @@ class WD14Tagger(ITagger):
     # バッチ用の「1枚→(H,W,3) float32」を返す軽量版を追加
     def _preprocess_np(self, image: Image.Image) -> np.ndarray:
         """1枚ぶんを (H, W, 3) float32 (BGR, 0..255) で返す。"""
-        height = self._input_size
+        height = self._prep_size
 
         # alpha to white（PillowはC実装でGIL解放）
         image = image.convert("RGBA")
@@ -609,7 +729,7 @@ class WD14Tagger(ITagger):
 
     # borrowed from: https://huggingface.co/spaces/deepghs/wd14_tagging_online/blob/main/app.py
     def _preprocess(self, image: Image.Image) -> np.ndarray:
-        _, height, _, _ = self._session.get_inputs()[0].shape
+        height = self._prep_size
 
         # alpha to white
         image = image.convert("RGBA")
@@ -658,7 +778,7 @@ class WD14Tagger(ITagger):
         # ---------- 並列前処理 ----------
         preprocess_start = perf_counter()
         B = len(image_list)
-        H = self._input_size
+        H = self._prep_size
         # 事前確保した一塊のバッファ（再利用はタグ付け側のバッチライフサイクル次第）
         batch = np.empty((B, H, H, 3), dtype=np.float32)
 
@@ -681,7 +801,8 @@ class WD14Tagger(ITagger):
 
         # ---------- 推論 ----------
         ort_start = perf_counter()
-        outputs = self._session.run(self._output_names, {self._input_name: batch})
+        formatted = self._format_for_session(batch)
+        outputs = self._session.run(self._fetch_names, {self._input_name: formatted})
         ort_ms = (perf_counter() - ort_start) * 1000.0
         logits = outputs[0]
 

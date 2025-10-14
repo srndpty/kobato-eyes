@@ -208,10 +208,7 @@ class PrefetchLoaderPrepared:
                     if self._stop.is_set():
                         break
         finally:
-            try:
-                self._q.put(None, timeout=1)
-            except Exception:
-                pass
+            self._send_sentinel()
 
     def __iter__(self) -> Iterator[Tuple[list[str], np.ndarray, list[tuple[int, int]]]]:
         while True:
@@ -220,11 +217,25 @@ class PrefetchLoaderPrepared:
                 return
             yield item
 
+    def _send_sentinel(self) -> None:
+        """Ensure the consumer receives a termination sentinel."""
+
+        while True:
+            try:
+                self._q.put(None, timeout=1.0)
+            except queue.Full:
+                continue
+            else:
+                return
+
     def close(self) -> None:
         self._stop.set()
+        self._send_sentinel()
         try:
             while True:
-                self._q.get_nowait()
+                item = self._q.get_nowait()
+                if item is None:
+                    continue
         except Exception:
             pass
         if self._th.is_alive():

@@ -19,8 +19,8 @@ def _mock_ort(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
 
     class _DummySession:
         def __init__(self, *args, **kwargs) -> None:  # noqa: D401 - signature compatibility
-            self._inputs = [SimpleNamespace(name="input_0")]
-            self._outputs = [SimpleNamespace(name="output_0")]
+            self._inputs = [SimpleNamespace(name="input_0", shape=[None, 448, 448, 3])]
+            self._outputs = [SimpleNamespace(name="output_0", shape=[None, 1])]
             self._providers = list(kwargs.get("providers", []))
             self._provider_options = {provider: {} for provider in self._providers}
             self._sess_options = kwargs.get("sess_options")
@@ -124,8 +124,8 @@ def test_wd14_tagger_falls_back_to_cpu_provider(
             attempts.append(list(providers))
             if providers == ["CUDAExecutionProvider"]:
                 raise RuntimeError("CUDAExecutionProvider not available")
-            self._inputs = [SimpleNamespace(name="input_0")]
-            self._outputs = [SimpleNamespace(name="output_0")]
+            self._inputs = [SimpleNamespace(name="input_0", shape=[None, 448, 448, 3])]
+            self._outputs = [SimpleNamespace(name="output_0", shape=[None, 1])]
             self._providers = list(providers)
             self._provider_options = {provider: {} for provider in self._providers}
             self._sess_options = kwargs.get("sess_options")
@@ -176,8 +176,8 @@ def test_wd14_tagger_warns_when_cuda_requested_but_missing(
         def __init__(self, *args, **kwargs) -> None:  # noqa: D401 - signature compatibility
             providers = kwargs.get("providers", [])
             attempts.append(list(providers))
-            self._inputs = [SimpleNamespace(name="input_0")]
-            self._outputs = [SimpleNamespace(name="output_0")]
+            self._inputs = [SimpleNamespace(name="input_0", shape=[None, 448, 448, 3])]
+            self._outputs = [SimpleNamespace(name="output_0", shape=[None, 1])]
             self._providers = list(providers)
             self._provider_options = {provider: {} for provider in self._providers}
             self._sess_options = kwargs.get("sess_options")

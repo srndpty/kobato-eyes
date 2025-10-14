@@ -75,7 +75,7 @@ class SettingsViewModel(QObject):
         tagger_settings = TaggerSettings(
             name=tagger_name,
             model_path=model_path,
-            tags_csv=previous_tagger.tags_csv if tagger_name.lower() == "wd14-onnx" else None,
+            tags_csv=previous_tagger.tags_csv if tagger_name.lower() in {"wd14-onnx", "pixai-onnx"} else None,
             thresholds=dict(previous_tagger.thresholds),
         )
         settings = PipelineSettings(
