@@ -72,10 +72,12 @@ class SettingsViewModel(QObject):
     ) -> PipelineSettings:
         """Construct a :class:`PipelineSettings` instance from UI inputs."""
 
+        lowered = tagger_name.lower()
+        reuse_csv = lowered in {"wd14-onnx", "pixai", "pixai-onnx"}
         tagger_settings = TaggerSettings(
             name=tagger_name,
             model_path=model_path,
-            tags_csv=previous_tagger.tags_csv if tagger_name.lower() == "wd14-onnx" else None,
+            tags_csv=previous_tagger.tags_csv if reuse_csv else None,
             thresholds=dict(previous_tagger.thresholds),
         )
         settings = PipelineSettings(

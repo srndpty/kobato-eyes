@@ -165,7 +165,12 @@ class WD14Tagger(ITagger):
             logger.info("WD14: using providers %s", ", ".join(chosen_providers))
         self._session = session
         self._input_name = self._session.get_inputs()[0].name
-        self._output_names = [output.name for output in self._session.get_outputs()]
+        outputs = list(self._session.get_outputs())
+        self._output_names = [output.name for output in outputs]
+        if not self._output_names:
+            raise RuntimeError("WD14: no outputs reported by ONNX model")
+        self._logits_output_index = self._select_logits_output(outputs)
+        self._logits_output_name = self._output_names[self._logits_output_index]
 
         # ==== 追加: ベクトル化用の前計算（名前/カテゴリ/カテゴリ→index配列） ====
         # Python ループ削減のため、一度だけ NumPy 配列化して保持
@@ -203,8 +208,7 @@ class WD14Tagger(ITagger):
         self._batch_seq = 0
         self._last_batch_end = None
 
-        if len(self._output_names) != 1:
-            raise RuntimeError("Expected a single output tensor from WD14 ONNX model, got " f"{self._output_names}")
+        # _logits_output_name already validated above
 
     @property
     def input_size_px(self) -> int:
@@ -243,6 +247,39 @@ class WD14Tagger(ITagger):
 
             out[i] = resized.astype(np.float32)  # 正規化は元実装に合わせず(=そのまま0..255)
         return out  # (B,H,W,3) float32
+
+    def _select_logits_output(self, outputs: Sequence[object]) -> int:
+        """Return the index of the output tensor containing class logits/probabilities."""
+
+        label_count = len(self._labels)
+        prediction_candidate: int | None = None
+        for index, output in enumerate(outputs):
+            name = str(getattr(output, "name", "") or "")
+            lower = name.lower()
+            if "logit" in lower:
+                logger.debug("WD14: selecting output %s as logits", name)
+                return index
+            if prediction_candidate is None and ("pred" in lower or "prob" in lower):
+                prediction_candidate = index
+
+        for index, output in enumerate(outputs):
+            shape = getattr(output, "shape", None)
+            if isinstance(shape, Sequence):
+                for dim in reversed(shape):
+                    if isinstance(dim, (int, np.integer)) and int(dim) > 0:
+                        if int(dim) == label_count:
+                            name = str(getattr(output, "name", "") or "")
+                            logger.debug("WD14: selecting output %s based on shape", name)
+                            return index
+                        break
+
+        if prediction_candidate is not None:
+            name = str(getattr(outputs[prediction_candidate], "name", "") or "")
+            logger.debug("WD14: falling back to prediction output %s", name)
+            return prediction_candidate
+
+        logger.debug("WD14: defaulting to first output for logits")
+        return 0
 
     def prepare_batch_pil(self, images: list[Image.Image]) -> np.ndarray:
         _, H, _, _ = self._session.get_inputs()[0].shape
@@ -306,7 +343,7 @@ class WD14Tagger(ITagger):
 
         batch = np.ascontiguousarray(batch_bgr_or_rgb_prepared, dtype=np.float32)
         ort_start = perf_counter()
-        outputs = self._session.run(self._output_names, {self._input_name: batch})
+        outputs = self._session.run([self._logits_output_name], {self._input_name: batch})
         ort_ms = (perf_counter() - ort_start) * 1000.0
         logits = outputs[0]
         # 以降は従来 infer_batch() の後半（post）と同じ処理へ
@@ -681,7 +718,7 @@ class WD14Tagger(ITagger):
 
         # ---------- 推論 ----------
         ort_start = perf_counter()
-        outputs = self._session.run(self._output_names, {self._input_name: batch})
+        outputs = self._session.run([self._logits_output_name], {self._input_name: batch})
         ort_ms = (perf_counter() - ort_start) * 1000.0
         logits = outputs[0]
 
