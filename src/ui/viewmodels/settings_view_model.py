@@ -15,10 +15,14 @@ from utils.paths import get_db_path as _get_db_path
 logger = logging.getLogger(__name__)
 
 
-def _default_provider_loader() -> list[str]:
-    from tagger import wd14_onnx
+def _default_provider_loader(tagger_name: str) -> list[str]:
+    lowered = tagger_name.lower()
+    if lowered == "pixai-onnx":
+        from tagger import pixai_onnx as module
+    else:
+        from tagger import wd14_onnx as module
 
-    return wd14_onnx.get_available_providers()
+    return module.get_available_providers()
 
 
 class SettingsViewModel(QObject):
@@ -35,7 +39,7 @@ class SettingsViewModel(QObject):
         *,
         db_path: Path | None = None,
         reset_database: Callable[[Path, bool], dict[str, object]] = _reset_database,
-        provider_loader: Callable[[], Iterable[str]] = _default_provider_loader,
+        provider_loader: Callable[[str], Iterable[str]] = _default_provider_loader,
     ) -> None:
         super().__init__(parent)
         self._db_path = Path(db_path) if db_path is not None else Path(_get_db_path())
@@ -72,10 +76,11 @@ class SettingsViewModel(QObject):
     ) -> PipelineSettings:
         """Construct a :class:`PipelineSettings` instance from UI inputs."""
 
+        preserved = tagger_name.lower() in {"wd14-onnx", "pixai-onnx"}
         tagger_settings = TaggerSettings(
             name=tagger_name,
             model_path=model_path,
-            tags_csv=previous_tagger.tags_csv if tagger_name.lower() == "wd14-onnx" else None,
+            tags_csv=previous_tagger.tags_csv if preserved else None,
             thresholds=dict(previous_tagger.thresholds),
         )
         settings = PipelineSettings(
@@ -92,11 +97,11 @@ class SettingsViewModel(QObject):
         self._current_settings = settings
         self.settings_applied.emit(settings)
 
-    def check_tagger_environment(self) -> str:
+    def check_tagger_environment(self, tagger_name: str) -> str:
         """Inspect available ONNX providers and emit the resulting summary."""
 
         try:
-            providers = list(self._provider_loader())
+            providers = list(self._provider_loader(tagger_name))
         except Exception as exc:  # pragma: no cover - defensive logging
             message = str(exc)
             logger.warning("Tagger environment check failed: %s", exc)

@@ -88,6 +88,7 @@ class PrefetchLoaderPrepared:
         # (paths, np_batch, sizes) or None(sentinal)
         self._q: "queue.Queue[tuple[list[str], np.ndarray, list[tuple[int,int]]] | None]" = queue.Queue(self._depth)
         self._stop = threading.Event()
+        self._sentinel_event = threading.Event()
         self._th = threading.Thread(target=self._producer, name="PL-Feeder", daemon=True)
         self._th.start()
         logger.info(
@@ -208,25 +209,40 @@ class PrefetchLoaderPrepared:
                     if self._stop.is_set():
                         break
         finally:
-            try:
-                self._q.put(None, timeout=1)
-            except Exception:
-                pass
+            self._signal_completion()
 
     def __iter__(self) -> Iterator[Tuple[list[str], np.ndarray, list[tuple[int, int]]]]:
         while True:
             item = self._q.get()
             if item is None:
+                self._sentinel_event.set()
                 return
             yield item
 
     def close(self) -> None:
         self._stop.set()
-        try:
-            while True:
-                self._q.get_nowait()
-        except Exception:
-            pass
+        self._signal_completion()
         if self._th.is_alive():
             self._th.join(timeout=2.0)
         logger.info("PrefetchLoaderPrepared: stop")
+
+    def _signal_completion(self) -> None:
+        if self._sentinel_event.is_set():
+            return
+        while True:
+            try:
+                self._q.put(None, timeout=0.5)
+            except queue.Full:
+                if not self._stop.is_set():
+                    continue
+                try:
+                    item = self._q.get(timeout=0.5)
+                except queue.Empty:
+                    continue
+                if item is None:
+                    self._sentinel_event.set()
+                    return
+                continue
+            else:
+                self._sentinel_event.set()
+                return

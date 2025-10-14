@@ -143,7 +143,7 @@ def test_settings_view_model_build_and_reset(tmp_path: Path) -> None:
     view_model = SettingsViewModel(
         db_path=tmp_path / "settings.db",
         reset_database=fake_reset,
-        provider_loader=lambda: ["CUDA", "CPU"],
+        provider_loader=lambda name: ["CUDA", "CPU"],
     )
     view_model.settings_applied.connect(emitted.append)
 
@@ -162,7 +162,7 @@ def test_settings_view_model_build_and_reset(tmp_path: Path) -> None:
     assert Path(emitted[-1].tagger.model_path).name == "model.onnx"
     assert emitted[-1].batch_size == 16
 
-    message = view_model.check_tagger_environment()
+    message = view_model.check_tagger_environment("wd14-onnx")
     assert "ONNX providers" in message
 
     result = view_model.reset_database(backup=True)
@@ -177,7 +177,7 @@ def test_settings_view_model_reset_failure(tmp_path: Path) -> None:
     view_model = SettingsViewModel(
         db_path=tmp_path / "err.db",
         reset_database=lambda path, *, backup: (_ for _ in ()).throw(RuntimeError("boom")),
-        provider_loader=lambda: [],
+        provider_loader=lambda name: [],
     )
 
     errors: list[str] = []

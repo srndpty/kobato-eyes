@@ -49,6 +49,7 @@ class _Label:
     name: str
     category: TagCategory
     count: int = 0
+    ips: tuple[str, ...] = ()
 
 
 def _sigmoid(x: np.ndarray) -> np.ndarray:
@@ -173,9 +174,21 @@ class WD14Tagger(ITagger):
         self._label_cats = np.fromiter(
             (int(lab.category) for lab in self._labels), dtype=np.int16, count=len(self._labels)
         )
-        self._cat_to_idx: dict[int, np.ndarray] = {
-            int(cat): np.nonzero(self._label_cats == int(cat))[0] for cat in sorted(set(self._label_cats.tolist()))
+        self._valid_label_mask = np.fromiter((bool(lab.name) for lab in self._labels), dtype=bool)
+        valid_indices = np.nonzero(self._valid_label_mask)[0]
+        self._cat_to_idx: dict[int, np.ndarray] = {}
+        if valid_indices.size:
+            unique_cats = sorted({int(self._label_cats[idx]) for idx in valid_indices})
+            for cat in unique_cats:
+                mask = (self._label_cats == cat) & self._valid_label_mask
+                self._cat_to_idx[int(cat)] = np.nonzero(mask)[0]
+        self._label_ips = tuple(tuple(label.ips) for label in self._labels)
+        self._label_lookup: dict[tuple[str, int], int] = {
+            (str(label.name), int(label.category)): index
+            for index, label in enumerate(self._labels)
+            if label.name
         }
+        self._label_count = len(self._labels)
         # デフォルトしきい値ベクトルはキャッシュしておく（可変のときは都度生成）
         self._default_thr_vec = self._build_threshold_vector(self._default_thresholds)
 
@@ -202,9 +215,6 @@ class WD14Tagger(ITagger):
         self._score_floor = float(os.getenv("KE_TAG_SCORE_FLOOR", "0.1"))
         self._batch_seq = 0
         self._last_batch_end = None
-
-        if len(self._output_names) != 1:
-            raise RuntimeError("Expected a single output tensor from WD14 ONNX model, got " f"{self._output_names}")
 
     @property
     def input_size_px(self) -> int:
@@ -306,9 +316,9 @@ class WD14Tagger(ITagger):
 
         batch = np.ascontiguousarray(batch_bgr_or_rgb_prepared, dtype=np.float32)
         ort_start = perf_counter()
-        outputs = self._session.run(self._output_names, {self._input_name: batch})
+        outputs = self._run_session(batch)
         ort_ms = (perf_counter() - ort_start) * 1000.0
-        logits = outputs[0]
+        logits = self._extract_logits(outputs, batch.shape[0])
         # 以降は従来 infer_batch() の後半（post）と同じ処理へ
         post_start = perf_counter()
         results = self._postprocess_logits_topk(logits=logits, thresholds=thresholds, max_tags=max_tags)
@@ -361,6 +371,8 @@ class WD14Tagger(ITagger):
             np.maximum(thr_vec, floor, out=thr_vec)  # in-place で底上げ
 
         mask = probs >= thr_vec
+        if hasattr(self, "_valid_label_mask"):
+            mask &= self._valid_label_mask
         masked = np.where(mask, probs, -np.inf)
         order = np.argsort(-masked, axis=1, kind="stable")
 
@@ -389,13 +401,20 @@ class WD14Tagger(ITagger):
                 picks_score.append(float(s))
                 remaining[c] -= 1
 
-            preds = [
-                TagPrediction(
-                    name=str(self._label_names[i]), score=picks_score[k], category=TagCategory(int(self._label_cats[i]))
+            preds = []
+            for k, i in enumerate(picks_idx):
+                if hasattr(self, "_valid_label_mask") and not self._valid_label_mask[i]:
+                    continue
+                preds.append(
+                    TagPrediction(
+                        name=str(self._label_names[i]),
+                        score=picks_score[k],
+                        category=TagCategory(int(self._label_cats[i])),
+                    )
                 )
-                for k, i in enumerate(picks_idx)
-            ]
-            results.append(TagResult(tags=preds))
+            result = TagResult(tags=preds)
+            self._augment_result(result, picks_idx, picks_score)
+            results.append(result)
         post_ms = (perf_counter() - post_start) * 1000.0
         logger.info("WD14 post=%.2fms", post_ms)
         return results
@@ -442,10 +461,14 @@ class WD14Tagger(ITagger):
         results: list[TagResult] = []
 
         # --- 画像ごと（バッチ次元）に処理
+        valid_mask = getattr(self, "_valid_label_mask", None)
+
         for b in range(B):
             scores = probs[b]  # (C,)
             # 閾値マスク
             hit_mask = scores >= thr_vec  # (C,)
+            if valid_mask is not None:
+                hit_mask &= valid_mask
             hit_count = int(hit_mask.sum())
             if hit_count == 0:
                 results.append(TagResult(tags=[]))
@@ -491,17 +514,97 @@ class WD14Tagger(ITagger):
                     remaining[c] -= 1
 
             # TagResult へ（名前/カテゴリはベクトルから引くので高速）
-            preds = [
-                TagPrediction(
-                    name=str(names[i]),
-                    score=picks_score[k],
-                    category=TagCategory(int(cats[i])),
+            preds: list[TagPrediction] = []
+            for k, i in enumerate(picks_idx):
+                if valid_mask is not None and not valid_mask[i]:
+                    continue
+                preds.append(
+                    TagPrediction(
+                        name=str(names[i]),
+                        score=picks_score[k],
+                        category=TagCategory(int(cats[i])),
+                    )
                 )
-                for k, i in enumerate(picks_idx)
-            ]
-            results.append(TagResult(tags=preds))
+            result = TagResult(tags=preds)
+            self._augment_result(result, picks_idx, picks_score)
+            results.append(result)
 
         return results
+
+    def _augment_result(
+        self,
+        result: TagResult,
+        indices: Sequence[int],
+        scores: Sequence[float],
+    ) -> None:
+        """Hook for subclasses to augment :class:`TagResult` objects."""
+
+        return
+
+    def _run_session(self, batch: np.ndarray) -> Sequence[np.ndarray]:
+        """Execute the ONNX model and return all output tensors."""
+
+        return self._session.run(self._output_names, {self._input_name: batch})
+
+    def _rank_output_candidates(self, outputs: Sequence[np.ndarray]) -> list[int]:
+        """Return output indices ordered by likelihood of containing logits."""
+
+        label_count = getattr(self, "_label_count", len(self._labels))
+        priorities: list[tuple[int, int, int, int]] = []
+        total = len(outputs)
+        for idx in range(total):
+            name = self._output_names[idx] if idx < len(self._output_names) else ""
+            array = np.asarray(outputs[idx])
+            lowered = str(name or "").lower()
+            if "logit" in lowered:
+                name_rank = 0
+            elif "prob" in lowered or "pred" in lowered:
+                name_rank = 1
+            else:
+                name_rank = 2
+            shape = array.shape
+            last_dim = shape[-1] if array.ndim else -1
+            if last_dim == label_count:
+                match_rank = 0
+            elif label_count in shape:
+                match_rank = 1
+            else:
+                match_rank = 2
+            dtype_rank = 0 if array.dtype in (np.float32, np.float64) else 1
+            priorities.append((name_rank, match_rank, dtype_rank, idx))
+        priorities.sort()
+        return [idx for _, _, _, idx in priorities]
+
+    def _extract_logits(self, outputs: Sequence[np.ndarray], batch_size: int) -> np.ndarray:
+        """Select and reshape the most appropriate output tensor for logits."""
+
+        if not outputs:
+            raise RuntimeError("WD14: model produced no output tensors")
+        ranked = self._rank_output_candidates(outputs)
+        errors: list[str] = []
+        for idx in ranked:
+            try:
+                array = np.asarray(outputs[idx])
+            except Exception as exc:  # pragma: no cover - defensive
+                errors.append(f"output[{idx}] conversion failed: {exc}")
+                continue
+            try:
+                reshaped = array.reshape((batch_size, -1))
+            except Exception as exc:  # pragma: no cover - reshape failure
+                name = self._output_names[idx] if idx < len(self._output_names) else str(idx)
+                errors.append(f"{name} reshape failed: {exc}")
+                continue
+            if reshaped.shape[1] != self._label_count:
+                name = self._output_names[idx] if idx < len(self._output_names) else str(idx)
+                errors.append(
+                    f"{name} final dimension {reshaped.shape[1]} != labels {self._label_count}"
+                )
+                continue
+            return reshaped
+        detail = "; ".join(errors)
+        if detail:
+            raise RuntimeError(f"WD14: unable to select output tensor ({detail})")
+        raise RuntimeError("WD14: unable to select output tensor")
 
     # 既存の _preprocess（1枚→(1,H,W,3)）は残しつつ、
     # バッチ用の「1枚→(H,W,3) float32」を返す軽量版を追加
@@ -531,6 +634,8 @@ class WD14Tagger(ITagger):
             idx = self._cat_to_idx.get(cat)
             if idx is not None and len(idx) > 0:
                 vec[idx] = float(v)
+        if hasattr(self, "_valid_label_mask"):
+            vec[~self._valid_label_mask] = np.inf
         return vec
 
     def _resolve_labels_path(self, explicit: str | Path | None) -> Path:
@@ -681,14 +786,9 @@ class WD14Tagger(ITagger):
 
         # ---------- 推論 ----------
         ort_start = perf_counter()
-        outputs = self._session.run(self._output_names, {self._input_name: batch})
+        outputs = self._run_session(batch)
         ort_ms = (perf_counter() - ort_start) * 1000.0
-        logits = outputs[0]
-
-        if logits.shape[1] != len(self._labels):
-            raise RuntimeError(
-                f"Model output dimension {logits.shape[1]} does not match label count {len(self._labels)}"
-            )
+        logits = self._extract_logits(outputs, batch.shape[0])
 
         post_start = perf_counter()
         # --- ベクトル化: ロジット→確率（またはそのまま） ---
