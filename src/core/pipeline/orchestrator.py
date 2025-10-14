@@ -13,11 +13,18 @@ from tagger.base import ITagger
 from utils.paths import ensure_dirs
 
 from .scanner import Scanner
-from .signature import _build_max_tags_map, _build_threshold_map, current_tagger_sig
+from .signature import _build_max_tags_map, _build_threshold_map, current_tagger_sig  # 既存
 from .stages.scan_stage import ScanStageResult
 from .stages.tag_stage import TagStage, TagStageResult
 from .stages.write_stage import WriteStage, WriteStageResult
 from .types import IndexPhase, IndexProgress, PipelineContext, ProgressEmitter
+from .utils import (
+    detect_tagger_provider,
+    is_wd14_defaults,
+    overlay_defaults,
+    provider_default_max_tags,
+    provider_default_thresholds,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -37,10 +44,37 @@ class IndexPipeline:
         settings = settings or load_settings()
         bootstrap_if_needed(db_path)
         ensure_dirs()
+        provider = detect_tagger_provider(settings)
         thresholds_cfg = getattr(settings.tagger, "thresholds", None) or {}
+        # max_tags_cfg = getattr(settings.tagger, "max_tags", None)
         thr_map = _build_threshold_map(thresholds_cfg)
         max_map = _build_max_tags_map(getattr(settings.tagger, "max_tags", None))
+
+        # ★ pixai のときの既定値適用ロジック
+        if provider == "pixai":
+            # 「未指定」または「WD14既定ぽい数値」が渡ってきたら、pixai既定に差し替え
+            if not thr_map or is_wd14_defaults(thr_map):
+                thr_map = provider_default_thresholds("pixai")
+            else:
+                # ユーザー指定の無いカテゴリだけ pixai 既定で補完
+                thr_map = overlay_defaults(thr_map, provider_default_thresholds("pixai"))
+
+            # max_tags が未指定なら pixai 既定
+            if not max_map:
+                max_map = provider_default_max_tags("pixai")
+            else:
+                max_map = overlay_defaults(max_map, provider_default_max_tags("pixai"))
+
+        else:
+            # wd14 側も「完全未指定」ならWD14既定に寄せると安定
+            if not thr_map:
+                thr_map = provider_default_thresholds("wd14")
+
         tagger_sig = current_tagger_sig(settings, thresholds=thr_map, max_tags=max_map)
+        # （任意）有効値の可視化ログ
+        eff_thr = {k.name.lower(): float(v) for k, v in thr_map.items()}
+        eff_max = {k.name.lower(): int(v) for k, v in max_map.items()}
+        logger.info("Effective provider=%s thresholds=%s max_tags=%s", provider, eff_thr, eff_max)
 
         self.ctx = PipelineContext(
             db_path=str(db_path),

@@ -20,6 +20,7 @@ class TaggingStage:
     ) -> None:
         self._ctx = ctx
         self._emitter = emitter
+        print(f"TaggingStage: ctx.thresholds={ctx.thresholds}, ctx.max_tags_map={ctx.max_tags_map}")
         self._tag_stage = TagStage(deps=deps)
         self._write_stage = WriteStage(deps=writer_deps)
 

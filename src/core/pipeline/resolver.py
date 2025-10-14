@@ -7,7 +7,13 @@ from typing import Mapping
 from core.config import PipelineSettings
 from tagger.base import ITagger, TagCategory
 
-from .utils import _serialise_max_tags, _serialise_thresholds, detect_tagger_provider
+from .utils import (
+    _serialise_max_tags,
+    _serialise_thresholds,
+    detect_tagger_provider,
+    provider_default_max_tags,
+    provider_default_thresholds,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -18,7 +24,18 @@ def _resolve_tagger(
     *,
     thresholds: Mapping[TagCategory, float] | None = None,
     max_tags: Mapping[TagCategory, int] | None = None,
-) -> ITagger:
+) -> tuple[ITagger, Mapping[TagCategory, float] | None, Mapping[TagCategory, int] | None]:
+    # まずプロバイダを確定
+    provider = detect_tagger_provider(settings)
+
+    # プロバイダ依存のデフォルト（未指定のときのみ）を適用
+    if provider == "pixai":
+        if not thresholds:
+            thresholds = provider_default_thresholds(provider)
+        if not max_tags:
+            max_tags = provider_default_max_tags(provider)
+
+    logger.info(f"thresholds: {thresholds}")
     serialised_thresholds = _serialise_thresholds(thresholds)
     serialised_max_tags = _serialise_max_tags(max_tags)
 
@@ -26,9 +43,9 @@ def _resolve_tagger(
         name = type(override).__name__
         model_path = getattr(override, "model_path", None)
         tags_csv = getattr(override, "tags_csv", None)
-        provider_value = getattr(override, "provider", None)
+        provider_value = getattr(override, "provider", provider)
         logger.info(
-            "Tagger in use: %s, provider=%s, model=%s, tags_csv=%s, thresholds=%s, max_tags=%s",
+            "override is not None Tagger in use: %s, provider=%s, model=%s, tags_csv=%s, thresholds=%s, max_tags=%s",
             name,
             provider_value,
             model_path,
@@ -36,7 +53,7 @@ def _resolve_tagger(
             serialised_thresholds,
             serialised_max_tags,
         )
-        return override
+        return override, thresholds, max_tags
 
     tagger_name = settings.tagger.name
     lowered = tagger_name.lower()
@@ -65,7 +82,7 @@ def _resolve_tagger(
         raise ValueError(f"Unknown tagger '{settings.tagger.name}'")
 
     logger.info(
-        "Tagger in use: %s, provider=%s, model=%s, tags_csv=%s, thresholds=%s, max_tags=%s",
+        "overridden Tagger in use: %s, provider=%s, model=%s, tags_csv=%s, thresholds=%s, max_tags=%s",
         tagger_name,
         provider,
         model_path_value,
@@ -73,7 +90,7 @@ def _resolve_tagger(
         serialised_thresholds,
         serialised_max_tags,
     )
-    return tagger_instance
+    return tagger_instance, thresholds, max_tags
 
 
 __all__ = ["_resolve_tagger"]

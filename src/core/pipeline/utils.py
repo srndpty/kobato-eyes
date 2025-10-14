@@ -1,12 +1,55 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 from pathlib import Path
 from typing import Mapping
 
 from core.config import PipelineSettings
 from tagger.base import TagCategory
 from tagger.labels_util import discover_labels_csv, load_selected_tags
+
+# 既定値（必要に応じて調整）
+WD14_DEFAULT_THRESHOLDS = {
+    TagCategory.GENERAL: 0.35,
+    TagCategory.CHARACTER: 0.25,
+    TagCategory.COPYRIGHT: 0.25,
+}
+PIXAI_DEFAULT_THRESHOLDS = {
+    TagCategory.GENERAL: 0.90,
+    TagCategory.CHARACTER: 0.95,
+    TagCategory.COPYRIGHT: 0.95,
+}
+PIXAI_DEFAULT_MAX_TAGS = {
+    TagCategory.GENERAL: 50,
+    TagCategory.CHARACTER: 3,
+    TagCategory.COPYRIGHT: 3,
+}
+
+
+def provider_default_thresholds(provider: str) -> dict[TagCategory, float]:
+    return PIXAI_DEFAULT_THRESHOLDS.copy() if provider == "pixai" else WD14_DEFAULT_THRESHOLDS.copy()
+
+
+def provider_default_max_tags(provider: str) -> dict[TagCategory, int]:
+    return PIXAI_DEFAULT_MAX_TAGS.copy() if provider == "pixai" else {}
+
+
+def is_wd14_defaults(th: dict[TagCategory, float] | None) -> bool:
+    if not th:
+        return False
+    try:
+        return all(abs(th.get(k, 0.0) - v) < 1e-6 for k, v in WD14_DEFAULT_THRESHOLDS.items())
+    except Exception:
+        return False
+
+
+def overlay_defaults(user_map: dict, defaults_map: dict):
+    """user指定を優先し、欠けているカテゴリだけdefaultsで埋める"""
+    result = defaults_map.copy()
+    result.update(user_map or {})
+    return result
+
 
 # ---- formatting / digest helpers ------------------------------------------------
 
@@ -69,6 +112,9 @@ def _serialise_max_tags(
     return {category.name.lower(): int(value) for category, value in max_tags.items()}
 
 
+logger = logging.getLogger(__name__)
+
+
 def detect_tagger_provider(settings: PipelineSettings) -> str:
     """Return the effective tagger provider after considering auto-detection."""
 
@@ -83,6 +129,13 @@ def detect_tagger_provider(settings: PipelineSettings) -> str:
         return "wd14"
     try:
         tags = load_selected_tags(csv_candidate)
+        logger.info(
+            "Loaded %d tags from %s (first=%r, last=%r)",
+            len(tags),
+            csv_candidate,
+            tags[0].name if tags else None,
+            tags[-1].name if tags else None,
+        )
     except Exception:
         return "wd14"
     return "pixai" if any(tag.ips for tag in tags) else "wd14"
@@ -96,3 +149,25 @@ __all__ = [
     "_serialise_max_tags",
     "detect_tagger_provider",
 ]
+
+
+# --- provider defaults ----------------------------------------------------------
+# PixAI はロジットが高めに出やすいので、保守的な初期値を返す
+# def provider_default_thresholds(provider: str) -> Mapping[TagCategory, float] | None:
+#     if provider == "pixai":
+#         return {
+#             TagCategory.GENERAL: 0.90,  # logit ≈ 2.197
+#             TagCategory.CHARACTER: 0.95,  # logit ≈ 2.944
+#             TagCategory.COPYRIGHT: 0.95,  # logit ≈ 2.944
+#         }
+#     return None
+
+
+# def provider_default_max_tags(provider: str) -> Mapping[TagCategory, int] | None:
+#     if provider == "pixai":
+#         return {
+#             TagCategory.GENERAL: 50,
+#             TagCategory.CHARACTER: 3,
+#             TagCategory.COPYRIGHT: 3,
+#         }
+#     return None

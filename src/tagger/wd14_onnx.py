@@ -223,9 +223,7 @@ class WD14Tagger(ITagger):
         """
 
         if len(output_names) != 1:
-            raise RuntimeError(
-                "Expected a single output tensor from WD14 ONNX model, got " f"{output_names}"
-            )
+            raise RuntimeError("Expected a single output tensor from WD14 ONNX model, got " f"{output_names}")
         return output_names
 
     @staticmethod
@@ -252,9 +250,7 @@ class WD14Tagger(ITagger):
         return "NHWC"
 
     @classmethod
-    def _infer_spatial_dims(
-        cls, shape: tuple[object, ...], layout: str
-    ) -> tuple[int | None, int | None]:
+    def _infer_spatial_dims(cls, shape: tuple[object, ...], layout: str) -> tuple[int | None, int | None]:
         if len(shape) != 4:
             return (None, None)
         if layout == "NCHW":
@@ -388,6 +384,22 @@ class WD14Tagger(ITagger):
         batch = self._format_for_session_input(batch_bgr_or_rgb_prepared)
         ort_start = perf_counter()
         outputs = self._session.run(self._output_names, {self._input_name: batch})
+        if os.getenv("KE_DEBUG_PIXAI", "0") == "1":
+            arr = outputs[0]
+            mn = float(np.min(arr))
+            mx = float(np.max(arr))
+            mean = float(np.mean(arr))
+            frac50 = float(np.mean(arr > 0.5))
+            frac90 = float(np.mean(arr > 0.9))
+            logger.info(
+                "DEBUG PixAI out stats: shape=%s min=%.4f max=%.4f mean=%.4f  >0.5=%.3f >0.9=%.3f",
+                getattr(arr, "shape", None),
+                mn,
+                mx,
+                mean,
+                frac50,
+                frac90,
+            )
         ort_ms = (perf_counter() - ort_start) * 1000.0
         logits = outputs[0]
         # 以降は従来 infer_batch() の後半（post）と同じ処理へ

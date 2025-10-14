@@ -39,8 +39,7 @@ class LoaderFactory(Protocol):
         batch_size: int,
         prefetch_batches: int,
         io_workers: int | None,
-    ) -> LoaderIterable:
-        ...
+    ) -> LoaderIterable: ...
 
 
 class TagStageDeps(Protocol):
@@ -53,8 +52,7 @@ class TagStageDeps(Protocol):
         batch_size: int,
         prefetch_batches: int,
         io_workers: int | None,
-    ) -> LoaderIterable:
-        ...
+    ) -> LoaderIterable: ...
 
 
 class _DefaultTagStageDeps:
@@ -118,7 +116,10 @@ class TagStage:
         records: list[_FileRecord],
     ) -> TagStageResult:
         """Run tagging inference and prepare DB items for persistence."""
+        import traceback
 
+        traceback.print_stack()
+        logger.info("ctx.thresholds: %s", ctx.thresholds)
         thresholds = ctx.thresholds
         max_tags_map = ctx.max_tags_map
         tagger_sig = ctx.tagger_sig
@@ -133,12 +134,17 @@ class TagStage:
         last_logged = 0
         db_items: list[DBItem] = []
 
-        tagger = _resolve_tagger(
+        tagger, th_fallback, k_fallback = _resolve_tagger(
             settings,
             ctx.tagger_override,
             thresholds=thresholds or None,
             max_tags=max_tags_map or None,
         )
+        # 呼び出し側が未指定だった場合のみ、resolver 側のデフォルトを反映
+        if not thresholds and th_fallback:
+            thresholds = th_fallback
+        if (not max_tags_map) and k_fallback:
+            max_tags_map = k_fallback
         logger.info("Tagging %d image(s)", len(tag_records))
 
         rec_by_path: dict[str, _FileRecord] = {str(r.path): r for r in tag_records}
@@ -149,9 +155,7 @@ class TagStage:
         try:
             current_batch = int(configured_batch)
         except (TypeError, ValueError):
-            logger.warning(
-                "Invalid batch size configuration %r; falling back to default", configured_batch
-            )
+            logger.warning("Invalid batch size configuration %r; falling back to default", configured_batch)
             current_batch = 32
         if current_batch < 1:
             logger.warning(
@@ -185,6 +189,10 @@ class TagStage:
         try:
             loader_iter = iter(loader)
             while True:
+                # すでに全件処理済みなら明示的に抜ける（安全装置）
+                if processed_tags >= len(tag_records):
+                    logger.info("Processed all %d images; stopping loader loop explicitly.", len(tag_records))
+                    break
                 t_wait0 = time.perf_counter()
                 try:
                     batch = next(loader_iter)
@@ -196,6 +204,7 @@ class TagStage:
                     break
                 if not batch:
                     logger.info("PIPE wait_batch=%.2fms (empty batch)", wait_batch_ms)
+                    time.sleep(0.05)
                     continue
                 batch_paths, batch_np_rgb, sizes = batch
 
@@ -226,14 +235,16 @@ class TagStage:
                     if supports_prepared:
                         results = _infer_prepared_with_retry(batch_np_rgb)
                     else:
-                        pil_batch = [
-                            Image.fromarray(np.clip(arr, 0.0, 255.0).astype(np.uint8)) for arr in rgb_list
-                        ]
+                        pil_batch = [Image.fromarray(np.clip(arr, 0.0, 255.0).astype(np.uint8)) for arr in rgb_list]
                         results = tagger.infer_batch(
                             pil_batch, thresholds=thresholds or None, max_tags=max_tags_map or None
                         )
                 except Exception:
-                    logger.exception("Tagger failed for a prepared batch" if supports_prepared else "Tagger fallback inference failed")
+                    logger.exception(
+                        "Tagger failed for a prepared batch"
+                        if supports_prepared
+                        else "Tagger fallback inference failed"
+                    )
                     continue
 
                 now_ts = time.time()
@@ -266,9 +277,7 @@ class TagStage:
 
                 processed_tags += len(batch_recs)
                 last_logged = self._log_step("Tagging", processed_tags, len(tag_records), last_logged)
-                emitter.emit(
-                    IndexProgress(phase=IndexPhase.TAG, done=processed_tags, total=len(tag_records))
-                )
+                emitter.emit(IndexProgress(phase=IndexPhase.TAG, done=processed_tags, total=len(tag_records)))
 
         finally:
             try:

@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import csv
 import json
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Iterator
+
+logger = logging.getLogger(__name__)
 
 _DEFAULT_TAG_FILENAMES: tuple[str, ...] = (
     "selected_tags.csv",
@@ -81,20 +84,26 @@ def _iter_csv_rows(csv_path: Path) -> Iterator[list[str]]:
         reader = csv.reader(handle)
         for row in reader:
             if not row:
+                logger.warning("Skipping empty row")
                 continue
             cells = [cell.strip() for cell in row]
             if not any(cells):
+                logger.warning("Skipping blank row: %r", row)
                 continue
             if cells[0].startswith("#"):
+                logger.warning("Skipping comment row: %r", cells)
                 continue
             lower_first = cells[0].lower()
-            if lower_first in {"tag_id", "tagid", "id", "name", "tag"}:
+            if lower_first in {"tag_id", "tagid", "id"}:
+                logger.warning("Skipping header row: %r, lower_first:%s", cells, lower_first)
                 continue
             # tagという名前のタグがあるので、ここでtagで除外してはいけない
-            if len(cells) > 1 and cells[1].lower() in {"name"}:
-                continue
-            if len(cells) > 2 and cells[2].lower() in {"category"}:
-                continue
+            # if len(cells) > 1 and cells[1].lower() in {"name"}:
+            #     logger.warning("Skipping header row: %r", cells)
+            #     continue
+            # if len(cells) > 2 and cells[2].lower() in {"category"}:
+            #     logger.warning("Skipping header row: %r", cells)
+            #     continue
             yield cells
 
 
@@ -121,6 +130,9 @@ def _parse_ips(value: str | None) -> tuple[str, ...]:
                 ips.append(cleaned)
         return tuple(ips)
     return ()
+
+
+BROKEN_TAG_PREFIX = "__pixai_broken_"
 
 
 def _parse_row(cells: list[str]) -> TagMeta | None:
@@ -156,7 +168,15 @@ def _parse_row(cells: list[str]) -> TagMeta | None:
             ips = _parse_ips(cells[3])
     cleaned = name.strip()
     if not cleaned:
-        return None
+        # 空nameの行は捨てずにプレースホルダを合成して返す（次元を維持）
+        rid: int | None = None
+        if _looks_like_int(cells[0]):
+            rid = int(cells[0])
+        elif len(cells) > 1 and _looks_like_int(cells[1]):
+            rid = int(cells[1])
+        placeholder = f"{BROKEN_TAG_PREFIX}{rid if rid is not None else 'unknown'}"
+        # カテゴリはMETA(=5) に寄せておくと閾値の影響を受けにくい
+        return TagMeta(name=placeholder, category=5, count=0, ips=())
     return TagMeta(name=cleaned, category=category, count=count, ips=ips)
 
 
@@ -177,10 +197,25 @@ def load_selected_tags(csv_path: str | Path) -> list[TagMeta]:
 
     path = Path(csv_path)
     labels: list[TagMeta] = []
-    for cells in _iter_csv_rows(path):
+    # for cells in _iter_csv_rows(path):
+    #     tag = _parse_row(cells)
+    #     if tag is not None:
+    #         labels.append(tag)
+    missing: list[tuple[int, list[str]]] = []
+    for lineno, cells in enumerate(_iter_csv_rows(path), start=1):
         tag = _parse_row(cells)
         if tag is not None:
             labels.append(tag)
+        else:
+            missing.append((lineno, cells))
+    if missing:
+        import logging
+
+        logger = logging.getLogger(__name__)
+        for lineno, cells in missing[:5]:  # 多すぎると邪魔なので先頭5件だけ
+            logger.error("CSV row dropped (lineno=%d): %r", lineno, cells)
+        if len(missing) > 5:
+            logger.error("...and %d more dropped rows", len(missing) - 5)
     return labels
 
 
