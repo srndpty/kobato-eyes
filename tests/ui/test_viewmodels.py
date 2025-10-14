@@ -88,6 +88,42 @@ def test_tags_view_model_wraps_dependencies(tmp_path: Path) -> None:
     assert calls["ensured"] is True
 
 
+def test_tags_view_model_retag_all_keyword_arguments(tmp_path: Path) -> None:
+    recorded: dict[str, object] = {}
+
+    def fake_retag_all(db_path: Path, *, force: bool, settings: PipelineSettings) -> int:
+        recorded["db_path"] = db_path
+        recorded["force"] = force
+        recorded["settings"] = settings
+        return 7
+
+    view_model = TagsViewModel(
+        db_path=tmp_path / "tags.db",
+        connection_factory=lambda path: f"conn:{Path(path)}",
+        run_index_once=lambda *args, **kwargs: {},
+        scan_and_tag=lambda *args, **kwargs: {},
+        retag_query=lambda *args, **kwargs: 0,
+        retag_all=fake_retag_all,
+        load_settings=lambda: PipelineSettings(),
+        load_thresholds=lambda conn: {},
+        list_tag_names=lambda conn: [],
+        search_files=lambda *args, **kwargs: [],
+        iter_paths_for_search=lambda *args, **kwargs: [],
+        ensure_directories=lambda: None,
+        make_export_dir=lambda query: tmp_path,
+        translate_query=lambda query, **kwargs: {},
+        extract_positive_terms=lambda query: set(),
+    )
+
+    settings = PipelineSettings()
+    result = view_model.retag_all(view_model.db_path, force=True, settings=settings)
+
+    assert result == 7
+    assert recorded["db_path"] == view_model.db_path
+    assert recorded["force"] is True
+    assert recorded["settings"] is settings
+
+
 def test_dup_view_model_cluster_and_thumbnails(tmp_path: Path) -> None:
     generated: dict[str, object] = {}
 
