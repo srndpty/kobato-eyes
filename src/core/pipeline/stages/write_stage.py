@@ -41,6 +41,7 @@ class _DefaultWriteStageDeps:
 
     def build_writer(self, *, ctx: PipelineContext, progress_cb):
         settings = ctx.settings
+        skip_fts = bool(getattr(settings, "skip_fts_during_write", False))
         return self._deps.dbwriter_factory(
             db_path=str(ctx.db_path),
             flush_chunk=getattr(settings, "db_flush_chunk", 1024),
@@ -48,7 +49,7 @@ class _DefaultWriteStageDeps:
             queue_size=int(os.environ.get("KE_DB_QUEUE", "1024")),
             default_tagger_sig=ctx.tagger_sig,
             unsafe_fast=True,
-            skip_fts=True,
+            skip_fts=skip_fts,
             progress_cb=progress_cb,
         )
 

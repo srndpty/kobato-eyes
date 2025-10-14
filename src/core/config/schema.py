@@ -97,6 +97,7 @@ class PipelineSettings(BaseModel):
     ssim_threshold: float = 0.92
     tagger: TaggerSettings = Field(default_factory=TaggerSettings)
     index_dir: str | None = None
+    skip_fts_during_write: bool = False
 
     @model_validator(mode="before")
     @classmethod

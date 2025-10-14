@@ -6,9 +6,12 @@ import sqlite3
 from pathlib import Path
 
 import pytest
+
+pytest.importorskip("PIL")
+
 from PIL import Image
 
-from core.pipeline import current_tagger_sig, run_index_once
+from core.pipeline import current_tagger_sig, retag_all, run_index_once
 from core.config import PipelineSettings, TaggerSettings
 from db.connection import get_conn
 from tagger.base import ITagger, TagCategory, TagPrediction, TagResult
@@ -93,5 +96,57 @@ def test_retagging_on_signature_change(tmp_path: Path) -> None:
         expected_sig = current_tagger_sig(settings_wd14)
         assert new_sig == expected_sig
         assert _fetch_tags(conn) == {"retagged_tag"}
+    finally:
+        conn.close()
+
+
+def test_retagging_restores_fts_entries(tmp_path: Path) -> None:
+    db_path = tmp_path / "fts_restore.db"
+    image_path = tmp_path / "assets" / "sample.png"
+    _create_test_image(image_path)
+
+    settings = PipelineSettings(
+        roots=[str(tmp_path / "assets")],
+        tagger=TaggerSettings(name="dummy"),
+    )
+
+    first_stats = run_index_once(
+        db_path,
+        settings=settings,
+        tagger_override=_StubTagger("initial_tag"),
+    )
+    assert int(first_stats.get("tagged", 0)) == 1
+
+    conn = get_conn(db_path)
+    try:
+        row = conn.execute("SELECT id FROM files LIMIT 1").fetchone()
+        assert row is not None
+        file_id = int(row["id"])
+        initial_count = conn.execute("SELECT COUNT(*) FROM fts_files").fetchone()
+        assert initial_count is not None
+        assert int(initial_count[0]) == 1
+        conn.execute("DELETE FROM fts_files WHERE rowid = ?", (file_id,))
+        conn.commit()
+    finally:
+        conn.close()
+
+    # Flag the file for re-tagging and re-run the pipeline with a different tagger output.
+    retag_all(db_path, force=True, settings=settings)
+
+    second_stats = run_index_once(
+        db_path,
+        settings=settings,
+        tagger_override=_StubTagger("retagged_tag"),
+    )
+    assert int(second_stats.get("tagged", 0)) == 1
+
+    conn = get_conn(db_path)
+    try:
+        count_row = conn.execute("SELECT COUNT(*) FROM fts_files").fetchone()
+        assert count_row is not None
+        assert int(count_row[0]) == 1
+        text_row = conn.execute("SELECT text FROM fts_files WHERE rowid = ?", (file_id,)).fetchone()
+        assert text_row is not None
+        assert "retagged_tag" in str(text_row["text"])
     finally:
         conn.close()
