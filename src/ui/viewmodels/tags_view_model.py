@@ -163,7 +163,7 @@ class TagsViewModel(QObject):
     def retag_all(self, db_path: Path, *, force: bool, settings: PipelineSettings) -> int:
         """Retag the entire library using the current pipeline settings."""
 
-        return self._retag_all(Path(db_path), force, settings)
+        return self._retag_all(Path(db_path), force=force, settings=settings)
 
     def translate_query(self, query: str, **kwargs) -> object:
         """Translate user search text into SQL fragments."""
