@@ -9,7 +9,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from time import perf_counter
-from typing import Iterable, List, Sequence
+from typing import Any, Iterable, List, Sequence
 
 import cv2
 import numpy as np
@@ -53,6 +53,84 @@ class _Label:
 
 def _sigmoid(x: np.ndarray) -> np.ndarray:
     return 1.0 / (1.0 + np.exp(-x))
+
+
+def _dim_to_int(value: Any) -> int | None:
+    """Best-effort conversion of ONNX dimension descriptors to integers."""
+
+    if isinstance(value, (int, np.integer)):
+        return int(value)
+    if isinstance(value, str):
+        stripped = value.strip()
+        if stripped.startswith("-") and stripped[1:].isdigit():
+            return int(stripped)
+        if stripped.isdigit():
+            return int(stripped)
+    return None
+
+
+def _infer_input_geometry(shape: Sequence[Any], fallback: int) -> tuple[str, int, int]:
+    """Infer layout (``NHWC`` or ``NCHW``) and resolution from an input tensor shape."""
+
+    layout = "NHWC"
+    height = int(fallback)
+    width = int(fallback)
+    if len(shape) >= 4:
+        dims = [_dim_to_int(dim) for dim in shape[:4]]
+        # Remove batch dimension when present
+        if len(dims) == 4:
+            _, second, third, fourth = dims
+        else:
+            second = third = fourth = None
+        if second == 3:
+            layout = "NCHW"
+            height = third or height
+            width = fourth or width
+        elif fourth == 3:
+            layout = "NHWC"
+            height = second or height
+            width = third or width
+        else:
+            # Fall back to whichever dimension equals three, prioritising channel-last
+            if fourth is None and len(shape) >= 4:
+                last_dim = _dim_to_int(shape[-1])
+                if last_dim == 3:
+                    layout = "NHWC"
+                    height = _dim_to_int(shape[-3]) or height
+                    width = _dim_to_int(shape[-2]) or width
+            if second is None and len(shape) >= 4:
+                first_after_batch = _dim_to_int(shape[1])
+                if first_after_batch == 3:
+                    layout = "NCHW"
+                    height = _dim_to_int(shape[2]) or height
+                    width = _dim_to_int(shape[3]) or width
+
+    return layout, int(height if height and height > 0 else fallback), int(width if width and width > 0 else fallback)
+
+
+def _select_output_name(
+    outputs: Sequence["ort.NodeArg"],
+    label_count: int,
+) -> str:
+    """Choose the ONNX output that most likely contains tag logits."""
+
+    def _score(idx: int, output: "ort.NodeArg") -> tuple[int, int, int, int]:
+        name = output.name.lower()
+        dims = [_dim_to_int(dim) for dim in getattr(output, "shape", [])]
+        matches_last = 1 if dims and dims[-1] == label_count else 0
+        matches_any = 1 if label_count in dims else 0
+        name_score = 0
+        if "logit" in name:
+            name_score = 3
+        elif "prob" in name or "pred" in name:
+            name_score = 2
+        return (matches_last, matches_any, name_score, -idx)
+
+    if not outputs:
+        raise RuntimeError("WD14: model does not expose any outputs")
+
+    best_idx = max(range(len(outputs)), key=lambda i: _score(i, outputs[i]))
+    return outputs[best_idx].name
 
 
 logger = logging.getLogger(__name__)
@@ -164,8 +242,19 @@ class WD14Tagger(ITagger):
         else:
             logger.info("WD14: using providers %s", ", ".join(chosen_providers))
         self._session = session
-        self._input_name = self._session.get_inputs()[0].name
-        self._output_names = [output.name for output in self._session.get_outputs()]
+        input_meta = self._session.get_inputs()[0]
+        self._input_name = input_meta.name
+        self._input_shape = tuple(getattr(input_meta, "shape", ()))
+        self._input_layout, inferred_height, inferred_width = _infer_input_geometry(
+            self._input_shape, self._input_size
+        )
+        self._input_height = inferred_height
+        self._input_width = inferred_width
+        self._input_size = inferred_height  # keep legacy attribute in sync
+
+        self._onnx_outputs = list(self._session.get_outputs())
+        self._logits_output_name = _select_output_name(self._onnx_outputs, len(self._labels))
+        self._output_names = [self._logits_output_name]
 
         # ==== 追加: ベクトル化用の前計算（名前/カテゴリ/カテゴリ→index配列） ====
         # Python ループ削減のため、一度だけ NumPy 配列化して保持
@@ -203,21 +292,44 @@ class WD14Tagger(ITagger):
         self._batch_seq = 0
         self._last_batch_end = None
 
-        if len(self._output_names) != 1:
-            raise RuntimeError("Expected a single output tensor from WD14 ONNX model, got " f"{self._output_names}")
-
     @property
     def input_size_px(self) -> int:
         return int(self._input_size)
 
+    def _coerce_prepared_batch(self, batch: np.ndarray) -> np.ndarray:
+        """Ensure the provided batch matches the model's expected layout."""
+
+        arr = np.asarray(batch)
+        if arr.ndim != 4:
+            raise ValueError(f"Expected 4D batch tensor, got shape {arr.shape}")
+        layout = self._input_layout
+        if layout == "NCHW":
+            if arr.shape[1] == 3:
+                coerced = arr
+            elif arr.shape[-1] == 3:
+                coerced = np.transpose(arr, (0, 3, 1, 2))
+            else:
+                raise ValueError(f"NCHW input expects channel dimension of 3, got shape {arr.shape}")
+        else:  # NHWC
+            if arr.shape[-1] == 3:
+                coerced = arr
+            elif arr.shape[1] == 3:
+                coerced = np.transpose(arr, (0, 2, 3, 1))
+            else:
+                raise ValueError(f"NHWC input expects channel dimension of 3, got shape {arr.shape}")
+
+        if coerced.dtype != np.float32:
+            coerced = coerced.astype(np.float32, copy=False)
+        return np.ascontiguousarray(coerced)
+
     # ---- 追加: BGR(0..255 or uint8) のリストをまとめてモデル入力に整形 ----
     def prepare_batch_from_bgr(self, bgr_list: List[np.ndarray]) -> np.ndarray:
-        H = self._session.get_inputs()[0].shape[1] or self._input_size
-        out = np.empty((len(bgr_list), H, H, 3), dtype=np.float32)
+        height = self._input_height
+        out = np.empty((len(bgr_list), height, height, 3), dtype=np.float32)
         for i, im in enumerate(bgr_list):
             if im is None:
                 # ダミーで白
-                out[i] = 255.0
+                out[i].fill(255.0)
                 continue
             # 4ch(PNG)なら白に合成
             if im.ndim == 3 and im.shape[2] == 4:
@@ -230,7 +342,7 @@ class WD14Tagger(ITagger):
 
             # 正方形パディング
             h, w = bgr.shape[:2]
-            side = max(h, w, H)
+            side = max(h, w, height)
             top = (side - h) // 2
             left = (side - w) // 2
             sq = cv2.copyMakeBorder(
@@ -238,23 +350,22 @@ class WD14Tagger(ITagger):
             )
 
             # resize（元と比べて拡大: CUBIC / 縮小: AREA）
-            interp = cv2.INTER_CUBIC if side < H else cv2.INTER_AREA
-            resized = cv2.resize(sq, (H, H), interpolation=interp)
+            interp = cv2.INTER_CUBIC if side < height else cv2.INTER_AREA
+            resized = cv2.resize(sq, (height, height), interpolation=interp)
 
             out[i] = resized.astype(np.float32)  # 正規化は元実装に合わせず(=そのまま0..255)
-        return out  # (B,H,W,3) float32
+        return self._coerce_prepared_batch(out)  # (B,H,W,3) float32
 
     def prepare_batch_pil(self, images: list[Image.Image]) -> np.ndarray:
-        _, H, _, _ = self._session.get_inputs()[0].shape
         batch = np.vstack([self._preprocess(im) for im in images])  # (B,H,W,3) float32
-        return batch
+        return self._coerce_prepared_batch(batch)
 
     def prepare_batch_from_rgb_np(self, imgs_rgb: Sequence[np.ndarray]) -> np.ndarray:
         """
         Loader から受け取った RGB uint8 の np.ndarray 群を、
         既存 _preprocess(PIL) と完全同一ロジックで (B,H,W,3) float32 に整形する。
         """
-        _, height, _, _ = self._session.get_inputs()[0].shape  # NHWC 前提
+        height = self._input_height
         B = len(imgs_rgb)
         out = np.empty((B, height, height, 3), dtype=np.float32)
 
@@ -286,7 +397,7 @@ class WD14Tagger(ITagger):
 
             out[i] = bgr.astype(np.float32)  # 0..255 の float32（既存と同じ）
 
-        return out
+        return self._coerce_prepared_batch(out)
 
     # ---- 追加: すでに整形済みバッチを推論 ----
     def infer_batch_prepared(
@@ -305,8 +416,9 @@ class WD14Tagger(ITagger):
             idle_ms = (start - self._last_batch_end) * 1000.0
 
         batch = np.ascontiguousarray(batch_bgr_or_rgb_prepared, dtype=np.float32)
+        batch = self._coerce_prepared_batch(batch)
         ort_start = perf_counter()
-        outputs = self._session.run(self._output_names, {self._input_name: batch})
+        outputs = self._session.run([self._logits_output_name], {self._input_name: batch})
         ort_ms = (perf_counter() - ort_start) * 1000.0
         logits = outputs[0]
         # 以降は従来 infer_batch() の後半（post）と同じ処理へ
@@ -609,7 +721,7 @@ class WD14Tagger(ITagger):
 
     # borrowed from: https://huggingface.co/spaces/deepghs/wd14_tagging_online/blob/main/app.py
     def _preprocess(self, image: Image.Image) -> np.ndarray:
-        _, height, _, _ = self._session.get_inputs()[0].shape
+        height = self._input_height
 
         # alpha to white
         image = image.convert("RGBA")
@@ -658,7 +770,7 @@ class WD14Tagger(ITagger):
         # ---------- 並列前処理 ----------
         preprocess_start = perf_counter()
         B = len(image_list)
-        H = self._input_size
+        H = self._input_height
         # 事前確保した一塊のバッファ（再利用はタグ付け側のバッチライフサイクル次第）
         batch = np.empty((B, H, H, 3), dtype=np.float32)
 
@@ -681,7 +793,8 @@ class WD14Tagger(ITagger):
 
         # ---------- 推論 ----------
         ort_start = perf_counter()
-        outputs = self._session.run(self._output_names, {self._input_name: batch})
+        batch = self._coerce_prepared_batch(batch)
+        outputs = self._session.run([self._logits_output_name], {self._input_name: batch})
         ort_ms = (perf_counter() - ort_start) * 1000.0
         logits = outputs[0]
 

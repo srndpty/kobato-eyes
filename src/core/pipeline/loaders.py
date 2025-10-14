@@ -208,10 +208,15 @@ class PrefetchLoaderPrepared:
                     if self._stop.is_set():
                         break
         finally:
-            try:
-                self._q.put(None, timeout=1)
-            except Exception:
-                pass
+            while True:
+                try:
+                    self._q.put(None, timeout=1)
+                    break
+                except queue.Full:
+                    try:
+                        self._q.get(timeout=1)
+                    except queue.Empty:
+                        continue
 
     def __iter__(self) -> Iterator[Tuple[list[str], np.ndarray, list[tuple[int, int]]]]:
         while True:
@@ -222,11 +227,15 @@ class PrefetchLoaderPrepared:
 
     def close(self) -> None:
         self._stop.set()
-        try:
-            while True:
-                self._q.get_nowait()
-        except Exception:
-            pass
+        while True:
+            try:
+                self._q.put(None, timeout=1)
+                break
+            except queue.Full:
+                try:
+                    self._q.get(timeout=1)
+                except queue.Empty:
+                    continue
         if self._th.is_alive():
             self._th.join(timeout=2.0)
         logger.info("PrefetchLoaderPrepared: stop")

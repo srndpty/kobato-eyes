@@ -45,13 +45,21 @@ def _resolve_tagger(
         from tagger.dummy import DummyTagger
 
         tagger_instance: ITagger = DummyTagger()
-    elif lowered == "wd14-onnx":
+    elif lowered in {"wd14-onnx", "wd14"}:
         from tagger.wd14_onnx import WD14Tagger
 
         if not settings.tagger.model_path:
             raise ValueError("WD14: model_path is required")
         model_path_obj = Path(settings.tagger.model_path)
         tagger_instance = WD14Tagger(model_path_obj, tags_csv=settings.tagger.tags_csv)
+        model_path_value = str(model_path_obj)
+    elif lowered in {"pixai-onnx", "pixai"}:
+        from tagger.pixai_onnx import PixaiOnnxTagger
+
+        if not settings.tagger.model_path:
+            raise ValueError("PixAI: model_path is required")
+        model_path_obj = Path(settings.tagger.model_path)
+        tagger_instance = PixaiOnnxTagger(model_path_obj, tags_csv=settings.tagger.tags_csv)
         model_path_value = str(model_path_obj)
     else:
         raise ValueError(f"Unknown tagger '{settings.tagger.name}'")
