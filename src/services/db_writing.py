@@ -165,7 +165,7 @@ class DBWritingService(DBWriteQueue):
 
     def _process_queue(self, conn: sqlite3.Connection) -> None:
         batch: List[DBItem] = []
-        while not self._stop_evt.is_set():
+        while True:
             msg = self._poll_queue()
             if msg is None:
                 if batch:
@@ -363,9 +363,7 @@ class DBWritingService(DBWriteQueue):
         if not row or int(row[0]) == 0:
             return
         total_tags = int(row[0])
-        total_files = int(
-            conn.execute("SELECT count(DISTINCT file_id) FROM temp.tmp_file_tags").fetchone()[0]
-        )
+        total_files = int(conn.execute("SELECT count(DISTINCT file_id) FROM temp.tmp_file_tags").fetchone()[0])
         total_meta = int(conn.execute("SELECT count(*) FROM temp.tmp_files_meta").fetchone()[0])
         self._log.info("DBWritingService: offline merge start (tmp->disk)")
         self._emit_progress("merge.start", 0, total_tags)
@@ -376,16 +374,12 @@ class DBWritingService(DBWriteQueue):
             self._log.warning("DBWritingService: drop index failed: %s", exc)
         conn.execute("BEGIN IMMEDIATE")
         try:
-            rows = conn.execute(
-                "SELECT name, MAX(category) FROM temp.tmp_tag_defs GROUP BY name"
-            ).fetchall()
+            rows = conn.execute("SELECT name, MAX(category) FROM temp.tmp_tag_defs GROUP BY name").fetchall()
             if rows:
                 defs = [{"name": r[0], "category": int(r[1] or 0)} for r in rows]
                 upsert_tags(conn, defs)
             conn.execute("DROP TABLE IF EXISTS temp.tmp_file_ids")
-            conn.execute(
-                "CREATE TABLE temp.tmp_file_ids AS SELECT DISTINCT file_id FROM temp.tmp_file_tags"
-            )
+            conn.execute("CREATE TABLE temp.tmp_file_ids AS SELECT DISTINCT file_id FROM temp.tmp_file_tags")
             self._emit_progress("merge.delete", 0, total_files)
             done = 0
             for chunk in self._chunked_table(conn, "temp.tmp_file_ids", step=5000):
@@ -393,15 +387,9 @@ class DBWritingService(DBWriteQueue):
                 conn.execute(f"DELETE FROM file_tags WHERE file_id IN ({placeholders})", chunk)
                 done += len(chunk)
                 self._emit_progress("merge.delete", done, total_files)
-            conn.execute(
-                "CREATE INDEX IF NOT EXISTS temp.idx_tmp_ft_name ON tmp_file_tags(tag_name)"
-            )
-            conn.execute(
-                "CREATE INDEX IF NOT EXISTS temp.idx_tmp_ft_file ON tmp_file_tags(file_id)"
-            )
-            conn.execute(
-                "CREATE INDEX IF NOT EXISTS temp.idx_tmp_fm_file ON tmp_files_meta(file_id)"
-            )
+            conn.execute("CREATE INDEX IF NOT EXISTS temp.idx_tmp_ft_name ON tmp_file_tags(tag_name)")
+            conn.execute("CREATE INDEX IF NOT EXISTS temp.idx_tmp_ft_file ON tmp_file_tags(file_id)")
+            conn.execute("CREATE INDEX IF NOT EXISTS temp.idx_tmp_fm_file ON tmp_files_meta(file_id)")
             self._emit_progress("merge.insert", 0, total_tags)
             done = 0
             for start, end in self._rowid_windows(conn, "temp.tmp_file_tags", 100_000):
@@ -452,9 +440,7 @@ class DBWritingService(DBWriteQueue):
             self._emit_progress("merge.index", 0, 2)
             conn.execute("CREATE INDEX IF NOT EXISTS idx_file_tags_tag_id ON file_tags(tag_id)")
             self._emit_progress("merge.index", 1, 2)
-            conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_file_tags_tag_score ON file_tags(tag_id, score)"
-            )
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_file_tags_tag_score ON file_tags(tag_id, score)")
             self._emit_progress("merge.index", 2, 2)
             conn.commit()
         except Exception as exc:
