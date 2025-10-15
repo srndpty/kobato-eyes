@@ -1286,6 +1286,26 @@ class TagsTab(QWidget):
         tags: list[labels_util.TagMeta] = list(csv_tags)
         seen_names = {tag.name.lower() for tag in tags}
         db_tags: list[str] = []
+
+        # 作品名(IP)ごとの人気度を、紐づくキャラのcountで集計
+        ip_counts: dict[str, int] = {}
+        for meta in csv_tags:
+            if meta.ips:
+                base = int(meta.count or 0)
+                for ip in meta.ips:
+                    ip_counts[ip] = ip_counts.get(ip, 0) + base
+
+        # すべてのIP名をcopyright(=3)として追加（既存と重複はスキップ）
+        for ip, cnt in ip_counts.items():
+            key = ip.strip().lower()
+            if not key:
+                continue
+            if key in seen_names:
+                continue
+            seen_names.add(key)
+            # 3 は copyright カテゴリ（enum があるなら TagCategory.COPYRIGHT.value を使ってOK）
+            tags.append(labels_util.TagMeta(name=ip, category=TagCategory.COPYRIGHT.value, count=cnt))
+
         if self._conn is not None:
             try:
                 db_tags = self._view_model.list_tag_names(self._conn)
@@ -1319,9 +1339,7 @@ class TagsTab(QWidget):
             self._stack.setCurrentWidget(target)
         self._update_control_states()
 
-    def _prepare_settings_for_index(
-        self, settings: PipelineSettings | None = None
-    ) -> PipelineSettings | None:
+    def _prepare_settings_for_index(self, settings: PipelineSettings | None = None) -> PipelineSettings | None:
         """Return usable settings when at least one scan root exists."""
 
         try:
@@ -1349,8 +1367,7 @@ class TagsTab(QWidget):
             )
         else:
             message = (
-                "No scan roots are configured.\n"
-                "Open Settings → Roots and add at least one folder before indexing."
+                "No scan roots are configured.\n" "Open Settings → Roots and add at least one folder before indexing."
             )
 
         QMessageBox.warning(self, "Configure scan roots", message)
@@ -1757,7 +1774,9 @@ class TagsTab(QWidget):
         self._search_thread = thread
 
         worker.chunkReady.connect(lambda rows, g=generation: self._handle_search_chunk(rows, g))
-        worker.finished.connect(lambda success, cancelled, g=generation: self._handle_search_finished(success, cancelled, g))
+        worker.finished.connect(
+            lambda success, cancelled, g=generation: self._handle_search_finished(success, cancelled, g)
+        )
         worker.error.connect(lambda message, g=generation: self._handle_search_error(message, g))
 
         thread.started.connect(worker.run)
