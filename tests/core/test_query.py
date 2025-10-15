@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 
 from core.query import QueryFragment, translate_query
-
+from tagger.base import TagCategory
 
 ALIAS = "f"
 
@@ -50,14 +50,11 @@ def test_category_and_score_filters() -> None:
         "EXISTS (SELECT 1 FROM file_tags ft JOIN tags t ON t.id = ft.tag_id "
         f"WHERE ft.file_id = {ALIAS}.id AND t.category = ?)"
     )
-    score_clause = (
-        "EXISTS (SELECT 1 FROM file_tags ft "
-        f"WHERE ft.file_id = {ALIAS}.id AND ft.score > ? )"
-    )
+    score_clause = "EXISTS (SELECT 1 FROM file_tags ft " f"WHERE ft.file_id = {ALIAS}.id AND ft.score > ? )"
     expected = f"({category_clause}) AND ({score_clause})"
     fragment = translate_query("category:character score>0.75", file_alias=ALIAS)
     assert fragment.where == expected
-    assert fragment.params == [1, 0.75]
+    assert fragment.params == [TagCategory.CHARACTER.value, 0.75]
 
 
 def test_parentheses_override_precedence() -> None:

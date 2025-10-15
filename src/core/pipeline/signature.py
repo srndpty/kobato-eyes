@@ -6,7 +6,7 @@ from typing import Mapping
 from core.config import PipelineSettings
 from tagger.base import TagCategory
 
-from .utils import _digest_identifier, _format_sig_mapping
+from .utils import _digest_identifier, _format_sig_mapping, detect_tagger_provider
 
 # 外部から使う：_build_threshold_map / _build_max_tags_map / current_tagger_sig
 
@@ -76,6 +76,7 @@ def current_tagger_sig(
     serialised_max_tags = {k.name.lower(): int(v) for k, v in max_tags_map.items()}
 
     tagger_name = str(getattr(settings.tagger, "name", "") or "").lower()
+    provider = detect_tagger_provider(settings)
     model_path = getattr(settings.tagger, "model_path", None)
     tags_csv = getattr(settings.tagger, "tags_csv", None)
 
@@ -83,7 +84,10 @@ def current_tagger_sig(
     csv_digest = _digest_identifier(_normalise_sig_source(tags_csv))
     thresholds_part = _format_sig_mapping(serialised_thresholds)
     max_tags_part = _format_sig_mapping(serialised_max_tags)
-    return f"{tagger_name}:{model_digest}:csv={csv_digest}:thr={thresholds_part}:max={max_tags_part}"
+    return (
+        f"{tagger_name}:{provider}:{model_digest}:"
+        f"csv={csv_digest}:thr={thresholds_part}:max={max_tags_part}"
+    )
 
 
 __all__ = [

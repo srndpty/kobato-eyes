@@ -207,21 +207,34 @@ class PrefetchLoaderPrepared:
 
                     if self._stop.is_set():
                         break
+        except Exception as e:
+            logger.error("PrefetchLoaderPrepared: producer failed: %s", e, exc_info=True)
         finally:
-            try:
-                self._q.put(None, timeout=1)
-            except Exception:
-                pass
+            # 終端シグナルは必ず入れる（ブロッキングでOK）
+            logger.info("PrefetchLoaderPrepared: producer finished; enqueue sentinel")
+            self._q.put(None)  # block until there is space
 
     def __iter__(self) -> Iterator[Tuple[list[str], np.ndarray, list[tuple[int, int]]]]:
         while True:
-            item = self._q.get()
+            try:
+                item = self._q.get(timeout=5.0)
+            except queue.Empty:
+                if self._stop.is_set():
+                    logger.info("PrefetchLoaderPrepared: stop signaled; iterator exits")
+                    return
+                continue
             if item is None:
                 return
             yield item
 
     def close(self) -> None:
         self._stop.set()
+        # 先にセンチネルを入れて消費側を解除（あっても重複は害なし）
+        try:
+            self._q.put_nowait(None)
+        except queue.Full:
+            pass
+        # 残骸は掃除（任意）
         try:
             while True:
                 self._q.get_nowait()

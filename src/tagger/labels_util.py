@@ -3,9 +3,13 @@
 from __future__ import annotations
 
 import csv
+import json
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Iterator
+
+logger = logging.getLogger(__name__)
 
 _DEFAULT_TAG_FILENAMES: tuple[str, ...] = (
     "selected_tags.csv",
@@ -36,6 +40,7 @@ class TagMeta:
     name: str
     category: int
     count: int | None = None
+    ips: tuple[str, ...] = ()
 
 
 def _looks_like_int(value: str) -> bool:
@@ -86,20 +91,44 @@ def _iter_csv_rows(csv_path: Path) -> Iterator[list[str]]:
             if cells[0].startswith("#"):
                 continue
             lower_first = cells[0].lower()
-            if lower_first in {"tag_id", "tagid", "id", "name", "tag"}:
-                continue
-            # tagという名前のタグがあるので、ここでtagで除外してはいけない
-            if len(cells) > 1 and cells[1].lower() in {"name"}:
-                continue
-            if len(cells) > 2 and cells[2].lower() in {"category"}:
+            if lower_first in {"tag_id", "tagid", "id"}:
                 continue
             yield cells
+
+
+def _parse_ips(value: str | None) -> tuple[str, ...]:
+    if not value:
+        return ()
+    candidate = value.strip()
+    if not candidate:
+        return ()
+    try:
+        parsed = json.loads(candidate)
+    except Exception:
+        return ()
+    if isinstance(parsed, str):
+        cleaned = parsed.strip()
+        return (cleaned,) if cleaned else ()
+    if isinstance(parsed, (list, tuple)):
+        ips: list[str] = []
+        for item in parsed:
+            if not isinstance(item, str):
+                continue
+            cleaned = item.strip()
+            if cleaned:
+                ips.append(cleaned)
+        return tuple(ips)
+    return ()
+
+
+BROKEN_TAG_PREFIX = "__pixai_broken_"
 
 
 def _parse_row(cells: list[str]) -> TagMeta | None:
     name = ""
     category = 0
     count = 0
+    ips: tuple[str, ...] = ()
     cell_count = len(cells)
     if cell_count == 1:
         name = cells[0]
@@ -111,10 +140,11 @@ def _parse_row(cells: list[str]) -> TagMeta | None:
             name = first
             category = _parse_category(second)
     elif cell_count >= 3 and _looks_like_int(cells[0]):
-        padded = (cells + ["", "", "", ""])[:4]
-        name = padded[1]
-        category = _parse_category(padded[2])
-        count = _parse_count(padded[3])
+        name = cells[2] if cell_count > 2 else ""
+        category = _parse_category(cells[3] if cell_count > 3 else None)
+        count = _parse_count(cells[4] if cell_count > 4 else None)
+        if cell_count > 5:
+            ips = _parse_ips(cells[5])
     else:
         first = cells[0]
         name = first
@@ -123,10 +153,20 @@ def _parse_row(cells: list[str]) -> TagMeta | None:
         category = _parse_category(second)
         if cell_count > 2:
             count = _parse_count(third)
+        if cell_count > 3:
+            ips = _parse_ips(cells[3])
     cleaned = name.strip()
     if not cleaned:
-        return None
-    return TagMeta(name=cleaned, category=category, count=count)
+        # 空nameの行は捨てずにプレースホルダを合成して返す（次元を維持）
+        rid: int | None = None
+        if _looks_like_int(cells[0]):
+            rid = int(cells[0])
+        elif len(cells) > 1 and _looks_like_int(cells[1]):
+            rid = int(cells[1])
+        placeholder = f"{BROKEN_TAG_PREFIX}{rid if rid is not None else 'unknown'}"
+        # カテゴリはMETA(=5) に寄せておくと閾値の影響を受けにくい
+        return TagMeta(name=placeholder, category=5, count=0, ips=())
+    return TagMeta(name=cleaned, category=category, count=count, ips=ips)
 
 
 def load_selected_tags(csv_path: str | Path) -> list[TagMeta]:
@@ -146,10 +186,21 @@ def load_selected_tags(csv_path: str | Path) -> list[TagMeta]:
 
     path = Path(csv_path)
     labels: list[TagMeta] = []
-    for cells in _iter_csv_rows(path):
+    missing: list[tuple[int, list[str]]] = []
+    for lineno, cells in enumerate(_iter_csv_rows(path), start=1):
         tag = _parse_row(cells)
         if tag is not None:
             labels.append(tag)
+        else:
+            missing.append((lineno, cells))
+    if missing:
+        import logging
+
+        logger = logging.getLogger(__name__)
+        for lineno, cells in missing[:5]:  # 多すぎると邪魔なので先頭5件だけ
+            logger.error("CSV row dropped (lineno=%d): %r", lineno, cells)
+        if len(missing) > 5:
+            logger.error("...and %d more dropped rows", len(missing) - 5)
     return labels
 
 
