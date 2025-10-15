@@ -116,10 +116,6 @@ class TagStage:
         records: list[_FileRecord],
     ) -> TagStageResult:
         """Run tagging inference and prepare DB items for persistence."""
-        import traceback
-
-        traceback.print_stack()
-        logger.info("ctx.thresholds: %s", ctx.thresholds)
         thresholds = ctx.thresholds
         max_tags_map = ctx.max_tags_map
         tagger_sig = ctx.tagger_sig

@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import logging
 
-from core.pipeline import _build_max_tags_map, _build_threshold_map, _resolve_tagger
 from core.config import PipelineSettings, TaggerSettings
+from core.pipeline import _build_max_tags_map, _build_threshold_map, _resolve_tagger
 
 
 def test_resolve_tagger_logs_active_choice(caplog) -> None:
@@ -16,6 +16,4 @@ def test_resolve_tagger_logs_active_choice(caplog) -> None:
 
     _resolve_tagger(settings, None, thresholds=thresholds, max_tags=max_tags)
 
-    assert any(
-        record.message.startswith("Tagger in use: dummy") for record in caplog.records
-    )
+    assert any("Tagger in use: dummy" in record.message for record in caplog.records)

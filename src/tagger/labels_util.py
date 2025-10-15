@@ -84,26 +84,15 @@ def _iter_csv_rows(csv_path: Path) -> Iterator[list[str]]:
         reader = csv.reader(handle)
         for row in reader:
             if not row:
-                logger.warning("Skipping empty row")
                 continue
             cells = [cell.strip() for cell in row]
             if not any(cells):
-                logger.warning("Skipping blank row: %r", row)
                 continue
             if cells[0].startswith("#"):
-                logger.warning("Skipping comment row: %r", cells)
                 continue
             lower_first = cells[0].lower()
             if lower_first in {"tag_id", "tagid", "id"}:
-                logger.warning("Skipping header row: %r, lower_first:%s", cells, lower_first)
                 continue
-            # tagという名前のタグがあるので、ここでtagで除外してはいけない
-            # if len(cells) > 1 and cells[1].lower() in {"name"}:
-            #     logger.warning("Skipping header row: %r", cells)
-            #     continue
-            # if len(cells) > 2 and cells[2].lower() in {"category"}:
-            #     logger.warning("Skipping header row: %r", cells)
-            #     continue
             yield cells
 
 
@@ -197,10 +186,6 @@ def load_selected_tags(csv_path: str | Path) -> list[TagMeta]:
 
     path = Path(csv_path)
     labels: list[TagMeta] = []
-    # for cells in _iter_csv_rows(path):
-    #     tag = _parse_row(cells)
-    #     if tag is not None:
-    #         labels.append(tag)
     missing: list[tuple[int, list[str]]] = []
     for lineno, cells in enumerate(_iter_csv_rows(path), start=1):
         tag = _parse_row(cells)

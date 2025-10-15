@@ -149,25 +149,3 @@ __all__ = [
     "_serialise_max_tags",
     "detect_tagger_provider",
 ]
-
-
-# --- provider defaults ----------------------------------------------------------
-# PixAI はロジットが高めに出やすいので、保守的な初期値を返す
-# def provider_default_thresholds(provider: str) -> Mapping[TagCategory, float] | None:
-#     if provider == "pixai":
-#         return {
-#             TagCategory.GENERAL: 0.90,  # logit ≈ 2.197
-#             TagCategory.CHARACTER: 0.95,  # logit ≈ 2.944
-#             TagCategory.COPYRIGHT: 0.95,  # logit ≈ 2.944
-#         }
-#     return None
-
-
-# def provider_default_max_tags(provider: str) -> Mapping[TagCategory, int] | None:
-#     if provider == "pixai":
-#         return {
-#             TagCategory.GENERAL: 50,
-#             TagCategory.CHARACTER: 3,
-#             TagCategory.COPYRIGHT: 3,
-#         }
-#     return None

@@ -199,6 +199,8 @@ class _DummyTaggerSettings:
     def __init__(self) -> None:
         self.name = "wd14-onnx"
         self.model_path = "dummy.onnx"
+        self.provider = "wd14"  # ← 任意
+        self.tags_csv = None  # ← これを追加
 
 
 class _DummySettings:
