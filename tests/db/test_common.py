@@ -15,6 +15,7 @@ if str(SRC_DIR) not in sys.path:
 from db.common import chunk, fts_is_contentless, load_tag_thresholds, normalise_category
 from db.connection import get_conn
 from db.schema import apply_schema
+from tagger.base import TagCategory
 
 
 @pytest.fixture()
@@ -36,7 +37,7 @@ def memory_conn() -> sqlite3.Connection:
         pytest.param(1.9, 1, id="float"),
         pytest.param(True, 1, id="bool"),
         pytest.param("general", 0, id="category-name"),
-        pytest.param(" Artist ", 4, id="category-name-with-spaces"),
+        pytest.param(" Artist ", 1, id="category-name-with-spaces"),
         pytest.param(" 3 ", 3, id="numeric-string"),
         pytest.param("   ", None, id="blank-string"),
         pytest.param("unknown", None, id="invalid-string"),
@@ -49,6 +50,15 @@ def test_normalise_category_returns_expected(value: object, expected: int | None
     assert normalise_category(value) == expected
 
 
+def test_normalise_category_handles_all_tag_categories() -> None:
+    """Every tag category should be normalised from both names and numeric keys."""
+
+    for category in TagCategory:
+        expected = int(category)
+        assert normalise_category(category.name.lower()) == expected
+        assert normalise_category(str(expected)) == expected
+
+
 def test_load_tag_thresholds_returns_defaults_when_table_empty(memory_conn: sqlite3.Connection) -> None:
     """When the tagger thresholds table is empty the defaults should be returned."""
 
@@ -57,7 +67,11 @@ def test_load_tag_thresholds_returns_defaults_when_table_empty(memory_conn: sqli
 
     thresholds = load_tag_thresholds(memory_conn)
 
-    assert thresholds == {0: 0.35, 1: 0.25, 3: 0.25}
+    assert thresholds == {
+        TagCategory.GENERAL.value: pytest.approx(0.35),
+        TagCategory.CHARACTER.value: pytest.approx(0.25),
+        TagCategory.COPYRIGHT.value: pytest.approx(0.25),
+    }
 
 
 def test_load_tag_thresholds_overrides_defaults_with_database_values(
@@ -78,10 +92,10 @@ def test_load_tag_thresholds_overrides_defaults_with_database_values(
 
     thresholds = load_tag_thresholds(memory_conn)
 
-    assert thresholds[0] == pytest.approx(0.5)
-    assert thresholds[1] == pytest.approx(0.4)
-    assert thresholds[3] == pytest.approx(0.25)
-    assert thresholds[5] == pytest.approx(0.1)
+    assert thresholds[TagCategory.GENERAL.value] == pytest.approx(0.5)
+    assert thresholds[TagCategory.CHARACTER.value] == pytest.approx(0.4)
+    assert thresholds[TagCategory.COPYRIGHT.value] == pytest.approx(0.25)
+    assert thresholds[TagCategory.META.value] == pytest.approx(0.1)
 
 
 def test_fts_is_contentless_detects_contentless_table(memory_conn: sqlite3.Connection) -> None:

@@ -4,6 +4,7 @@ from typing import Mapping
 
 from core.config import PipelineSettings
 from tagger.base import TagCategory
+from tagger.categories import build_category_lookup
 
 from .utils import (
     _digest_identifier,
@@ -14,20 +15,13 @@ from .utils import (
 
 # 外部から使う：_build_threshold_map / _build_max_tags_map / current_tagger_sig
 
-_CATEGORY_KEY_LOOKUP = {
-    "general": TagCategory.GENERAL,
-    "character": TagCategory.CHARACTER,
-    "copyright": TagCategory.COPYRIGHT,
-    "artist": TagCategory.ARTIST,
-    "meta": TagCategory.META,
-    "rating": TagCategory.RATING,
-}
+_CATEGORY_LOOKUP = build_category_lookup(include_numeric=False)
 
 
 def _build_threshold_map(thresholds: dict[str, float]) -> dict[TagCategory, float]:
     mapping: dict[TagCategory, float] = {}
     for key, value in thresholds.items():
-        category = _CATEGORY_KEY_LOOKUP.get(key.lower())
+        category = _CATEGORY_LOOKUP.get(key.lower())
         if category is not None:
             mapping[category] = float(value)
     return mapping
@@ -38,7 +32,7 @@ def _build_max_tags_map(max_tags: Mapping[str, int] | None) -> dict[TagCategory,
     if not max_tags:
         return mapping
     for key, value in max_tags.items():
-        category = _CATEGORY_KEY_LOOKUP.get(str(key).lower())
+        category = _CATEGORY_LOOKUP.get(str(key).lower())
         if category is None:
             continue
         try:
@@ -80,5 +74,4 @@ __all__ = [
     "current_tagger_sig",
     "_build_threshold_map",
     "_build_max_tags_map",
-    "_CATEGORY_KEY_LOOKUP",
 ]
