@@ -1,12 +1,16 @@
 from __future__ import annotations
 
-from pathlib import Path
 from typing import Mapping
 
 from core.config import PipelineSettings
 from tagger.base import TagCategory
 
-from .utils import _digest_identifier, _format_sig_mapping, detect_tagger_provider
+from .utils import (
+    _digest_identifier,
+    _format_sig_mapping,
+    _normalise_sig_source,
+    detect_tagger_provider,
+)
 
 # 外部から使う：_build_threshold_map / _build_max_tags_map / current_tagger_sig
 
@@ -42,24 +46,6 @@ def _build_max_tags_map(max_tags: Mapping[str, int] | None) -> dict[TagCategory,
         except (TypeError, ValueError):
             continue
     return mapping
-
-
-def _normalise_sig_source(value: str | Path | None) -> str | None:
-    if value in (None, ""):
-        return None
-    if isinstance(value, Path):
-        candidate = value
-    else:
-        try:
-            candidate = Path(str(value))
-        except (TypeError, ValueError):
-            return str(value)
-    expanded = candidate.expanduser()
-    try:
-        resolved = expanded.resolve(strict=False)
-    except OSError:
-        resolved = expanded.absolute()
-    return str(resolved)
 
 
 def current_tagger_sig(
