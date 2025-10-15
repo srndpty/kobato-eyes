@@ -6,25 +6,17 @@ import sqlite3
 from collections.abc import Iterable, Sequence
 from typing import Any
 
+from tagger.base import TagCategory
+from tagger.categories import build_category_lookup
+
 _CATEGORY_KEY_LOOKUP = {
-    "0": 0,
-    "general": 0,
-    "1": 1,
-    "character": 1,
-    "2": 2,
-    "rating": 2,
-    "3": 3,
-    "copyright": 3,
-    "4": 4,
-    "artist": 4,
-    "5": 5,
-    "meta": 5,
+    key: int(category) for key, category in build_category_lookup().items()
 }
 
 _DEFAULT_CATEGORY_THRESHOLDS = {
-    0: 0.35,
-    1: 0.25,
-    3: 0.25,
+    TagCategory.GENERAL.value: 0.35,
+    TagCategory.CHARACTER.value: 0.25,
+    TagCategory.COPYRIGHT.value: 0.25,
 }
 
 DEFAULT_CATEGORY_THRESHOLDS = dict(_DEFAULT_CATEGORY_THRESHOLDS)

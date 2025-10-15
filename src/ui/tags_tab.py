@@ -72,6 +72,7 @@ from core.config import PipelineSettings
 from core.pipeline import IndexProgress
 from tagger import labels_util
 from tagger.base import TagCategory
+from tagger.categories import build_category_lookup
 from tagger.wd14_onnx import ONNXRUNTIME_MISSING_MESSAGE
 from ui.autocomplete import abbreviate_count, extract_completion_token, replace_completion_token
 from ui.search_worker import SearchWorker
@@ -95,20 +96,7 @@ _PREFIXES = (
     "meta:",
     "rating:",
 )
-_CATEGORY_KEY_LOOKUP = {
-    "0": TagCategory.GENERAL,
-    "general": TagCategory.GENERAL,
-    "1": TagCategory.CHARACTER,
-    "character": TagCategory.CHARACTER,
-    "2": TagCategory.RATING,
-    "rating": TagCategory.RATING,
-    "3": TagCategory.COPYRIGHT,
-    "copyright": TagCategory.COPYRIGHT,
-    "4": TagCategory.ARTIST,
-    "artist": TagCategory.ARTIST,
-    "5": TagCategory.META,
-    "meta": TagCategory.META,
-}
+_CATEGORY_KEY_LOOKUP = build_category_lookup()
 
 
 def _category_thresholds(settings: PipelineSettings) -> dict[TagCategory, float]:
