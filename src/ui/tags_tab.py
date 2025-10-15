@@ -804,6 +804,8 @@ class TagsTab(QWidget):
         self._table_view.setModel(self._table_model)
         self._table_view.horizontalHeader().setStretchLastSection(True)
         self._table_view.setIconSize(QSize(self._THUMB_SIZE, self._THUMB_SIZE))
+        self._table_view.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
+        self._table_view.setHorizontalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
 
         self._grid_model = QStandardItemModel(self)
         self._grid_view = QListView(self)
@@ -816,6 +818,8 @@ class TagsTab(QWidget):
         self._grid_view.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self._grid_view.setIconSize(QSize(self._THUMB_SIZE, self._THUMB_SIZE))
         self._grid_view.setGridSize(QSize(self._THUMB_SIZE + 48, self._THUMB_SIZE + 72))
+        self._grid_view.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
+        self._grid_view.setHorizontalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
         self._grid_view.doubleClicked.connect(self._on_grid_double_clicked)
         self._grid_view.activated.connect(self._on_grid_double_clicked)
         self._grid_view.setModel(self._grid_model)
