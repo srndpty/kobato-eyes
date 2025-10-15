@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from typing import Protocol
 
 from core.pipeline.types import IndexPhase, IndexProgress, PipelineContext, ProgressEmitter
+from utils.env import safe_int
 
 from ..maintenance import _settle_after_quiesce
 from ..testhooks import TaggingDeps
@@ -45,7 +46,7 @@ class _DefaultWriteStageDeps:
             db_path=str(ctx.db_path),
             flush_chunk=getattr(settings, "db_flush_chunk", 1024),
             fts_topk=getattr(settings, "fts_topk", 128),
-            queue_size=int(os.environ.get("KE_DB_QUEUE", "1024")),
+            queue_size=safe_int(os.environ.get("KE_DB_QUEUE"), 1024, min_value=1),
             default_tagger_sig=ctx.tagger_sig,
             unsafe_fast=True,
             skip_fts=True,

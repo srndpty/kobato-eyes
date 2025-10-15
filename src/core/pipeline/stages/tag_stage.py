@@ -15,6 +15,7 @@ from PIL import Image
 from core.db_writer import DBItem
 from core.pipeline.types import IndexPhase, IndexProgress, PipelineContext, ProgressEmitter, _FileRecord
 from tagger.base import TagCategory
+from utils.env import safe_int
 
 from ..resolver import _resolve_tagger
 
@@ -159,8 +160,8 @@ class TagStage:
                 current_batch,
             )
             current_batch = 1
-        prefetch_depth = int(os.environ.get("KE_PREFETCH_DEPTH", "128") or "128") or 128
-        io_workers = int(os.environ.get("KE_IO_WORKERS", "12") or "12") or None
+        prefetch_depth = safe_int(os.environ.get("KE_PREFETCH_DEPTH"), 128, min_value=1)
+        io_workers = safe_int(os.environ.get("KE_IO_WORKERS"), 12, min_value=1)
 
         loader = self._deps.loader_factory(tag_paths, tagger, current_batch, prefetch_depth, io_workers)
 
