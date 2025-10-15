@@ -130,12 +130,14 @@ class IndexPipeline:
         stats["elapsed_sec"] = time.perf_counter() - start
         stats["cancelled"] = self.emitter.cancelled(self.ctx.is_cancelled)
         self.emitter.emit(IndexProgress(phase=IndexPhase.DONE, done=1, total=1), force=True)
+        sec = stats["elapsed_sec"]
         logger.info(
-            "Indexing complete: scanned=%d, new=%d, tagged=%d, (%.2fs)",
+            "Indexing complete: scanned=%d, new=%d, tagged=%d, (%dm:%ds)",
             stats["scanned"],
             stats["new_or_changed"],
             stats["tagged"],
-            stats["elapsed_sec"],
+            sec // 60,
+            sec % 60,
         )
         return stats
 

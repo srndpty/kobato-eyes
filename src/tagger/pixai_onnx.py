@@ -173,14 +173,14 @@ class PixaiOnnxTagger(WD14Tagger):
     def prepare_batch_from_rgb_np(self, rgb_list: list[np.ndarray]) -> np.ndarray:
         assert len(rgb_list) >= 1, "rgb_list empty"
         # 入力検証
-        a0 = rgb_list[0]
-        logger.info(
-            "PixAI prepare: in[0] shape=%s dtype=%s min=%.3f max=%.3f",
-            getattr(a0, "shape", None),
-            getattr(a0, "dtype", None),
-            float(a0.min()),
-            float(a0.max()),
-        )
+        # a0 = rgb_list[0]
+        # logger.info(
+        #     "PixAI prepare: in[0] shape=%s dtype=%s min=%.3f max=%.3f",
+        #     getattr(a0, "shape", None),
+        #     getattr(a0, "dtype", None),
+        #     float(a0.min()),
+        #     float(a0.max()),
+        # )
         out = []
         # preprocess.json があれば mean/std を使い、なければ fallback を使う
         mean = [0.5, 0.5, 0.5]
@@ -221,13 +221,13 @@ class PixaiOnnxTagger(WD14Tagger):
 
         # NCHW float32
         batch = np.stack(out, axis=0)
-        logger.info(
-            "PixAI prepare: out batch=%s dtype=%s min=%.3f max=%.3f",
-            batch.shape,
-            batch.dtype,
-            float(batch.min()),
-            float(batch.max()),
-        )
+        # logger.info(
+        #     "PixAI prepare: out batch=%s dtype=%s min=%.3f max=%.3f",
+        #     batch.shape,
+        #     batch.dtype,
+        #     float(batch.min()),
+        #     float(batch.max()),
+        # )
         return batch
 
     @staticmethod
