@@ -208,7 +208,7 @@ class TagStage:
                 batch_recs: list[_FileRecord] = []
                 rgb_list: list[np.ndarray] = []
                 wh_needed: list[tuple[int | None, int | None]] = []
-                for p, arr, (_w, _h) in zip(batch_paths, batch_np_rgb, sizes):
+                for p, arr, (orig_w, orig_h) in zip(batch_paths, batch_np_rgb, sizes):
                     if arr is None:
                         continue
                     rec = rec_by_path.get(p)
@@ -218,8 +218,11 @@ class TagStage:
                     rgb_list.append(arr)
                     need_wh = rec.is_new or rec.changed or rec.width is None or rec.height is None
                     if need_wh:
-                        h, w = arr.shape[:2]
-                        wh_needed.append((int(w), int(h)))
+                        if orig_w is not None and orig_h is not None:
+                            wh_needed.append((int(orig_w), int(orig_h)))
+                        else:
+                            h, w = arr.shape[:2]
+                            wh_needed.append((int(w), int(h)))
                     else:
                         wh_needed.append((None, None))
                 if not rgb_list:
