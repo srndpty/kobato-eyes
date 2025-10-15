@@ -21,6 +21,7 @@ from PyQt6.QtCore import (
     QEvent,
     QModelIndex,
     QObject,
+    QPoint,
     QRect,
     QRectF,
     QRunnable,
@@ -804,6 +805,8 @@ class TagsTab(QWidget):
         self._table_view.setModel(self._table_model)
         self._table_view.horizontalHeader().setStretchLastSection(True)
         self._table_view.setIconSize(QSize(self._THUMB_SIZE, self._THUMB_SIZE))
+        self._table_view.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self._table_view.customContextMenuRequested.connect(self._on_table_context_menu)
 
         self._grid_model = QStandardItemModel(self)
         self._grid_view = QListView(self)
@@ -819,6 +822,8 @@ class TagsTab(QWidget):
         self._grid_view.doubleClicked.connect(self._on_grid_double_clicked)
         self._grid_view.activated.connect(self._on_grid_double_clicked)
         self._grid_view.setModel(self._grid_model)
+        self._grid_view.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self._grid_view.customContextMenuRequested.connect(self._on_grid_context_menu)
 
         self._highlight_terms: list[str] = []
         self._positive_terms: list[str] = []
@@ -1909,6 +1914,68 @@ class TagsTab(QWidget):
             grid_item = self._grid_model.item(row)
             if grid_item is not None:
                 grid_item.setData(pixmap, Qt.ItemDataRole.DecorationRole)
+
+    def _on_table_context_menu(self, pos: QPoint) -> None:
+        """Show context menu for a table result."""
+
+        index = self._table_view.indexAt(pos)
+        if not index.isValid():
+            return
+        row = index.row()
+        if not (0 <= row < len(self._results_cache)):
+            return
+        self._table_view.selectRow(row)
+        global_pos = self._table_view.viewport().mapToGlobal(pos)
+        self._show_result_context_menu(global_pos, row)
+
+    def _on_grid_context_menu(self, pos: QPoint) -> None:
+        """Show context menu for a grid result."""
+
+        index = self._grid_view.indexAt(pos)
+        if not index.isValid():
+            return
+        stored_row = index.data(Qt.ItemDataRole.UserRole)
+        row = int(stored_row) if stored_row is not None else index.row()
+        if not (0 <= row < len(self._results_cache)):
+            return
+        self._grid_view.setCurrentIndex(index)
+        global_pos = self._grid_view.viewport().mapToGlobal(pos)
+        self._show_result_context_menu(global_pos, row)
+
+    def _show_result_context_menu(self, global_pos: QPoint, row: int) -> None:
+        """Display the context menu with tag copy actions."""
+
+        if not (0 <= row < len(self._results_cache)):
+            return
+        menu = QMenu(self)
+        copy_plain_action = menu.addAction("タグをコピー（スコア無し）")
+        copy_scored_action = menu.addAction("タグをコピー（スコア有り）")
+        chosen = menu.exec(global_pos)
+        if chosen == copy_plain_action:
+            self._copy_tags_to_clipboard(row, include_scores=False)
+        elif chosen == copy_scored_action:
+            self._copy_tags_to_clipboard(row, include_scores=True)
+
+    def _copy_tags_to_clipboard(self, row: int, *, include_scores: bool) -> None:
+        """Copy filtered tags for *row* to the clipboard."""
+
+        if not (0 <= row < len(self._results_cache)):
+            self._show_toast("コピー可能なタグがありません。")
+            return
+        record = self._results_cache[row]
+        raw_tags = list(record.get("tags") or record.get("top_tags") or [])
+        filtered = _filter_tags_by_threshold(raw_tags)
+        if not filtered:
+            self._show_toast("コピー可能なタグがありません。")
+            return
+        if include_scores:
+            text = ", ".join(f"{name} ({score:.2f})" for name, score in filtered)
+            feedback = "タグ（スコア付き）をクリップボードにコピーしました。"
+        else:
+            text = ", ".join(name for name, _ in filtered)
+            feedback = "タグをクリップボードにコピーしました。"
+        QApplication.clipboard().setText(text)
+        self._show_toast(feedback)
 
     def _on_table_double_clicked(self, index: QModelIndex) -> None:
         self._open_row(index.row())
