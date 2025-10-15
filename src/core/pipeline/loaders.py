@@ -13,6 +13,8 @@ import cv2
 import numpy as np
 from PIL import Image
 
+from utils.env import safe_int
+
 logger = logging.getLogger(__name__)
 
 
@@ -76,13 +78,12 @@ class PrefetchLoaderPrepared:
         self._B = int(batch_size)
         self._depth = max(1, int(prefetch_batches))
         cpu = os.cpu_count() or 4
-        # 既定はやや強め（PNG 多めのとき効く）: 明示指定があればそちらを優先、env でも上書き可
+        default_workers = min(max(4, cpu), 16)
+        current_workers = default_workers if io_workers is None else safe_int(io_workers, default_workers, min_value=1)
         env_workers = os.getenv("KE_IO_WORKERS")
         if env_workers is not None:
-            io_workers = int(env_workers)
-        if io_workers is None:
-            io_workers = min(max(4, cpu), 16)
-        self._io_workers: int = max(1, int(io_workers))
+            current_workers = safe_int(env_workers, current_workers, min_value=1)
+        self._io_workers = current_workers
         self._tagger = tagger
 
         # (paths, np_batch, sizes) or None(sentinal)

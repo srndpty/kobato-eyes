@@ -4,6 +4,7 @@ import time
 
 import numpy as np
 
+from core.pipeline.stages.write_stage import _DefaultWriteStageDeps
 from core.pipeline.tagging import TaggingStage
 from core.pipeline.testhooks import IDBWriterLike, IQuiesceCtrl, TaggingDeps
 from core.pipeline.types import IndexPhase, PipelineContext, ProgressEmitter, _FileRecord
@@ -154,3 +155,63 @@ def test_tagging_stage_with_fakes():
     assert ids == [1, 2]
     # 進捗が少なくとも TAG フェーズで1回以上通知される
     assert any(ph == IndexPhase.TAG for (ph, _, _) in prog)
+
+
+def test_tagging_stage_env_invalid_values(monkeypatch):
+    monkeypatch.setenv("KE_PREFETCH_DEPTH", "not-a-number")
+    monkeypatch.setenv("KE_IO_WORKERS", "-5")
+
+    captured: dict[str, int | None] = {}
+
+    def _loader_factory(paths, tagger, batch_size, prefetch_batches, io_workers):
+        captured["prefetch_batches"] = prefetch_batches
+        captured["io_workers"] = io_workers
+        return FakeLoader(paths)
+
+    recs = [
+        _FileRecord(
+            file_id=1,
+            path="a.jpg",
+            size=1,
+            mtime=time.time(),
+            sha="x",
+            is_new=True,
+            changed=False,
+            tag_exists=False,
+            needs_tagging=True,
+        )
+    ]
+    emitter = ProgressEmitter(lambda *_: None)
+    fake_db = FakeDBWriter()
+    deps = TaggingDeps(
+        loader_factory=_loader_factory,
+        dbwriter_factory=lambda **kw: fake_db,
+        quiesce=NoopQuiesce(),
+    )
+    stage = TaggingStage(_ctx(), emitter, deps=deps, writer_deps=FakeWriteDeps(fake_db))
+    stage.run(recs)
+
+    assert captured["prefetch_batches"] == 128
+    assert captured["io_workers"] == 12
+
+
+def test_default_write_stage_queue_size_invalid_env(monkeypatch):
+    fake_db = FakeDBWriter()
+    captured: dict[str, int] = {}
+
+    def _dbwriter_factory(**kwargs):
+        captured["queue_size"] = kwargs["queue_size"]
+        return fake_db
+
+    deps = _DefaultWriteStageDeps(
+        tagging_deps=TaggingDeps(
+            loader_factory=lambda *a, **k: [],
+            dbwriter_factory=_dbwriter_factory,
+            quiesce=NoopQuiesce(),
+        )
+    )
+
+    for invalid in ("bad", "0", "-10"):
+        monkeypatch.setenv("KE_DB_QUEUE", invalid)
+        deps.build_writer(ctx=_ctx(), progress_cb=lambda *a, **k: None)
+        assert captured["queue_size"] == 1024
