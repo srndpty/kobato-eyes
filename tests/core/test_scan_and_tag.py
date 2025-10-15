@@ -103,7 +103,7 @@ def test_scan_and_tag_deduplicates_paths(temp_env: Path, tmp_path: Path, monkeyp
         return object()
 
     monkeypatch.setattr(manual_refresh, "run_tag_job", fake_run_tag_job)
-    monkeypatch.setattr(manual_refresh, "_resolve_tagger", lambda *a, **k: object())
+    monkeypatch.setattr(manual_refresh, "_resolve_tagger", lambda *a, **k: (object(), None, None))
 
     stats = scan_and_tag(root)
 

@@ -55,7 +55,6 @@ def scan_and_tag(
 
     thresholds = _build_threshold_map(settings.tagger.thresholds)
     max_tags_map = _build_max_tags_map(getattr(settings.tagger, "max_tags", None))
-    tagger_sig = current_tagger_sig(settings, thresholds=thresholds, max_tags=max_tags_map)
     db_path = get_db_path()
     bootstrap_if_needed(db_path)
     conn = get_conn(db_path, allow_when_quiesced=True)
@@ -201,14 +200,31 @@ def scan_and_tag(
             return stats_out
 
         logger.info("Manual tag refresh: tagging %d file(s) under %s (recursive=%s)", total, resolved_root, recursive)
-        tagger = _resolve_tagger(settings, None, thresholds=thresholds, max_tags=max_tags_map)
-        config = TagJobConfig(thresholds=thresholds or None, max_tags=max_tags_map or None, tagger_sig=tagger_sig)
+        tagger_obj, th_fallback, max_tags_fallback = _resolve_tagger(
+            settings,
+            None,
+            thresholds=thresholds,
+            max_tags=max_tags_map,
+        )
+        tagger = tagger_obj
+        effective_thresholds = thresholds or th_fallback or None
+        effective_max_tags = max_tags_map or max_tags_fallback or None
+        tagger_sig = current_tagger_sig(
+            settings,
+            thresholds=effective_thresholds,
+            max_tags=effective_max_tags,
+        )
+        config = TagJobConfig(
+            thresholds=effective_thresholds,
+            max_tags=effective_max_tags,
+            tagger_sig=tagger_sig,
+        )
 
         tagged = 0
         for index, path_obj in enumerate(queued_paths, start=1):
             logger.info("Manual tag refresh progress: %d/%d %s", index, total, path_obj)
             try:
-                result = run_tag_job(tagger, path_obj, conn, config=config)
+                result = run_tag_job(tagger_obj, path_obj, conn, config=config)
             except Exception:
                 logger.exception("Tagging failed during refresh for %s", path_obj)
                 continue
