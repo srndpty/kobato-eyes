@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Iterable, Mapping
 
 import numpy as np
+from PIL import Image
 
 from tagger.base import MaxTagsMap, TagCategory, TagPrediction, TagResult, ThresholdMap
 from tagger.labels_util import BROKEN_TAG_PREFIX, TagMeta, load_selected_tags
@@ -16,6 +17,14 @@ from tagger.labels_util import BROKEN_TAG_PREFIX, TagMeta, load_selected_tags
 from .wd14_onnx import WD14Tagger, _sigmoid
 
 logger = logging.getLogger(__name__)
+
+
+def _normalize_np_chw(x: np.ndarray, mean, std):
+    # x: (3,H,W) in [0,1]
+    x = x.astype(np.float32, copy=False)
+    for c in range(3):
+        x[c] = (x[c] - mean[c]) / std[c]
+    return x
 
 
 class PixaiOnnxTagger(WD14Tagger):
@@ -27,9 +36,7 @@ class PixaiOnnxTagger(WD14Tagger):
         if not output_names:
             raise RuntimeError("PixAI: model does not expose any outputs")
 
-        # PixAI は logits を優先。prediction は閾値適用後の値っぽく暴れやすい。
-        preferred_order = ("logits", "prediction")
-        # preferred_order = ("prediction", "logits")
+        preferred_order = ("prediction", "logits")
         for name in preferred_order:
             if name in output_names:
                 if len(output_names) > 1:
@@ -88,6 +95,18 @@ class PixaiOnnxTagger(WD14Tagger):
             )
         except Exception:
             pass
+
+        # 追加: preprocess.json をロード
+        model_dir = Path(model_path).parent
+        pp_path = model_dir / "preprocess.json"
+        self._pixai_pp = None
+        if pp_path.exists():
+            with pp_path.open("r", encoding="utf-8") as f:
+                self._pixai_pp = json.load(f).get("stages", [])
+            logger.info("PixAI: loaded preprocess.json (%s)", pp_path)
+        else:
+            logger.warning("PixAI: preprocess.json not found; using fallback transforms")
+            self._pixai_pp = []  # 後述のフォールバックで処理
 
         # __init__ の末尾で呼ぶ
         self._try_fix_label_order_with_json()
@@ -150,6 +169,66 @@ class PixaiOnnxTagger(WD14Tagger):
         # 分布を再ログ
         vals, cnts = np.unique(np.array(self._label_cat_cache, dtype=np.int32), return_counts=True)
         logger.info("PixAI labels category distribution (after fix): %s", {int(v): int(c) for v, c in zip(vals, cnts)})
+
+    def prepare_batch_from_rgb_np(self, rgb_list: list[np.ndarray]) -> np.ndarray:
+        assert len(rgb_list) >= 1, "rgb_list empty"
+        # 入力検証
+        a0 = rgb_list[0]
+        logger.info(
+            "PixAI prepare: in[0] shape=%s dtype=%s min=%.3f max=%.3f",
+            getattr(a0, "shape", None),
+            getattr(a0, "dtype", None),
+            float(a0.min()),
+            float(a0.max()),
+        )
+        out = []
+        # preprocess.json があれば mean/std を使い、なければ fallback を使う
+        mean = [0.5, 0.5, 0.5]
+        std = [0.5, 0.5, 0.5]
+        target = int(self._input_size)  # 例: 448
+
+        # preprocess.json から mean/std を拾えるよう軽いパーサ（なければデフォルト0.5/0.5）
+        for st in self._pixai_pp or []:
+            t = str(st.get("type") or st.get("op") or "").lower()
+            if t == "normalize":
+                mean = st.get("mean", mean)
+                std = st.get("std", std)
+
+        for arr in rgb_list:
+            # 1) PIL にして処理（アルファは白合成済みの想定。なければここで合成）
+            im = Image.fromarray(arr, mode="RGB")
+
+            # 2) PixAI はだいたい「短辺基準リサイズ + 中央クロップ」が多い
+            #    preprocess.json を厳密に再現できるならそれに従うのが最善。
+            #    ここでは汎用的な fallback を実装：
+            w, h = im.size
+            scale = target / min(w, h)
+            nw, nh = int(round(w * scale)), int(round(h * scale))
+            if (nw, nh) != (w, h):
+                im = im.resize((nw, nh), Image.BICUBIC)
+
+            # 中央クロップで target x target
+            left = (im.width - target) // 2
+            top = (im.height - target) // 2
+            im = im.crop((left, top, left + target, top + target))
+
+            # 3) [H,W,3] -> [3,H,W], [0..255] -> [0..1] -> normalize
+            x = np.asarray(im, dtype=np.float32) / 255.0
+            x = np.transpose(x, (2, 0, 1))
+            x = _normalize_np_chw(x, mean, std)
+
+            out.append(x)
+
+        # NCHW float32
+        batch = np.stack(out, axis=0)
+        logger.info(
+            "PixAI prepare: out batch=%s dtype=%s min=%.3f max=%.3f",
+            batch.shape,
+            batch.dtype,
+            float(batch.min()),
+            float(batch.max()),
+        )
+        return batch
 
     @staticmethod
     def _build_tag_meta_index(labels_csv: Path) -> dict[str, TagMeta]:

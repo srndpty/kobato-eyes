@@ -207,6 +207,8 @@ class PrefetchLoaderPrepared:
 
                     if self._stop.is_set():
                         break
+        except Exception as e:
+            logger.error("PrefetchLoaderPrepared: producer failed: %s", e, exc_info=True)
         finally:
             # 終端シグナルは必ず入れる（ブロッキングでOK）
             logger.info("PrefetchLoaderPrepared: producer finished; enqueue sentinel")

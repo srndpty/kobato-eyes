@@ -16,14 +16,14 @@ WD14_DEFAULT_THRESHOLDS = {
     TagCategory.COPYRIGHT: 0.25,
 }
 PIXAI_DEFAULT_THRESHOLDS = {
-    TagCategory.GENERAL: 0.90,
-    TagCategory.CHARACTER: 0.95,
-    TagCategory.COPYRIGHT: 0.95,
+    TagCategory.GENERAL: 0.4,
+    TagCategory.CHARACTER: 0.8,
+    TagCategory.COPYRIGHT: 0.8,
 }
 PIXAI_DEFAULT_MAX_TAGS = {
-    TagCategory.GENERAL: 50,
-    TagCategory.CHARACTER: 3,
-    TagCategory.COPYRIGHT: 3,
+    TagCategory.GENERAL: 128,
+    TagCategory.CHARACTER: 10,
+    TagCategory.COPYRIGHT: 10,
 }
 
 

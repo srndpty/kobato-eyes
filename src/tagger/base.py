@@ -14,10 +14,10 @@ class TagCategory(IntEnum):
     """Logical Danbooru-style tag categories."""
 
     GENERAL = 0
-    CHARACTER = 1
+    ARTIST = 1
     RATING = 2
     COPYRIGHT = 3
-    ARTIST = 4
+    CHARACTER = 4
     META = 5
 
 
