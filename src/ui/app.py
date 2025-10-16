@@ -95,6 +95,7 @@ else:
     from ui.dup_tab import DupTab
     from ui.icons import EyeIconProvider
     from ui.settings_tab import SettingsTab
+    from ui.splash_screen import RotatingSplashScreen
     from ui.tags_tab import TagsTab
     from ui.viewmodels import MainViewModel
 
@@ -214,6 +215,15 @@ else:
         icon_provider = EyeIconProvider()
         app.setWindowIcon(icon_provider.right_eye)
 
+        splash: RotatingSplashScreen | None = None
+        try:
+            splash = RotatingSplashScreen()
+            splash.show()
+            app.processEvents()
+        except Exception:  # pragma: no cover - splash failure should not abort launch
+            logger.exception("Failed to display splash screen")
+            splash = None
+
         def _finalise_onnx_profiles() -> None:
             try:
                 from tagger.wd14_onnx import end_all_profiles
@@ -229,6 +239,8 @@ else:
         window = MainWindow(icon_provider=icon_provider)
         window.resize(1024, 768)
         window.show()
+        if splash is not None:
+            splash.finish(window)
         sys.exit(app.exec())
 
 
