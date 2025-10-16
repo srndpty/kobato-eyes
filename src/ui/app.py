@@ -6,6 +6,7 @@ import logging
 import os
 import sys
 from logging.handlers import RotatingFileHandler
+from pathlib import Path
 
 from utils.env import is_headless
 from utils.paths import get_app_paths
@@ -86,9 +87,9 @@ if HEADLESS:
 
 
 else:
-    from PyQt6.QtCore import Qt
-    from PyQt6.QtGui import QGuiApplication, QIcon
-    from PyQt6.QtWidgets import QApplication, QMainWindow, QTabWidget
+    from PyQt6.QtCore import Qt, QTimer
+    from PyQt6.QtGui import QGuiApplication, QIcon, QPixmap, QTransform
+    from PyQt6.QtWidgets import QApplication, QMainWindow, QSplashScreen, QTabWidget, QWidget
 
     QGuiApplication.setAttribute(Qt.ApplicationAttribute.AA_UseSoftwareOpenGL)
 
@@ -156,6 +157,63 @@ else:
 
         atexit.register(lambda: f.write(f"\n==== process exit {time.ctime()} ====\n") or f.flush())
 
+    class AnimatedSplashScreen(QSplashScreen):
+        """Splash screen that alternates between two rotated frames."""
+
+        _FRAME_INTERVAL_MS = 500
+        _FRAME_SIZE = 512
+        _ROTATION_ANGLES = (-20, -40)
+
+        def __init__(self) -> None:
+            pixmap_path = Path(__file__).resolve().parent / "assets" / "splash" / "splash.png"
+            original = QPixmap(str(pixmap_path))
+            if original.isNull():
+                raise FileNotFoundError(f"Splash image not found: {pixmap_path}")
+
+            frames = [self._create_frame(original, angle) for angle in self._ROTATION_ANGLES]
+            super().__init__(frames[0])
+
+            self._frames = frames
+            self._frame_index = 0
+            self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint)
+            self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+            self.setFixedSize(self.pixmap().size())
+            self._timer = QTimer(self)
+            self._timer.setInterval(self._FRAME_INTERVAL_MS)
+            self._timer.timeout.connect(self._advance_frame)
+            self._timer.start()
+            self._center_on_primary_screen()
+
+        def _create_frame(self, original: QPixmap, angle: float) -> QPixmap:
+            transform = QTransform()
+            transform.rotate(angle)
+            rotated = original.transformed(transform, Qt.TransformationMode.SmoothTransformation)
+            return rotated.scaled(
+                self._FRAME_SIZE,
+                self._FRAME_SIZE,
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+
+        def _advance_frame(self) -> None:
+            self._frame_index = (self._frame_index + 1) % len(self._frames)
+            self.setPixmap(self._frames[self._frame_index])
+            self.setFixedSize(self.pixmap().size())
+            self._center_on_primary_screen()
+
+        def _center_on_primary_screen(self) -> None:
+            screen = QGuiApplication.primaryScreen()
+            if screen is None:
+                return
+            geometry = screen.availableGeometry()
+            x = geometry.x() + (geometry.width() - self.width()) // 2
+            y = geometry.y() + (geometry.height() - self.height()) // 2
+            self.move(x, y)
+
+        def finish(self, widget: QWidget | None = None) -> None:
+            self._timer.stop()
+            super().finish(widget)
+
     class MainWindow(QMainWindow):
         """Main window presenting basic navigation tabs."""
 
@@ -214,6 +272,10 @@ else:
         icon_provider = EyeIconProvider()
         app.setWindowIcon(icon_provider.right_eye)
 
+        splash = AnimatedSplashScreen()
+        splash.show()
+        app.processEvents()
+
         def _finalise_onnx_profiles() -> None:
             try:
                 from tagger.wd14_onnx import end_all_profiles
@@ -229,6 +291,7 @@ else:
         window = MainWindow(icon_provider=icon_provider)
         window.resize(1024, 768)
         window.show()
+        splash.finish(window)
         sys.exit(app.exec())
 
 
