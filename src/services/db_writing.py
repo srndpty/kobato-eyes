@@ -411,8 +411,8 @@ class DBWritingService(DBWriteQueue):
                 conn.execute(
                     """
                     UPDATE files
-                    SET width = COALESCE(width,  (SELECT m.width FROM temp.tmp_files_meta m WHERE m.file_id = files.id AND m.rowid > ? AND m.rowid <= ?)),
-                        height = COALESCE(height, (SELECT m.height FROM temp.tmp_files_meta m WHERE m.file_id = files.id AND m.rowid > ? AND m.rowid <= ?)),
+                    SET width = COALESCE((SELECT m.width FROM temp.tmp_files_meta m WHERE m.file_id = files.id AND m.rowid > ? AND m.rowid <= ?), width),
+                        height = COALESCE((SELECT m.height FROM temp.tmp_files_meta m WHERE m.file_id = files.id AND m.rowid > ? AND m.rowid <= ?), height),
                         tagger_sig = (SELECT m.tagger_sig FROM temp.tmp_files_meta m WHERE m.file_id = files.id AND m.rowid > ? AND m.rowid <= ?),
                         last_tagged_at = (SELECT m.tagged_at FROM temp.tmp_files_meta m WHERE m.file_id = files.id AND m.rowid > ? AND m.rowid <= ?)
                     WHERE id IN (SELECT file_id FROM temp.tmp_files_meta WHERE rowid > ? AND rowid <= ?)
