@@ -8,7 +8,7 @@ import sys
 from logging.handlers import RotatingFileHandler
 
 from utils.env import is_headless
-from utils.paths import get_app_paths, get_log_dir
+from utils.paths import get_app_paths
 
 HEADLESS = is_headless()
 
@@ -86,8 +86,8 @@ if HEADLESS:
 
 
 else:
-    from PyQt6.QtCore import Qt, QUrl
-    from PyQt6.QtGui import QAction, QDesktopServices, QGuiApplication
+    from PyQt6.QtCore import Qt
+    from PyQt6.QtGui import QGuiApplication
     from PyQt6.QtWidgets import QApplication, QMainWindow, QTabWidget
 
     QGuiApplication.setAttribute(Qt.ApplicationAttribute.AA_UseSoftwareOpenGL)
@@ -177,18 +177,6 @@ else:
             self._tabs.addTab(self._dup_tab, "Duplicates")
             self._tabs.addTab(self._settings_tab, "Settings")
             self.setCentralWidget(self._tabs)
-            self._init_menus()
-
-        def _init_menus(self) -> None:
-            help_menu = self.menuBar().addMenu("Help")
-            open_logs_action = QAction("Open logs folder", self)
-            open_logs_action.triggered.connect(self._open_logs_folder)
-            help_menu.addAction(open_logs_action)
-
-        def _open_logs_folder(self) -> None:
-            log_dir = get_log_dir()
-            log_dir.mkdir(parents=True, exist_ok=True)
-            QDesktopServices.openUrl(QUrl.fromLocalFile(str(log_dir)))
 
     def run() -> None:
         """Launch the kobato-eyes GUI application."""
