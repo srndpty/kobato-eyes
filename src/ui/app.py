@@ -95,6 +95,7 @@ else:
     from ui.dup_tab import DupTab
     from ui.icons import EyeIconProvider
     from ui.settings_tab import SettingsTab
+    from ui.splash import AnimatedSplashScreen
     from ui.tags_tab import TagsTab
     from ui.viewmodels import MainViewModel
 
@@ -211,6 +212,10 @@ else:
         _install_crash_handlers()
 
         app = QApplication(sys.argv)
+        splash = AnimatedSplashScreen()
+        splash.show()
+        app.processEvents()
+
         icon_provider = EyeIconProvider()
         app.setWindowIcon(icon_provider.right_eye)
 
@@ -226,9 +231,14 @@ else:
                 logger.exception("Failed to flush WD14 ONNX profiles")
 
         app.aboutToQuit.connect(_finalise_onnx_profiles)
-        window = MainWindow(icon_provider=icon_provider)
+        try:
+            window = MainWindow(icon_provider=icon_provider)
+        except Exception:
+            splash.finish(None)
+            raise
         window.resize(1024, 768)
         window.show()
+        splash.finish(window)
         sys.exit(app.exec())
 
 
