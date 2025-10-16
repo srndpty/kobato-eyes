@@ -95,6 +95,7 @@ else:
     from ui.dup_tab import DupTab
     from ui.icons import EyeIconProvider
     from ui.settings_tab import SettingsTab
+    from ui.splash import AnimatedSplashScreen, resolve_default_splash_path
     from ui.tags_tab import TagsTab
     from ui.viewmodels import MainViewModel
 
@@ -213,6 +214,9 @@ else:
         app = QApplication(sys.argv)
         icon_provider = EyeIconProvider()
         app.setWindowIcon(icon_provider.right_eye)
+        splash = AnimatedSplashScreen(resolve_default_splash_path())
+        splash.show()
+        app.processEvents()
 
         def _finalise_onnx_profiles() -> None:
             try:
@@ -226,9 +230,14 @@ else:
                 logger.exception("Failed to flush WD14 ONNX profiles")
 
         app.aboutToQuit.connect(_finalise_onnx_profiles)
-        window = MainWindow(icon_provider=icon_provider)
+        try:
+            window = MainWindow(icon_provider=icon_provider)
+        except Exception:
+            splash.close()
+            raise
         window.resize(1024, 768)
         window.show()
+        splash.finish(window)
         sys.exit(app.exec())
 
 
