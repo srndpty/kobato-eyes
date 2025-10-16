@@ -30,10 +30,12 @@ from PyQt6.QtCore import (
     QThread,
     QThreadPool,
     QTimer,
+    QUrl,
     pyqtSignal,
 )
 from PyQt6.QtGui import (
     QColor,
+    QDesktopServices,
     QKeyEvent,
     QKeySequence,
     QPalette,
@@ -714,6 +716,9 @@ class TagsTab(QWidget):
         self._copy_button = QPushButton("Copy results…", self)
         self._copy_button.setEnabled(False)  # 初期は無効
         self._copy_button.clicked.connect(self._on_copy_results_clicked)
+        self._open_db_button = QPushButton("Open DB folder", self)
+        self._open_db_button.setToolTip("Open the folder containing the database file")
+        self._open_db_button.clicked.connect(self._open_db_folder)
 
         self._load_more_button = QPushButton("Load more", self)
         self._load_more_button.setEnabled(False)
@@ -852,6 +857,7 @@ class TagsTab(QWidget):
         self._stats_button.setToolTip("Show tag statistics")
         toggle_layout.addWidget(self._stats_button)
         toggle_layout.addWidget(self._copy_button)
+        toggle_layout.addWidget(self._open_db_button)
         toggle_layout.addStretch()
 
         layout = QVBoxLayout(self)
@@ -944,6 +950,17 @@ class TagsTab(QWidget):
         self._update_control_states()
         QTimer.singleShot(0, self._initialise_autocomplete)
         QTimer.singleShot(0, self._bootstrap_results_if_any)
+
+    def _open_db_folder(self) -> None:
+        try:
+            path = getattr(self, "_db_path", None)
+            db_path = Path(path) if path else self._resolve_db_path()
+            target_dir = db_path if db_path.is_dir() else db_path.parent
+            target_dir.mkdir(parents=True, exist_ok=True)
+            if not QDesktopServices.openUrl(QUrl.fromLocalFile(str(target_dir))):
+                raise RuntimeError("Failed to open directory")
+        except Exception as exc:
+            QMessageBox.critical(self, "Open DB folder", f"Failed to open folder:\n{exc}")
 
     def _on_copy_results_clicked(self) -> None:
         # 現在の検索が確定していることを確認
