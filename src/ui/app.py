@@ -87,12 +87,13 @@ if HEADLESS:
 
 else:
     from PyQt6.QtCore import Qt
-    from PyQt6.QtGui import QGuiApplication
+    from PyQt6.QtGui import QGuiApplication, QIcon
     from PyQt6.QtWidgets import QApplication, QMainWindow, QTabWidget
 
     QGuiApplication.setAttribute(Qt.ApplicationAttribute.AA_UseSoftwareOpenGL)
 
     from ui.dup_tab import DupTab
+    from ui.icons import EyeIconProvider
     from ui.settings_tab import SettingsTab
     from ui.tags_tab import TagsTab
     from ui.viewmodels import MainViewModel
@@ -158,7 +159,11 @@ else:
     class MainWindow(QMainWindow):
         """Main window presenting basic navigation tabs."""
 
-        def __init__(self, view_model: MainViewModel | None = None) -> None:
+        def __init__(
+            self,
+            view_model: MainViewModel | None = None,
+            icon_provider: EyeIconProvider | None = None,
+        ) -> None:
             super().__init__()
             self._view_model = view_model or MainViewModel(self)
             db_path = self._view_model.db_path
@@ -167,6 +172,7 @@ else:
             self._dup_view_model = self._view_model.create_dup_view_model(self)
             self._settings_view_model = self._view_model.create_settings_view_model(self)
             self.setWindowTitle("kobato-eyes")
+            self._icon_provider: EyeIconProvider = icon_provider or EyeIconProvider()
             self._tabs = QTabWidget()
             self._tags_tab = TagsTab(self, view_model=self._tags_view_model)
             self._dup_tab = DupTab(self, view_model=self._dup_view_model)
@@ -177,6 +183,26 @@ else:
             self._tabs.addTab(self._dup_tab, "Duplicates")
             self._tabs.addTab(self._settings_tab, "Settings")
             self.setCentralWidget(self._tabs)
+            self._dup_tab_index: int = self._tabs.indexOf(self._dup_tab)
+            self._tabs.currentChanged.connect(self._handle_tab_change)
+            self._handle_tab_change(self._tabs.currentIndex())
+
+        def _handle_tab_change(self, index: int) -> None:
+            """Update the window and taskbar icon based on the active tab."""
+
+            if index == self._dup_tab_index:
+                icon = self._icon_provider.left_eye
+            else:
+                icon = self._icon_provider.right_eye
+            self._apply_window_icon(icon)
+
+        def _apply_window_icon(self, icon: QIcon) -> None:
+            """Apply the given icon to the window and the running QApplication."""
+
+            self.setWindowIcon(icon)
+            app = QApplication.instance()
+            if app is not None:
+                app.setWindowIcon(icon)
 
     def run() -> None:
         """Launch the kobato-eyes GUI application."""
@@ -185,6 +211,8 @@ else:
         _install_crash_handlers()
 
         app = QApplication(sys.argv)
+        icon_provider = EyeIconProvider()
+        app.setWindowIcon(icon_provider.right_eye)
 
         def _finalise_onnx_profiles() -> None:
             try:
@@ -198,7 +226,7 @@ else:
                 logger.exception("Failed to flush WD14 ONNX profiles")
 
         app.aboutToQuit.connect(_finalise_onnx_profiles)
-        window = MainWindow()
+        window = MainWindow(icon_provider=icon_provider)
         window.resize(1024, 768)
         window.show()
         sys.exit(app.exec())
