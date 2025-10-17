@@ -15,6 +15,9 @@ requires-python = ">=3.10"
 dependencies = [
     "PyQt6>=6.7.0",
     "pillow>=10.4.0",
+    "platformdirs>=4.0.0",
+    "numpy>=2.0.0",
+    "scikit-image>=0.25.0",
     "onnxruntime-gpu>=1.18.0",
     "opencv-python-headless>=4.10.0.84",
     "Send2Trash>=1.8.3",
