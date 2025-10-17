@@ -14,23 +14,19 @@ class RotatingSplashScreen(QWidget):
     """Splash screen that alternates the rotation of the application logo."""
 
     _IMAGE_SIZE: Final[int] = 512
-    _ANGLES: Final[tuple[float, float]] = (-20.0, -40.0)
+    _ANGLES: Final[tuple[float, float]] = (-10.0, -20.0)
 
     def __init__(self, image_path: str | Path | None = None) -> None:
         super().__init__(
             None,
-            Qt.WindowType.SplashScreen
-            | Qt.WindowType.FramelessWindowHint
-            | Qt.WindowType.WindowStaysOnTopHint,
+            Qt.WindowType.SplashScreen | Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint,
         )
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setObjectName("kobato_eyes_splash")
 
         resolved_path = self._resolve_image_path(image_path)
         self._base_pixmap = self._load_base_pixmap(resolved_path)
-        self._pixmaps = tuple(
-            self._create_rotated_pixmap(angle) for angle in self._ANGLES
-        )
+        self._pixmaps = tuple(self._create_rotated_pixmap(angle) for angle in self._ANGLES)
         self._current_index = 0
 
         self._label = QLabel(self)
@@ -50,6 +46,9 @@ class RotatingSplashScreen(QWidget):
         """Start the animation and center the splash on the primary screen."""
 
         self._center_on_screen()
+        from PyQt6.QtCore import QTime
+
+        self._shown_at_ms = QTime.currentTime().msecsSinceStartOfDay()
         if len(self._pixmaps) > 1 and not self._timer.isActive():
             self._timer.start()
         super().showEvent(event)
@@ -61,9 +60,16 @@ class RotatingSplashScreen(QWidget):
             self._timer.stop()
         super().closeEvent(event)
 
-    def finish(self, widget: QWidget | None = None) -> None:
+    def finish(self, widget: QWidget | None = None, *, min_duration_ms: int = 800) -> None:
         """Stop the animation and close the splash screen."""
+        from PyQt6.QtCore import QTime, QTimer
 
+        now = QTime.currentTime().msecsSinceStartOfDay()
+        elapsed = max(0, now - self._shown_at_ms)
+        remain = max(0, min_duration_ms - elapsed)
+        if remain > 0:
+            QTimer.singleShot(remain, lambda: self.finish(widget, min_duration_ms=0))
+            return
         if self._timer.isActive():
             self._timer.stop()
         self.close()
@@ -122,4 +128,3 @@ class RotatingSplashScreen(QWidget):
 
 
 __all__ = ["RotatingSplashScreen"]
-

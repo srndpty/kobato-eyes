@@ -459,7 +459,7 @@ class DupTab(QWidget):
         self._ratio_spin.setRange(0.0, 1.0)
         self._ratio_spin.setSingleStep(0.05)
         self._ratio_spin.setDecimals(2)
-        self._ratio_spin.setValue(0.90)
+        self._ratio_spin.setValue(0.50)
         self._ratio_spin.setSpecialValueText("disabled")
 
         self._scan_button = QPushButton("Scan", self)
