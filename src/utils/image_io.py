@@ -8,23 +8,33 @@ import os
 from collections import OrderedDict
 from pathlib import Path
 from threading import Lock
-from typing import Any, Optional, cast
+from typing import Any, Optional, TYPE_CHECKING, cast
 
 from PIL import Image, ImageFile, UnidentifiedImageError
 from PIL.Image import DecompressionBombError
 
+if TYPE_CHECKING:
+    from PyQt6.QtCore import Qt as QtType
+    from PyQt6.QtGui import QPixmap as QPixmapType
+else:  # pragma: no cover - imported lazily at runtime
+    QtType = Any  # type: ignore[assignment]
+    QPixmapType = Any  # type: ignore[assignment]
+
 try:  # pragma: no cover - handled at runtime when PyQt6 is missing
-    from PyQt6.QtCore import Qt
-    from PyQt6.QtGui import QPixmap
+    from PyQt6.QtCore import Qt as _Qt
+    from PyQt6.QtGui import QPixmap as _QPixmap
 except ImportError:  # pragma: no cover - simplifies headless testing environments
-    Qt = cast(Any, None)
-    QPixmap = cast(Any, None)
+    _Qt = None
+    _QPixmap = None
+
+Qt: QtType | None = cast("QtType | None", _Qt)
+QPixmap: QPixmapType | None = cast("QPixmapType | None", _QPixmap)
 
 from utils.paths import ensure_dirs, get_cache_dir
 
 DEFAULT_THUMBNAIL_SIZE = (320, 320)
 _THUMB_CACHE_LIMIT = 256
-_THUMB_CACHE: "OrderedDict[str, QPixmap]" = OrderedDict()
+_THUMB_CACHE: "OrderedDict[str, QPixmapType]" = OrderedDict()
 _THUMB_CACHE_LOCK = Lock()
 
 
@@ -59,7 +69,7 @@ def safe_load_image(
 
     try:
         # まずはヘッダだけでサイズを取る（ここは低コスト）
-        img = Image.open(p)  # デコード前
+        img: Image.Image = Image.open(p)  # デコード前
         w, h = img.size
         px = (w or 0) * (h or 0)
 
@@ -125,22 +135,35 @@ def safe_load_image(
         Image.MAX_IMAGE_PIXELS = old_cap
 
 
+if TYPE_CHECKING:
+    from PIL.Image import Resampling
+else:  # pragma: no cover - used only for typing
+    Resampling = Any  # type: ignore[assignment]
+
+
 def resize_image(
     image: Image.Image,
     size: tuple[int, int],
     *,
-    resample: int | None = None,
+    resample: Resampling | None = None,
 ) -> Image.Image:
     """Return a resized copy of ``image`` constrained to ``size`` bounds."""
     if resample is None:
         resampling = getattr(Image, "Resampling", None)
         if resampling is not None:  # Pillow >= 9.1
-            resample_value = getattr(resampling, "LANCZOS", Image.LANCZOS)
-            resample = cast(int, resample_value)
+            resample_value = cast(
+                "Resampling",
+                getattr(resampling, "LANCZOS", getattr(Image, "BICUBIC", Image.BILINEAR)),
+            )
         else:
-            resample = Image.LANCZOS
+            resample_value = cast(
+                "Resampling",
+                getattr(Image, "LANCZOS", getattr(Image, "BICUBIC", Image.BILINEAR)),
+            )
+    else:
+        resample_value = resample
     copy = image.copy()
-    copy.thumbnail(size, resample)
+    copy.thumbnail(size, resample_value)
     return copy
 
 
@@ -188,12 +211,14 @@ def get_thumbnail(
     source_path: str | Path,
     width: int = 128,
     height: int = 128,
-) -> QPixmap:
+) -> QPixmapType:
     """Return a cached QPixmap thumbnail for ``source_path`` resized to fit within ``width``×``height``."""
     if QPixmap is None or Qt is None:
         raise RuntimeError(
             "QPixmap is unavailable in this environment. Install PyQt6 with OpenGL support or unset KOE_HEADLESS."
         )
+    assert QPixmap is not None  # narrow type for type-checkers
+    assert Qt is not None
     source = Path(source_path)
     key = f"{source.resolve()}::{width}x{height}"
 
