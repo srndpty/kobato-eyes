@@ -8,16 +8,17 @@
 - [リリースページ](https://github.com/srndpty/kobato-eyes/releases)から最新版の7zをDL→展開
 - kobato-eyes.exeを起動
 - settingsタブのrootsに、danbooruタグを付けたい画像があるフォルダを指定
-- taggerモデルを指定
+- taggerモデルを指定（tagsタブ→Open DB folderでdbフォルダを開き、そこに新しいフォルダを作ってそこに置くのがおすすめ）
 - PixAIの場合
   - [deepghs/pixai-tagger-v0.9-onnx](https://huggingface.co/deepghs/pixai-tagger-v0.9-onnx/tree/main) から model.onnxとselected_tags.csv、preprocess.jsonの **3ファイル** をDLし、同じフォルダに置く
   - settingsタブからtaggerをwd14-onnxに指定し、modelでmodel.onnxを指定
 - WD14の場合
   - [SmilingWolf/wd-swinv2-tagger-v3](https://huggingface.co/SmilingWolf/wd-swinv2-tagger-v3/tree/main) などからmodel.onnxとselected_tags.csvをDLし、同じフォルダに置く
   - settingsタブからtaggerをwd14-onnxに指定し、modelでmodel.onnxを指定
-- （tagsタブ→Open DB folderでdbフォルダを開き、そこに新しいフォルダを作ってそこに置くのがおすすめ）
+
+## Instant Usage
 - tagsタブでIndex Nowボタンを押す
-- タグ付けはNVIDIA GPU推奨。settingsタブでVRAMに応じてbatch size設定
+  - タグ付けはNVIDIA GPU推奨。settingsタブでVRAMに応じてbatch size設定可
 - pixaiのほうが対応タグ数が多く（wd:8000, pixai:13000）、作品名タグにも対応しているので、基本的にpixai推奨
 - パフォーマンス（RTX4090、画像7万枚、バッチサイズ32）
 
@@ -27,8 +28,16 @@
 | pixai tagger |   20 GB | 約2時間 |
 
 - 検索はSQL-like（空白区切りでAND検索、ORとNOTが使用可能）
+- statsボタンで付けたタグの統計情報表示
+- Copy resultsで検索にヒットした画像を新規別フォルダにコピー
+- フォルダの中身が変わったら🔄refreshボタンで新規・削除画像を検出してデータ更新
+- duplicatesタブを同じrootsが対象
+- hamming, max_bitsは数字を小さくするとわずかな違いで別画像と判定するようになり、大きくすると差異が多くても重複と判定するようになる
+- gridは逆に、数字を大きくすると厳格に、小さくするとゆるく重複判定
 
 (以降のドキュメントはAI生成)
+
+----
 
 ## 主な機能
 
