@@ -1,6 +1,34 @@
+![ss](docs/images/ss-tags.png)
+
 # kobato-eyes
 
 **kobato-eyes** は、ローカル PC 上の画像に Danbooru タグを自動付与し、類似画像検出と検索を行う Windows 向けデスクトップアプリケーションです。PyQt6 を用いた GUI と SQLite + FTS5 データベースを組み合わせ、スキャンからタグ付け、検索、重複チェックまでを一貫して実行します。
+
+# Quick Setup
+- [リリースページ](https://github.com/srndpty/kobato-eyes/releases)から最新版の7zをDL→展開
+- kobato-eyes.exeを起動
+- settingsタブのrootsに、danbooruタグを付けたい画像があるフォルダを指定
+- taggerモデルを指定
+- PixAIの場合
+  - [deepghs/pixai-tagger-v0.9-onnx](https://huggingface.co/deepghs/pixai-tagger-v0.9-onnx/tree/main) から model.onnxとselected_tags.csv、preprocess.jsonの **3ファイル** をDLし、同じフォルダに置く
+  - settingsタブからtaggerをwd14-onnxに指定し、modelでmodel.onnxを指定
+- WD14の場合
+  - [SmilingWolf/wd-swinv2-tagger-v3](https://huggingface.co/SmilingWolf/wd-swinv2-tagger-v3/tree/main) などからmodel.onnxとselected_tags.csvをDLし、同じフォルダに置く
+  - settingsタブからtaggerをwd14-onnxに指定し、modelでmodel.onnxを指定
+- （tagsタブ→Open DB folderでdbフォルダを開き、そこに新しいフォルダを作ってそこに置くのがおすすめ）
+- tagsタブでIndex Nowボタンを押す
+- タグ付けはNVIDIA GPU推奨。settingsタブでVRAMに応じてbatch size設定
+- pixaiのほうが対応タグ数が多く（wd:8000, pixai:13000）、作品名タグにも対応しているので、基本的にpixai推奨
+- パフォーマンス（RTX4090、画像7万枚、バッチサイズ32）
+
+| tagger |   必要VRAM | 想定所要時間 |
+|:---|:---:|:---:|
+| wd tagger |  13 GB | 約30分 |
+| pixai tagger |   20 GB | 約2時間 |
+
+- 検索はSQL-like（空白区切りでAND検索、ORとNOTが使用可能）
+
+(以降のドキュメントはAI生成)
 
 ## 主な機能
 
@@ -36,7 +64,7 @@ src/
 ## セットアップ
 
 ```powershell
-git clone https://github.com/your-org/kobato-eyes.git
+git clone https://github.com/srndpty/kobato-eyes.git
 cd kobato-eyes
 python -m venv .venv
 .venv\Scripts\activate
@@ -96,3 +124,6 @@ CI などで GUI を起動しない場合は、環境変数 `KOE_HEADLESS=1` を
 - GPU が無い環境では `pip uninstall onnxruntime-gpu` の後に `pip install onnxruntime` へ切替えることで CPU 実行が可能です。
 - データディレクトリを移動したい場合は `KOE_DATA_DIR` を設定した上で再起動すると自動移行が行われます。
 
+# License
+
+MIT.
