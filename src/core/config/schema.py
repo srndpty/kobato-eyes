@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Literal, Mapping
+from typing import Any, Literal, Mapping, cast
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -177,7 +177,7 @@ class PipelineSettings(BaseModel):
     def to_mapping(self, *, default_index_dir: str | None = None) -> dict[str, Any]:
         """Return a serialisable representation of the configuration."""
 
-        payload = self.model_dump()
+        payload: dict[str, Any] = cast(dict[str, Any], self.model_dump())
         payload["roots"] = [str(Path(path)) for path in self.roots]
         payload["excluded"] = [str(Path(path)) for path in self.excluded]
         payload["allow_exts"] = sorted(self.allow_exts)
@@ -188,7 +188,7 @@ class PipelineSettings(BaseModel):
     def from_mapping(cls, data: Mapping[str, Any] | None) -> "PipelineSettings":
         if not isinstance(data, Mapping):
             data = {}
-        return cls.model_validate(data)
+        return cast("PipelineSettings", cls.model_validate(data))
 
 
 __all__ = [

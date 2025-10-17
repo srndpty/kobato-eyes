@@ -46,15 +46,26 @@ def is_hidden(path: Path) -> bool:
 
     try:
         import ctypes
-
-        attrs = ctypes.windll.kernel32.GetFileAttributesW(str(candidate))
-        if attrs == -1:
-            return False
-        file_attribute_hidden = 0x2
-        file_attribute_system = 0x4
-        return bool(attrs & (file_attribute_hidden | file_attribute_system))
     except Exception:  # pragma: no cover - defensive fallback
         return False
+
+    windll = getattr(ctypes, "windll", None)
+    kernel32 = getattr(windll, "kernel32", None)
+    get_attrs = getattr(kernel32, "GetFileAttributesW", None)
+    if not callable(get_attrs):
+        return False
+
+    try:
+        attrs = int(get_attrs(str(candidate)))
+    except Exception:  # pragma: no cover - defensive fallback
+        return False
+
+    if attrs == -1:
+        return False
+
+    file_attribute_hidden = 0x2
+    file_attribute_system = 0x4
+    return bool(attrs & (file_attribute_hidden | file_attribute_system))
 
 
 def path_in_roots(path: Path, roots: Iterable[Path]) -> bool:

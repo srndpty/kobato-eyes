@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+from typing import SupportsIndex, SupportsInt
+
 _DELIMITERS = " \t\r\n,;:"
 
 
-def abbreviate_count(value: object) -> str:
+def abbreviate_count(value: SupportsInt | SupportsIndex | str | None) -> str:
     """Return a compact textual representation of a popularity count."""
 
     try:

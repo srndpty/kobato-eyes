@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import os
-from typing import Any
+from typing import SupportsIndex, SupportsInt
 
 
 def is_headless() -> bool:
@@ -13,7 +13,7 @@ def is_headless() -> bool:
 
 
 def safe_int(
-    value: Any,
+    value: SupportsInt | SupportsIndex | str | None,
     default: int,
     *,
     min_value: int | None = None,
@@ -29,13 +29,16 @@ def safe_int(
     ``default``.
     """
 
-    if isinstance(value, str):
-        value = value.strip()
-        if value == "":
+    candidate = value
+    if candidate is None:
+        return default
+    if isinstance(candidate, str):
+        candidate = candidate.strip()
+        if candidate == "":
             return default
 
     try:
-        coerced = int(value)  # type: ignore[arg-type]
+        coerced = int(candidate)
     except (TypeError, ValueError):
         return default
 
