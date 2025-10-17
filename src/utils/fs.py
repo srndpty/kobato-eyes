@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import Iterable
+from typing import Callable, Iterable, cast
 
 WINDOWS = os.name == "nt"
 LONG_PATH_PREFIX = "\\\\?\\"
@@ -47,7 +47,17 @@ def is_hidden(path: Path) -> bool:
     try:
         import ctypes
 
-        attrs = ctypes.windll.kernel32.GetFileAttributesW(str(candidate))
+        windll = getattr(ctypes, "windll", None)
+        if windll is None:
+            return False
+        kernel32 = getattr(windll, "kernel32", None)
+        if kernel32 is None:
+            return False
+        get_attrs = getattr(kernel32, "GetFileAttributesW", None)
+        if not callable(get_attrs):
+            return False
+        func = cast(Callable[[str], int], get_attrs)
+        attrs = int(func(str(candidate)))
         if attrs == -1:
             return False
         file_attribute_hidden = 0x2

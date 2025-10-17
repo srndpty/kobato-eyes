@@ -35,7 +35,7 @@ def safe_int(
             return default
 
     try:
-        coerced = int(value)  # type: ignore[arg-type]
+        coerced = int(value)
     except (TypeError, ValueError):
         return default
 

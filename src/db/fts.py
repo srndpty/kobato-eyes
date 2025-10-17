@@ -55,18 +55,18 @@ def fts_replace_rows(conn: sqlite3.Connection, rows: Sequence[tuple[int, str]]) 
                 except sqlite3.DatabaseError:
                     continue
         for block in chunk(rows, 400):
-            flat: list[object] = []
+            insert_payload: list[object] = []
             for rid, text in block:
-                flat.extend((int(rid), str(text)))
-            values = ",".join(["(?, ?)"] * (len(flat) // 2))
-            conn.execute(f"INSERT INTO fts_files(rowid, text) VALUES {values}", flat)
+                insert_payload.extend((int(rid), str(text)))
+            values = ",".join(["(?, ?)"] * (len(insert_payload) // 2))
+            conn.execute(f"INSERT INTO fts_files(rowid, text) VALUES {values}", insert_payload)
     else:
         for block in chunk(rows, 400):
-            flat: list[object] = []
+            replace_payload: list[object] = []
             for rid, text in block:
-                flat.extend((int(rid), str(text)))
-            values = ",".join(["(?, ?)"] * (len(flat) // 2))
-            conn.execute(f"INSERT OR REPLACE INTO fts_files(rowid, text) VALUES {values}", flat)
+                replace_payload.extend((int(rid), str(text)))
+            values = ",".join(["(?, ?)"] * (len(replace_payload) // 2))
+            conn.execute(f"INSERT OR REPLACE INTO fts_files(rowid, text) VALUES {values}", replace_payload)
 
 
 def update_fts(conn: sqlite3.Connection, file_id: int, text: str | None) -> None:

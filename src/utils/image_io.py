@@ -8,7 +8,7 @@ import os
 from collections import OrderedDict
 from pathlib import Path
 from threading import Lock
-from typing import Optional
+from typing import Any, Optional, cast
 
 from PIL import Image, ImageFile, UnidentifiedImageError
 from PIL.Image import DecompressionBombError
@@ -17,8 +17,8 @@ try:  # pragma: no cover - handled at runtime when PyQt6 is missing
     from PyQt6.QtCore import Qt
     from PyQt6.QtGui import QPixmap
 except ImportError:  # pragma: no cover - simplifies headless testing environments
-    Qt = None  # type: ignore[assignment]
-    QPixmap = None  # type: ignore[assignment]
+    Qt = cast(Any, None)
+    QPixmap = cast(Any, None)
 
 from utils.paths import ensure_dirs, get_cache_dir
 
@@ -135,7 +135,8 @@ def resize_image(
     if resample is None:
         resampling = getattr(Image, "Resampling", None)
         if resampling is not None:  # Pillow >= 9.1
-            resample = resampling.LANCZOS  # type: ignore[assignment]
+            resample_value = getattr(resampling, "LANCZOS", Image.LANCZOS)
+            resample = cast(int, resample_value)
         else:
             resample = Image.LANCZOS
     copy = image.copy()

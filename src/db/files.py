@@ -4,11 +4,56 @@ from __future__ import annotations
 
 import sqlite3
 from collections.abc import Sequence
+from typing import SupportsFloat, SupportsInt
+
+
+def _coerce_optional_int(value: object) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        try:
+            return int(text)
+        except ValueError:
+            return None
+    if isinstance(value, (bytes, bytearray)):
+        try:
+            return int(value)
+        except ValueError:
+            return None
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, SupportsInt):
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
+    return None
+
+
+def _coerce_optional_str(value: object) -> str | None:
+    if value is None:
+        return None
+    return str(value)
+
+
+def _coerce_float(value: object) -> float:
+    if isinstance(value, float):
+        return value
+    if isinstance(value, int):
+        return float(value)
+    if isinstance(value, SupportsFloat):
+        return float(value)
+    if isinstance(value, str):
+        return float(value.strip())
+    raise TypeError(f"Unsupported timestamp value: {type(value)!r}")
 
 
 def bulk_upsert_files_meta(
     conn: sqlite3.Connection,
-    rows: Sequence[tuple[int, object, object, str, float]],
+    rows: Sequence[tuple[int, object, object, object, object]],
     *,
     coalesce_wh: bool = True,
     chunk: int = 400,
@@ -33,13 +78,16 @@ def bulk_upsert_files_meta(
         to_insert: list[object] = []
         for fid, width, height, sig, ts in block:
             fid_int = int(fid)
-            ts_float = float(ts)
+            width_int = _coerce_optional_int(width)
+            height_int = _coerce_optional_int(height)
+            sig_text = _coerce_optional_str(sig)
+            ts_float = _coerce_float(ts)
             if fid_int in existing:
-                to_update.append((width, height, sig, ts_float, fid_int))
+                to_update.append((width_int, height_int, sig_text, ts_float, fid_int))
             else:
                 existing.add(fid_int)
                 to_insert.extend(
-                    (fid_int, f"__bulk__:{fid_int}", width, height, sig, ts_float)
+                    (fid_int, f"__bulk__:{fid_int}", width_int, height_int, sig_text, ts_float)
                 )
 
         if to_insert:

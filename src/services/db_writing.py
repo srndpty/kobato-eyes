@@ -231,10 +231,10 @@ class DBWritingService(DBWriteQueue):
                 "INSERT INTO temp.tmp_file_tags(file_id, tag_name, score, category) VALUES(?, ?, ?, ?)",
                 tag_rows,
             )
-        metas: list[tuple[int, int | None, int | None, str, float]] = []
+        metas: list[tuple[int, int | None, int | None, str | None, float]] = []
         for it in items:
             sig = it.tagger_sig or self._default_tagger_sig
-            ts = it.tagged_at or now
+            ts = float(it.tagged_at or now)
             metas.append((it.file_id, it.width, it.height, sig, ts))
         if metas:
             conn.executemany(
@@ -291,7 +291,7 @@ class DBWritingService(DBWriteQueue):
         meta_rows: list[tuple[int | None, int | None, str | None, float | None, int]] = []
         for it in items:
             sig = it.tagger_sig or self._default_tagger_sig
-            ts = it.tagged_at or now
+            ts = float(it.tagged_at or now)
             meta_rows.append((it.width, it.height, sig, ts, it.file_id))
         bulk_update_files_meta_by_id(conn, meta_rows, coalesce_wh=True)
         conn.commit()
