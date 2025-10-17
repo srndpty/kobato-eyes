@@ -86,17 +86,37 @@ if HEADLESS:
 
 
 else:
-    from PyQt6.QtCore import Qt
+    from PyQt6.QtCore import QObject, Qt, QThread, pyqtSignal
     from PyQt6.QtGui import QGuiApplication, QIcon
-    from PyQt6.QtWidgets import QApplication, QMainWindow, QTabWidget
+    from PyQt6.QtWidgets import QApplication, QMainWindow, QMessageBox, QTabWidget
 
     QGuiApplication.setAttribute(Qt.ApplicationAttribute.AA_UseSoftwareOpenGL)
 
     from ui.dup_tab import DupTab
     from ui.icons import EyeIconProvider
     from ui.settings_tab import SettingsTab
+    from ui.splash_screen import RotatingSplashScreen
     from ui.tags_tab import TagsTab
     from ui.viewmodels import MainViewModel
+
+    class _StartupWorker(QObject):
+        finished = pyqtSignal()
+        failed = pyqtSignal(str)
+
+        def run(self):
+            try:
+                # ここで“重い”起動前処理のみやる（DB作成/インデックス/初回接続など）
+                from db.connection import bootstrap_if_needed
+                from utils.paths import get_app_paths
+
+                # あなたの環境のDBパス取得に合わせて調整：MainViewModelと同じ場所を指せばOK
+                paths = get_app_paths()
+                db_path = getattr(paths, "db_path", None)
+                db_path = str(db_path()) if callable(db_path) else str(paths.data_dir() / "kobato-eyes.db")
+                bootstrap_if_needed(db_path)
+                self.finished.emit()
+            except Exception as e:
+                self.failed.emit(str(e))
 
     def _install_crash_handlers():
         import atexit
@@ -214,6 +234,10 @@ else:
         icon_provider = EyeIconProvider()
         app.setWindowIcon(icon_provider.right_eye)
 
+        # スプラッシュを先に出して、以降はイベントループに乗せる
+        splash = RotatingSplashScreen()
+        splash.show()
+
         def _finalise_onnx_profiles() -> None:
             try:
                 from tagger.wd14_onnx import end_all_profiles
@@ -226,9 +250,50 @@ else:
                 logger.exception("Failed to flush WD14 ONNX profiles")
 
         app.aboutToQuit.connect(_finalise_onnx_profiles)
-        window = MainWindow(icon_provider=icon_provider)
-        window.resize(1024, 768)
-        window.show()
+
+        # 起動ワーカーをスレッドで走らせる
+        thread = QThread()
+        worker = _StartupWorker()
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+
+        # ⬇️ 重要：強参照をキープ（GCで閉じないように）
+        app._startup_thread = thread
+        app._startup_worker = worker
+        app._splash = splash
+        app._main_window = None
+
+        def _on_ready():
+            # UI作成はメインスレッド側で
+            window = MainWindow(icon_provider=icon_provider)
+            window.resize(1024, 768)
+            window.show()
+            app._main_window = window
+            splash.finish(window)
+            thread.quit()
+            logger.info("Startup complete, main window shown")
+
+        def _on_failed(msg: str):
+            splash.finish()
+            thread.quit()
+            QMessageBox.critical(None, "Startup failed", msg)
+            logger.error("Startup failed: %s", msg)
+            sys.exit(1)
+
+        def _on_thread_finished():
+            # 後片付け（ここで wait/deleteLater）
+            worker.deleteLater()
+            thread.deleteLater()
+            app._startup_worker = None
+            app._startup_thread = None
+
+        worker.finished.connect(_on_ready)
+        worker.failed.connect(_on_failed)
+        thread.finished.connect(_on_thread_finished)
+        thread.start()
+        logger.info("Startup thread started")
+
+        # ここでループ開始。以降、スプラッシュのQTimerが動く
         sys.exit(app.exec())
 
 
