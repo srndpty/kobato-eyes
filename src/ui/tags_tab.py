@@ -496,12 +496,14 @@ class IndexRunnable(QRunnable):
         *,
         settings: PipelineSettings | None = None,
         pre_run: Callable[[], dict[str, object]] | None = None,
+        runner: Callable[[Callable[[IndexProgress], None], Callable[[], bool]], dict[str, object]] | None = None,
     ) -> None:
         super().__init__()
         self._view_model = view_model
         self._db_path = Path(db_path)
         self._settings = settings
         self._pre_run = pre_run
+        self._runner = runner
         self.signals = self.IndexSignals()
         self._cancel_event = threading.Event()
 
@@ -521,17 +523,22 @@ class IndexRunnable(QRunnable):
             # ウィジェット/Signalsが破棄済み。静かに無視。
             return
 
+    def _execute(self) -> dict[str, object]:
+        if self._runner is not None:
+            return self._runner(self._emit_progress, self._cancel_event.is_set)
+        return self._view_model.run_index_once(
+            self._db_path,
+            settings=self._settings,
+            progress_cb=self._emit_progress,
+            is_cancelled=self._cancel_event.is_set,
+        )
+
     def run(self) -> None:  # noqa: D401
         try:
             extra: dict[str, object] = {}
             if self._pre_run is not None:
                 extra = self._pre_run()
-            stats = self._view_model.run_index_once(
-                self._db_path,
-                settings=self._settings,
-                progress_cb=self._emit_progress,
-                is_cancelled=self._cancel_event.is_set,
-            )
+            stats = self._execute()
             if extra:
                 stats.update(extra)
         except Exception as exc:  # pragma: no cover - defensive logging
@@ -539,67 +546,6 @@ class IndexRunnable(QRunnable):
             self.signals.error.emit(str(exc))
         else:
             self.signals.finished.emit(stats)
-
-
-class RefreshRunnable(QRunnable):
-    """Run ``scan_and_tag`` on a worker thread and forward the resulting summary."""
-
-    class Signals(QObject):
-        progress = pyqtSignal(int, int, str)
-        finished = pyqtSignal(dict)
-        error = pyqtSignal(str)
-
-    def __init__(
-        self,
-        view_model: TagsViewModel,
-        folders: "Sequence[Path] | Path",
-        *,
-        recursive: bool = True,
-        batch_size: int = 8,
-        hard_delete: bool = False,
-    ) -> None:
-        super().__init__()
-        self._view_model = view_model
-        if isinstance(folders, (str, Path)):
-            folders = [Path(folders)]
-        self._folders = [Path(f) for f in folders]
-        self._recursive = recursive
-        self._batch_size = batch_size
-        self._hard_delete = hard_delete
-        self.signals = self.Signals()
-
-    def run(self) -> None:
-        try:
-            total = len(self._folders)
-            agg = {"queued": 0, "tagged": 0, "elapsed_sec": 0.0, "missing": 0, "soft_deleted": 0, "hard_deleted": 0}
-            per_root: list[dict] = []
-            for i, root in enumerate(self._folders, start=1):
-                logger.info("Starting manual refresh %d/%d: %s", i, total, root)
-                self.signals.progress.emit(i - 1, total, str(root))
-                stats = self._view_model.scan_and_tag(
-                    root,
-                    recursive=self._recursive,
-                    batch_size=self._batch_size,
-                    hard_delete_missing=self._hard_delete,
-                )
-                # 集計
-                d = dict(stats)
-                d["folder"] = str(root)
-                d["hard_delete"] = self._hard_delete
-                per_root.append(d)
-                for k in agg.keys():
-                    try:
-                        agg[k] += float(d.get(k, 0.0))
-                    except Exception:
-                        pass
-                self.signals.progress.emit(i, total, str(root))
-        except Exception as exc:
-            logger.exception("Manual refresh failed")
-            self.signals.error.emit(str(exc))
-            return
-
-        result = {"aggregate": agg, "roots": per_root, "hard_delete": self._hard_delete}
-        self.signals.finished.emit(result)
 
 
 class TagsTab(QWidget):
@@ -932,8 +878,6 @@ class TagsTab(QWidget):
 
         self._index_pool = QThreadPool(self)
         self._index_pool.setMaxThreadCount(1)
-        self._refresh_pool = QThreadPool(self)
-        self._refresh_pool.setMaxThreadCount(1)
         self._search_busy = False
         self._indexing_active = False
         self._retag_active = False
@@ -941,8 +885,7 @@ class TagsTab(QWidget):
         self._can_load_more = False
         self._progress_dialog: QProgressDialog | None = None
         self._current_index_task: IndexRunnable | None = None
-        self._current_refresh_task: RefreshRunnable | None = None
-        self._active_refresh_folder: Path | None = None
+        self._active_refresh_folder: Sequence[Path] | None = None
 
         self._toast_label = QLabel("", self)
         self._toast_label.setObjectName("toastLabel")
@@ -1496,24 +1439,44 @@ class TagsTab(QWidget):
         self._start_refresh_task(folders, hard_delete=hard_delete)
 
     def _start_refresh_task(self, folders: Sequence[Path], *, hard_delete: bool = False) -> None:
+        folder_list = [Path(folder) for folder in folders]
+        if not folder_list:
+            self._show_toast("No folders to refresh.")
+            return
+
+        settings = self._view_model.load_settings()
+        self._db_path = self._resolve_db_path()
         self._refresh_active = True
-        self._active_refresh_folder = folders
-        task = RefreshRunnable(self._view_model, folders, hard_delete=hard_delete)
-        self._current_refresh_task = task
-        task.signals.progress.connect(self._handle_refresh_progress)
-        task.signals.finished.connect(self._handle_refresh_finished)
-        task.signals.error.connect(self._handle_refresh_failed)
+        self._retag_active = False
+        self._active_refresh_folder = list(folder_list)
+
+        def _runner(
+            progress_cb: Callable[[IndexProgress], None],
+            is_cancelled: Callable[[], bool],
+        ) -> dict[str, object]:
+            return self._view_model.refresh_roots(
+                folder_list,
+                settings=settings,
+                recursive=True,
+                hard_delete_missing=hard_delete,
+                progress_cb=progress_cb,
+                is_cancelled=is_cancelled,
+            )
+
         mode_hint = " (hard delete)" if hard_delete else ""
-        self._status_label.setText(f"Scanning…{mode_hint}")
+        self._status_label.setText(f"Refreshing…{mode_hint}")
         self._update_control_states()
-        self._refresh_pool.start(task)
 
-    def _handle_refresh_progress(self, done: int, total: int, current: str) -> None:
-        self._progress_bar.setMaximum(max(1, total))
-        self._progress_bar.setValue(done)
-        self._status_label.setText(f"Scanning… {done}/{total}  {current}")
+        db_path = self._db_path if self._db_path is not None else self._view_model.db_path
+        task = IndexRunnable(
+            self._view_model,
+            db_path,
+            settings=settings,
+            runner=_runner,
+        )
+        self._start_indexing_task(task)
 
-    def _determine_refresh_folder(self) -> Path | None:
+    def _determine_refresh_folder(self) -> Sequence[Path] | None:
         settings = self._view_model.load_settings()
         roots = [Path(r).expanduser() for r in (settings.roots or []) if r]
         logger.info("No selection; refreshing all configured roots (%d): %s", len(roots), roots[:3])
@@ -1530,71 +1493,6 @@ class TagsTab(QWidget):
             return base.resolve(strict=False)
         except OSError:
             return base.absolute()
-
-    def _handle_refresh_finished(self, stats: dict[str, object]) -> None:
-        task = self._current_refresh_task
-        if task is not None:
-            try:
-                task.signals.finished.disconnect(self._handle_refresh_finished)
-            except TypeError:
-                pass
-            try:
-                task.signals.error.disconnect(self._handle_refresh_failed)
-            except TypeError:
-                pass
-        self._current_refresh_task = None
-        self._refresh_active = False
-        folder = self._active_refresh_folder
-        self._active_refresh_folder = None
-        queued = int(stats.get("queued", 0) or 0)
-        tagged = int(stats.get("tagged", 0) or 0)
-        elapsed = float(stats.get("elapsed_sec", 0.0) or 0.0)
-        missing = int(stats.get("missing", 0) or 0)
-        soft_deleted = int(stats.get("soft_deleted", 0) or 0)
-        hard_deleted = int(stats.get("hard_deleted", 0) or 0)
-        removed_total = soft_deleted + hard_deleted
-        if missing <= 0 and removed_total > 0:
-            missing = removed_total
-        hard_delete = bool(stats.get("hard_delete", False) or hard_deleted)
-        removal_label = "hard delete" if hard_delete else "soft delete"
-        folder_text = str(folder) if folder is not None else str(stats.get("folder", ""))
-        status = (
-            f"Refresh complete: {tagged} tagged added, {removed_total} missing removed "
-            f"({removal_label}, {elapsed:.2f}s; queued {queued})."
-        )
-        if folder_text:
-            status += f" [{folder_text}]"
-        self._status_label.setText(status)
-        toast = f"{tagged} tagged added; {removed_total} missing removed"
-        if hard_delete:
-            toast += " (hard delete)"
-        if folder_text:
-            toast = f"{toast} {folder_text}"
-        self._show_toast(toast)
-        self._update_control_states()
-        if self._current_where:
-            QTimer.singleShot(0, self._on_search_clicked)
-
-    def _handle_refresh_failed(self, message: str) -> None:
-        task = self._current_refresh_task
-        if task is not None:
-            try:
-                task.signals.finished.disconnect(self._handle_refresh_finished)
-            except TypeError:
-                pass
-            try:
-                task.signals.error.disconnect(self._handle_refresh_failed)
-            except TypeError:
-                pass
-        self._current_refresh_task = None
-        self._refresh_active = False
-        folder = self._active_refresh_folder
-        self._active_refresh_folder = None
-        folder_text = f" {folder}" if folder is not None else ""
-        error_text = f"Refresh failed{folder_text}: {message}"
-        self._status_label.setText(error_text)
-        self._show_toast(error_text)
-        self._update_control_states()
 
     def _start_indexing_task(self, task: IndexRunnable) -> None:
         # UIの長寿命接続を閉じて静穏化
@@ -1613,7 +1511,13 @@ class TagsTab(QWidget):
 
     def _create_progress_dialog(self) -> QProgressDialog:
         dialog = QProgressDialog("Preparing…", "Cancel", 0, 0, self)
-        dialog.setWindowTitle("Retagging" if self._retag_active else "Indexing")
+        if self._refresh_active:
+            title = "Refreshing"
+        elif self._retag_active:
+            title = "Retagging"
+        else:
+            title = "Indexing"
+        dialog.setWindowTitle(title)
         dialog.setWindowModality(Qt.WindowModality.WindowModal)
         dialog.setMinimumDuration(0)
         dialog.setAutoReset(False)
@@ -1635,7 +1539,12 @@ class TagsTab(QWidget):
     def _cancel_indexing(self) -> None:
         if self._current_index_task is not None:
             self._current_index_task.cancel()
-        prefix = "Retagging" if self._retag_active else "Indexing"
+        if self._refresh_active:
+            prefix = "Refreshing"
+        elif self._retag_active:
+            prefix = "Retagging"
+        else:
+            prefix = "Indexing"
         self._status_label.setText(f"{prefix} cancelling…")
         if self._progress_dialog is not None:
             if self._progress_label is not None:
@@ -2196,7 +2105,9 @@ class TagsTab(QWidget):
 
     def _handle_index_started(self) -> None:
         self._indexing_active = True
-        if self._retag_active:
+        if self._refresh_active:
+            self._status_label.setText("Refreshing…")
+        elif self._retag_active:
             self._status_label.setText("Retagging…")
         else:
             self._status_label.setText("Indexing…")
@@ -2213,14 +2124,60 @@ class TagsTab(QWidget):
                 pass
 
         self._close_progress_dialog()
-        # ★ 失敗時でも UI がすぐ再操作できるよう接続を復旧
         try:
             self.restore_connection()
         except Exception:
             pass
+
         self._indexing_active = False
         elapsed = float(stats.get("elapsed_sec", 0.0) or 0.0)
         cancelled = bool(stats.get("cancelled", False))
+        refresh_active = self._refresh_active
+        folders = list(self._active_refresh_folder or [])
+        self._active_refresh_folder = None
+
+        if refresh_active:
+            self._refresh_active = False
+            if cancelled:
+                self._status_label.setText(f"Refresh cancelled after {elapsed:.2f}s.")
+                self._show_toast("Refresh cancelled.")
+            else:
+                queued = int(stats.get("queued", 0) or 0)
+                tagged = int(stats.get("tagged", 0) or 0)
+                missing = int(stats.get("missing", 0) or 0)
+                soft_deleted = int(stats.get("soft_deleted", 0) or 0)
+                hard_deleted = int(stats.get("hard_deleted", 0) or 0)
+                removed_total = soft_deleted + hard_deleted
+                if missing <= 0 and removed_total > 0:
+                    missing = removed_total
+                hard_delete = bool(stats.get("hard_delete", False) or hard_deleted)
+                removal_label = "hard delete" if hard_delete else "soft delete"
+                if not folders:
+                    roots_meta = stats.get("roots", [])
+                    folders = [Path(entry.get("folder", "")) for entry in roots_meta if entry.get("folder")]
+                folder_text = ", ".join(str(item) for item in folders) if folders else ""
+                status = (
+                    f"Refresh complete: {tagged} tagged, {removed_total} missing removed "
+                    f"({removal_label}, {elapsed:.2f}s; queued {queued})."
+                )
+                if folder_text:
+                    status += f" [{folder_text}]"
+                self._status_label.setText(status)
+                toast = f"{tagged} tagged; {removed_total} missing removed"
+                if hard_delete:
+                    toast += " (hard delete)"
+                if folder_text:
+                    toast = f"{toast} {folder_text}"
+                self._show_toast(toast)
+                if self._current_where:
+                    QTimer.singleShot(0, self._on_search_clicked)
+            self._update_control_states()
+            try:
+                end_quiesce()
+            finally:
+                self.restore_connection()
+            return
+
         prefix = "Retagging" if self._retag_active else "Indexing"
         if cancelled:
             self._status_label.setText(f"{prefix} cancelled after {elapsed:.2f}s.")
@@ -2228,10 +2185,12 @@ class TagsTab(QWidget):
             self._retag_active = False
             self._update_control_states()
             return
+
         if self._retag_active:
             self._status_label.setText(f"Retagging complete in {elapsed:.2f}s.")
         else:
             self._status_label.setText(f"Indexing complete in {elapsed:.2f}s.")
+
         tagger_name = str(stats.get("tagger_name") or "unknown")
         message = f"Indexed: {int(stats.get('scanned', 0))} files / " f"Tagged: {int(stats.get('tagged', 0))} / "
         retagged = int(stats.get("retagged", 0) or 0)
@@ -2248,7 +2207,6 @@ class TagsTab(QWidget):
         self._retag_active = False
         self._update_control_states()
         QTimer.singleShot(0, self._on_search_clicked)
-        # quiesce解除→UI接続を再オープン
         try:
             end_quiesce()
         finally:
@@ -2270,10 +2228,16 @@ class TagsTab(QWidget):
         if message == ONNXRUNTIME_MISSING_MESSAGE:
             error_text = message
         else:
-            prefix = "Retagging" if self._retag_active else "Indexing"
+            if self._refresh_active:
+                prefix = "Refreshing"
+            elif self._retag_active:
+                prefix = "Retagging"
+            else:
+                prefix = "Indexing"
             error_text = f"{prefix} failed (DB: {self._db_display}): {message}"
         self._status_label.setText(error_text)
         self._show_toast(error_text)
+        self._refresh_active = False
         self._retag_active = False
         self._update_control_states()
         # ① まず quiesce を解除

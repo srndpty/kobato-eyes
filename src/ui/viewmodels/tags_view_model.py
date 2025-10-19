@@ -143,6 +143,9 @@ class TagsViewModel(QObject):
         recursive: bool = True,
         batch_size: int = 8,
         hard_delete_missing: bool = False,
+        settings: PipelineSettings | None = None,
+        progress_cb: Callable[[IndexProgress], None] | None = None,
+        is_cancelled: Callable[[], bool] | None = None,
     ) -> dict[str, object]:
         """Execute :func:`core.pipeline.scan_and_tag`."""
 
@@ -152,8 +155,82 @@ class TagsViewModel(QObject):
                 recursive=recursive,
                 batch_size=batch_size,
                 hard_delete_missing=hard_delete_missing,
+                settings=settings,
+                progress_cb=progress_cb,
+                is_cancelled=is_cancelled,
             )
         )
+
+    def refresh_roots(
+        self,
+        folders: Sequence[Path],
+        *,
+        settings: PipelineSettings,
+        recursive: bool = True,
+        hard_delete_missing: bool = False,
+        progress_cb: Callable[[IndexProgress], None] | None = None,
+        is_cancelled: Callable[[], bool] | None = None,
+    ) -> dict[str, object]:
+        """Refresh one or more folders using the manual tagging pipeline."""
+
+        agg: dict[str, float] = {
+            "queued": 0.0,
+            "tagged": 0.0,
+            "elapsed_sec": 0.0,
+            "missing": 0.0,
+            "soft_deleted": 0.0,
+            "hard_deleted": 0.0,
+        }
+        per_root: list[dict[str, object]] = []
+        cancelled = False
+
+        for root in folders:
+            if is_cancelled is not None:
+                try:
+                    if is_cancelled():
+                        cancelled = True
+                        break
+                except Exception:
+                    cancelled = True
+                    break
+
+            stats = self.scan_and_tag(
+                root,
+                recursive=recursive,
+                batch_size=settings.batch_size,
+                hard_delete_missing=hard_delete_missing,
+                settings=settings,
+                progress_cb=progress_cb,
+                is_cancelled=is_cancelled,
+            )
+            root_stats = dict(stats)
+            root_stats["folder"] = str(Path(root))
+            root_stats["hard_delete"] = hard_delete_missing
+            per_root.append(root_stats)
+
+            agg["queued"] += float(root_stats.get("queued", 0) or 0.0)
+            agg["tagged"] += float(root_stats.get("tagged", 0) or 0.0)
+            agg["elapsed_sec"] += float(root_stats.get("elapsed_sec", 0.0) or 0.0)
+            agg["missing"] += float(root_stats.get("missing", 0) or 0.0)
+            agg["soft_deleted"] += float(root_stats.get("soft_deleted", 0) or 0.0)
+            agg["hard_deleted"] += float(root_stats.get("hard_deleted", 0) or 0.0)
+
+            if bool(root_stats.get("cancelled")):
+                cancelled = True
+                break
+
+        result: dict[str, object] = {
+            "queued": agg["queued"],
+            "tagged": agg["tagged"],
+            "elapsed_sec": agg["elapsed_sec"],
+            "missing": agg["missing"],
+            "soft_deleted": agg["soft_deleted"],
+            "hard_deleted": agg["hard_deleted"],
+            "hard_delete": hard_delete_missing,
+            "roots": per_root,
+            "cancelled": cancelled,
+        }
+        return result
 
     def retag_query(self, db_path: Path, predicate: str, params: Sequence[object]) -> int:
         """Retag files matching the given predicate."""

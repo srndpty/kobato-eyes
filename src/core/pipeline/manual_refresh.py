@@ -3,9 +3,10 @@ from __future__ import annotations
 import logging
 import time
 from pathlib import Path
-from typing import Iterable, Iterator, Sequence
+from typing import Callable, Iterable, Iterator, Sequence
 
 from core.config import load_settings
+from core.config.schema import PipelineSettings
 from core.scanner import DEFAULT_EXTENSIONS, iter_images
 from core.tag_job import TagJobConfig, run_tag_job
 from db.connection import bootstrap_if_needed, get_conn
@@ -15,6 +16,7 @@ from utils.paths import get_db_path
 
 from .resolver import _resolve_tagger
 from .signature import _build_max_tags_map, _build_threshold_map, current_tagger_sig
+from .types import IndexPhase, IndexProgress
 
 logger = logging.getLogger(__name__)
 
@@ -25,6 +27,9 @@ def scan_and_tag(
     recursive: bool = True,
     batch_size: int = 8,
     hard_delete_missing: bool = False,
+    settings: PipelineSettings | None = None,
+    progress_cb: Callable[[IndexProgress], None] | None = None,
+    is_cancelled: Callable[[], bool] | None = None,
 ) -> dict[str, object]:
     """指定パス配下の未タグ画像をタグ付け（UIの手動更新用）。"""
     start_time = time.perf_counter()
@@ -50,7 +55,7 @@ def scan_and_tag(
             root,
         )
 
-    settings = load_settings()
+    settings = settings or load_settings()
     allow_exts = {ext.lower() for ext in (settings.allow_exts or DEFAULT_EXTENSIONS)}
     # 非対応拡張子でも「掃除だけ」は実行したいので、ここでの早期 return はしない。
     skip_tagging_for_this_root = (
@@ -94,12 +99,39 @@ def scan_and_tag(
         else:
             return str(candidate) == str(resolved_root)
 
+    cancelled = False
+
+    def _cancelled() -> bool:
+        nonlocal cancelled
+        if cancelled:
+            return True
+        if is_cancelled is None:
+            return False
+        try:
+            cancelled = bool(is_cancelled())
+        except Exception:
+            logger.exception("Refresh cancellation callback failed")
+            cancelled = True
+        return cancelled
+
+    def _emit(progress: IndexProgress, *, force: bool = False) -> None:
+        if progress_cb is None:
+            return
+        try:
+            progress_cb(progress)
+        except Exception:
+            logger.exception("Refresh progress callback failed; disabling further updates")
+
+    _emit(IndexProgress(phase=IndexPhase.SCAN, done=0, total=-1, message=str(resolved_root)), force=True)
+
     try:
         queued_paths: list[Path] = []
         seen: set[str] = set()
         fs_paths: set[str] = set()
 
         for _, stored_path in list_untagged_under_path(conn, _like_pattern_for_input(resolved_root)):
+            if _cancelled():
+                break
             path_obj = Path(stored_path)
             # ここでは「タグ付け候補の生成」。存在しないものはタグ付けできないので除外。
             if not path_obj.exists() or not _within_scope(path_obj):
@@ -122,6 +154,8 @@ def scan_and_tag(
             fs_iterable = []
 
         for candidate in fs_iterable:
+            if _cancelled():
+                break
             path_obj = Path(candidate)
             if not _within_scope(path_obj) or path_obj.suffix.lower() not in allow_exts:
                 continue
@@ -144,6 +178,7 @@ def scan_and_tag(
 
         total = len(queued_paths)
         stats_out["queued"] = total
+        _emit(IndexProgress(phase=IndexPhase.SCAN, done=total, total=total, message=str(resolved_root)), force=True)
 
         def _chunked(items: Sequence[int], size: int = 900) -> Iterator[list[int]]:
             for index in range(0, len(items), size):
@@ -162,6 +197,8 @@ def scan_and_tag(
                     (_like_pattern_for_input(resolved_root),),
                 )
             for row in cursor.fetchall():
+                if _cancelled():
+                    break
                 path_text = str(row["path"])
                 candidate = Path(path_text)
                 if not _within_scope(candidate):
@@ -176,11 +213,14 @@ def scan_and_tag(
         stats_out["missing"] = missing_count
         soft_deleted = 0
         hard_deleted_count = 0
-        if missing_ids:
+        removed = 0
+        if missing_ids and not _cancelled():
             logger.info("Manual tag refresh: marking %d missing file(s) under %s", missing_count, resolved_root)
             if hard_delete_missing:
                 with conn:
                     for chunk in _chunked(missing_ids):
+                        if _cancelled():
+                            break
                         placeholders = ", ".join("?" for _ in chunk)
                         conn.execute(f"DELETE FROM file_tags WHERE file_id IN ({placeholders})", chunk)
                         conn.execute(f"DELETE FROM signatures WHERE file_id IN ({placeholders})", chunk)
@@ -188,10 +228,21 @@ def scan_and_tag(
 
                         _fts_del(conn, chunk)
                         conn.execute(f"DELETE FROM files WHERE id IN ({placeholders})", chunk)
+                        removed += len(chunk)
+                        _emit(
+                            IndexProgress(
+                                phase=IndexPhase.FTS,
+                                done=removed,
+                                total=missing_count,
+                                message="Hard delete missing",
+                            )
+                        )
                 hard_deleted_count = missing_count
             else:
                 with conn:
                     for chunk in _chunked(missing_ids):
+                        if _cancelled():
+                            break
                         placeholders = ", ".join("?" for _ in chunk)
                         conn.execute(
                             f"UPDATE files SET is_present = 0, deleted_at = CURRENT_TIMESTAMP WHERE id IN ({', '.join('?' for _ in chunk)})",
@@ -200,13 +251,23 @@ def scan_and_tag(
                         from db.repository import fts_delete_rows as _fts_del
 
                         _fts_del(conn, chunk)
+                        removed += len(chunk)
+                        _emit(
+                            IndexProgress(
+                                phase=IndexPhase.FTS,
+                                done=removed,
+                                total=missing_count,
+                                message="Mark missing",
+                            )
+                        )
                 soft_deleted = missing_count
         stats_out["soft_deleted"] = soft_deleted
         stats_out["hard_deleted"] = hard_deleted_count
 
-        if total == 0 or skip_tagging_for_this_root:
+        if total == 0 or skip_tagging_for_this_root or _cancelled():
             elapsed = time.perf_counter() - start_time
             stats_out["elapsed_sec"] = elapsed
+            stats_out["cancelled"] = cancelled
             if missing_count:
                 logger.info(
                     "Manual tag refresh: removed %d missing file(s) (hard_delete=%s) in %.2fs",
@@ -216,6 +277,7 @@ def scan_and_tag(
                 )
             else:
                 logger.info("Manual tag refresh: no untagged files under %s (elapsed %.2fs)", resolved_root, elapsed)
+            _emit(IndexProgress(phase=IndexPhase.DONE, done=1, total=1, message=str(resolved_root)), force=True)
             return stats_out
 
         logger.info("Manual tag refresh: tagging %d file(s) under %s (recursive=%s)", total, resolved_root, recursive)
@@ -241,6 +303,16 @@ def scan_and_tag(
 
         tagged = 0
         for index, path_obj in enumerate(queued_paths, start=1):
+            if _cancelled():
+                break
+            _emit(
+                IndexProgress(
+                    phase=IndexPhase.TAG,
+                    done=index - 1,
+                    total=total,
+                    message=str(path_obj),
+                )
+            )
             logger.info("Manual tag refresh progress: %d/%d %s", index, total, path_obj)
             try:
                 result = run_tag_job(tagger_obj, path_obj, conn, config=config)
@@ -253,9 +325,12 @@ def scan_and_tag(
             if batch_size > 0 and tagged % max(batch_size, 1) == 0:
                 logger.info("Manual tag refresh tagged %d/%d file(s)", tagged, total)
 
+        _emit(IndexProgress(phase=IndexPhase.TAG, done=tagged, total=total, message="Tagging"), force=True)
+
         elapsed = time.perf_counter() - start_time
         stats_out["tagged"] = tagged
         stats_out["elapsed_sec"] = elapsed
+        stats_out["cancelled"] = cancelled
         logger.info(
             "Manual tag refresh complete: tagged %d of %d file(s) in %.2fs (missing removed=%d, hard=%s)",
             tagged,
@@ -264,6 +339,7 @@ def scan_and_tag(
             missing_count,
             hard_delete_missing,
         )
+        _emit(IndexProgress(phase=IndexPhase.DONE, done=1, total=1, message=str(resolved_root)), force=True)
         return stats_out
     finally:
         conn.close()
