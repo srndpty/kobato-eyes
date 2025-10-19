@@ -42,16 +42,20 @@ def scan_and_tag(
         "hard_deleted": 0,
     }
 
-    if not resolved_root.exists():
-        logger.info("Manual tag refresh skipped; path does not exist: %s", resolved_root)
-        return stats_out
+    root_exists = resolved_root.exists()
+    if not root_exists:
+        logger.info(
+            "Manual tag refresh: path does not exist; will run DB cleanup only: resolved_root:%s, root:%s",
+            resolved_root,
+            root,
+        )
 
     settings = load_settings()
     allow_exts = {ext.lower() for ext in (settings.allow_exts or DEFAULT_EXTENSIONS)}
-    if resolved_root.is_file() and resolved_root.suffix.lower() not in allow_exts:
-        stats_out["elapsed_sec"] = time.perf_counter() - start_time
-        logger.info("Manual tag refresh skipped; unsupported file type: %s", resolved_root)
-        return stats_out
+    # 非対応拡張子でも「掃除だけ」は実行したいので、ここでの早期 return はしない。
+    skip_tagging_for_this_root = (
+        root_exists and resolved_root.is_file() and resolved_root.suffix.lower() not in allow_exts
+    )
 
     thresholds = _build_threshold_map(settings.tagger.thresholds)
     max_tags_map = _build_max_tags_map(getattr(settings.tagger, "max_tags", None))
@@ -60,33 +64,44 @@ def scan_and_tag(
     conn = get_conn(db_path, allow_when_quiesced=True)
     tagger: ITagger | None = None
 
-    def _like_pattern(path: Path) -> str:
+    def _like_pattern_for_input(path: Path) -> str:
+        """存在しないパスでも妥当な LIKE を作る（掃除用に使う）"""
         literal = str(path)
-        if path.is_dir():
-            if literal.endswith(("/", "\\")):
-                return f"{literal}%"
-            separator = "\\" if "\\" in literal and "/" not in literal else "/"
-            return f"{literal}{separator}%"
+        # ディレクトリかどうかのヒント：
+        # - 末尾が / or \ → ディレクトリ想定
+        # - それ以外は、exists() が真なら実際の型を使う
+        # - exists() が偽なら、拡張子がなければディレクトリ扱いに倒す
+        looks_dir = literal.endswith(("/", "\\")) or (not root_exists and path.suffix == "")
+        if (root_exists and path.is_dir()) or looks_dir:
+            sep = "\\" if ("\\" in literal and "/" not in literal) else "/"
+            if not literal.endswith(("/", "\\")):
+                literal = literal + sep
+            return f"{literal}%"
         return literal
 
     def _within_scope(candidate: Path) -> bool:
-        if resolved_root.is_file():
+        """存在しない root のときも“スコープ内か”を判定できるように緩める。"""
+        if root_exists and resolved_root.is_file():
             return candidate == resolved_root
-        if candidate == resolved_root:
-            return False
-        try:
-            relative = candidate.relative_to(resolved_root)
-        except ValueError:
-            return False
-        return recursive or len(relative.parts) <= 1
+        # root が存在しない場合は「ディレクトリ想定ならプレフィックス一致、ファイル想定なら完全一致」
+        like_dir = (not root_exists and resolved_root.suffix == "") or (root_exists and resolved_root.is_dir())
+        if like_dir:
+            try:
+                rel = candidate.relative_to(resolved_root)
+                return recursive or len(rel.parts) <= 1
+            except ValueError:
+                return False
+        else:
+            return str(candidate) == str(resolved_root)
 
     try:
         queued_paths: list[Path] = []
         seen: set[str] = set()
         fs_paths: set[str] = set()
 
-        for _, stored_path in list_untagged_under_path(conn, _like_pattern(resolved_root)):
+        for _, stored_path in list_untagged_under_path(conn, _like_pattern_for_input(resolved_root)):
             path_obj = Path(stored_path)
+            # ここでは「タグ付け候補の生成」。存在しないものはタグ付けできないので除外。
             if not path_obj.exists() or not _within_scope(path_obj):
                 continue
             if path_obj.suffix.lower() not in allow_exts:
@@ -98,10 +113,13 @@ def scan_and_tag(
             queued_paths.append(path_obj)
             seen.add(literal)
 
-        if resolved_root.is_file():
+        if root_exists and resolved_root.is_file():
             fs_iterable: Iterable[Path] = [resolved_root]
-        else:
+        elif root_exists:
             fs_iterable = iter_images([resolved_root], excluded=[], extensions=allow_exts)
+        else:
+            # ルートが存在しないなら、ファイルシステム側の走査は行わない（DB 掃除のみ）
+            fs_iterable = []
 
         for candidate in fs_iterable:
             path_obj = Path(candidate)
@@ -134,13 +152,14 @@ def scan_and_tag(
         missing_ids: list[int] = []
         cursor = None
         try:
-            if resolved_root.is_file():
+            if root_exists and resolved_root.is_file():
                 cursor = conn.execute(
                     "SELECT id, path FROM files WHERE is_present = 1 AND path = ?", (str(resolved_root),)
                 )
             else:
                 cursor = conn.execute(
-                    "SELECT id, path FROM files WHERE is_present = 1 AND path LIKE ?", (_like_pattern(resolved_root),)
+                    "SELECT id, path FROM files WHERE is_present = 1 AND path LIKE ?",
+                    (_like_pattern_for_input(resolved_root),),
                 )
             for row in cursor.fetchall():
                 path_text = str(row["path"])
@@ -185,7 +204,7 @@ def scan_and_tag(
         stats_out["soft_deleted"] = soft_deleted
         stats_out["hard_deleted"] = hard_deleted_count
 
-        if total == 0:
+        if total == 0 or skip_tagging_for_this_root:
             elapsed = time.perf_counter() - start_time
             stats_out["elapsed_sec"] = elapsed
             if missing_count:

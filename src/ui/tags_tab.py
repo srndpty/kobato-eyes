@@ -545,13 +545,14 @@ class RefreshRunnable(QRunnable):
     """Run ``scan_and_tag`` on a worker thread and forward the resulting summary."""
 
     class Signals(QObject):
+        progress = pyqtSignal(int, int, str)
         finished = pyqtSignal(dict)
         error = pyqtSignal(str)
 
     def __init__(
         self,
         view_model: TagsViewModel,
-        folder: Path,
+        folders: "Sequence[Path] | Path",
         *,
         recursive: bool = True,
         batch_size: int = 8,
@@ -559,28 +560,46 @@ class RefreshRunnable(QRunnable):
     ) -> None:
         super().__init__()
         self._view_model = view_model
-        self._folder = Path(folder)
+        if isinstance(folders, (str, Path)):
+            folders = [Path(folders)]
+        self._folders = [Path(f) for f in folders]
         self._recursive = recursive
         self._batch_size = batch_size
         self._hard_delete = hard_delete
         self.signals = self.Signals()
 
-    def run(self) -> None:  # noqa: D401
+    def run(self) -> None:
         try:
-            stats = self._view_model.scan_and_tag(
-                self._folder,
-                recursive=self._recursive,
-                batch_size=self._batch_size,
-                hard_delete_missing=self._hard_delete,
-            )
-        except Exception as exc:  # pragma: no cover - defensive logging
-            logger.exception("Manual refresh failed for %s", self._folder)
+            total = len(self._folders)
+            agg = {"queued": 0, "tagged": 0, "elapsed_sec": 0.0, "missing": 0, "soft_deleted": 0, "hard_deleted": 0}
+            per_root: list[dict] = []
+            for i, root in enumerate(self._folders, start=1):
+                logger.info("Starting manual refresh %d/%d: %s", i, total, root)
+                self.signals.progress.emit(i - 1, total, str(root))
+                stats = self._view_model.scan_and_tag(
+                    root,
+                    recursive=self._recursive,
+                    batch_size=self._batch_size,
+                    hard_delete_missing=self._hard_delete,
+                )
+                # 集計
+                d = dict(stats)
+                d["folder"] = str(root)
+                d["hard_delete"] = self._hard_delete
+                per_root.append(d)
+                for k in agg.keys():
+                    try:
+                        agg[k] += float(d.get(k, 0.0))
+                    except Exception:
+                        pass
+                self.signals.progress.emit(i, total, str(root))
+        except Exception as exc:
+            logger.exception("Manual refresh failed")
             self.signals.error.emit(str(exc))
             return
-        stats = dict(stats)
-        stats["folder"] = str(self._folder)
-        stats["hard_delete"] = self._hard_delete
-        self.signals.finished.emit(stats)
+
+        result = {"aggregate": agg, "roots": per_root, "hard_delete": self._hard_delete}
+        self.signals.finished.emit(result)
 
 
 class TagsTab(QWidget):
@@ -1468,19 +1487,20 @@ class TagsTab(QWidget):
     def _on_refresh_clicked(self) -> None:
         if self._refresh_active or self._indexing_active:
             return
-        folder = self._determine_refresh_folder()
-        if folder is None:
+        folders = self._determine_refresh_folder()
+        if folders is None:
             self._show_toast("Select a file or run a search to choose a folder.")
             return
         modifiers = QApplication.keyboardModifiers()
         hard_delete = bool(modifiers & Qt.KeyboardModifier.ShiftModifier)
-        self._start_refresh_task(folder, hard_delete=hard_delete)
+        self._start_refresh_task(folders, hard_delete=hard_delete)
 
-    def _start_refresh_task(self, folder: Path, *, hard_delete: bool = False) -> None:
+    def _start_refresh_task(self, folders: Sequence[Path], *, hard_delete: bool = False) -> None:
         self._refresh_active = True
-        self._active_refresh_folder = folder
-        task = RefreshRunnable(self._view_model, folder, hard_delete=hard_delete)
+        self._active_refresh_folder = folders
+        task = RefreshRunnable(self._view_model, folders, hard_delete=hard_delete)
         self._current_refresh_task = task
+        task.signals.progress.connect(self._handle_refresh_progress)
         task.signals.finished.connect(self._handle_refresh_finished)
         task.signals.error.connect(self._handle_refresh_failed)
         mode_hint = " (hard delete)" if hard_delete else ""
@@ -1488,25 +1508,16 @@ class TagsTab(QWidget):
         self._update_control_states()
         self._refresh_pool.start(task)
 
+    def _handle_refresh_progress(self, done: int, total: int, current: str) -> None:
+        self._progress_bar.setMaximum(max(1, total))
+        self._progress_bar.setValue(done)
+        self._status_label.setText(f"Scanning… {done}/{total}  {current}")
+
     def _determine_refresh_folder(self) -> Path | None:
-        folder: Path | None = None
-        if self._stack.currentWidget() is self._table_view:
-            model = self._table_view.selectionModel()
-            if model is not None:
-                rows = model.selectedRows()
-                if rows:
-                    folder = self._folder_for_row(rows[0].row())
-        elif self._stack.currentWidget() is self._grid_view:
-            model = self._grid_view.selectionModel()
-            if model is not None:
-                indexes = model.selectedIndexes()
-                if indexes:
-                    stored_row = indexes[0].data(Qt.ItemDataRole.UserRole)
-                    row_index = int(stored_row) if stored_row is not None else indexes[0].row()
-                    folder = self._folder_for_row(row_index)
-        if folder is None and self._results_cache:
-            folder = self._folder_for_row(0)
-        return folder
+        settings = self._view_model.load_settings()
+        roots = [Path(r).expanduser() for r in (settings.roots or []) if r]
+        logger.info("No selection; refreshing all configured roots (%d): %s", len(roots), roots[:3])
+        return roots
 
     def _folder_for_row(self, row: int) -> Path | None:
         if not (0 <= row < len(self._results_cache)):
