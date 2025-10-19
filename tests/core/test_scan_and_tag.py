@@ -5,6 +5,8 @@ import hashlib
 import sys
 from pathlib import Path
 
+from types import SimpleNamespace
+
 import pytest
 
 pytest.importorskip("pydantic")
@@ -36,6 +38,27 @@ def temp_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
     monkeypatch.setattr(paths, "_APP_PATHS", app_paths)
     monkeypatch.setattr("core.pipeline.load_settings", lambda: PipelineSettings(allow_exts={".png"}))
     return data_dir
+
+
+@pytest.fixture(autouse=True)
+def fake_pipeline(monkeypatch: pytest.MonkeyPatch):
+    calls: dict[str, list] = {"tag": [], "write": []}
+
+    class DummyTagStage:
+        def run(self, ctx, emitter, records):  # noqa: ANN001 - signature defined by production class
+            calls["tag"].append([Path(r.path).resolve() for r in records])
+            db_items = [object() for _ in records]
+            return SimpleNamespace(records=records, db_items=db_items, tagged_count=len(records))
+
+    class DummyWriteStage:
+        def run(self, ctx, emitter, tag_result):  # noqa: ANN001 - signature defined by production class
+            calls["write"].append(list(tag_result.db_items))
+            return SimpleNamespace(written=len(tag_result.db_items), fts_processed=len(tag_result.db_items))
+
+    monkeypatch.setattr(manual_refresh, "TagStage", DummyTagStage)
+    monkeypatch.setattr(manual_refresh, "WriteStage", DummyWriteStage)
+    monkeypatch.setattr(manual_refresh, "_resolve_tagger", lambda *args, **kwargs: (object(), None, None))
+    return calls
 
 
 def _make_sha(path: Path) -> str:
@@ -72,7 +95,9 @@ def test_scan_and_tag_unsupported_extension_returns_early(temp_env: Path, tmp_pa
     assert stats["elapsed_sec"] >= 0.0
 
 
-def test_scan_and_tag_deduplicates_paths(temp_env: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_scan_and_tag_deduplicates_paths(
+    temp_env: Path, tmp_path: Path, fake_pipeline: dict[str, list]
+) -> None:
     root = tmp_path / "library"
     root.mkdir()
     image_path = root / "untagged.png"
@@ -95,21 +120,12 @@ def test_scan_and_tag_deduplicates_paths(temp_env: Path, tmp_path: Path, monkeyp
     finally:
         conn.close()
 
-    call_args: list[Path] = []
-
-    def fake_run_tag_job(*args, **kwargs):
-        call_args.append(Path(args[1]))
-        return object()
-
-    monkeypatch.setattr(manual_refresh, "run_tag_job", fake_run_tag_job)
-    monkeypatch.setattr(manual_refresh, "_resolve_tagger", lambda *a, **k: (object(), None, None))
-
     stats = scan_and_tag(root)
 
     assert stats["queued"] == 1
     assert stats["tagged"] == 1
-    assert len(call_args) == 1
-    assert call_args[0] == image_path.resolve()
+    assert len(fake_pipeline["tag"]) == 1
+    assert fake_pipeline["tag"][0] == [image_path.resolve()]
 
 
 def test_scan_and_tag_soft_deletes_missing(temp_env: Path, tmp_path: Path) -> None:
