@@ -7,6 +7,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
+from core.signature import ensure_signatures
 from db.repository import replace_file_tags, update_fts, upsert_file, upsert_tags
 from tagger.base import ITagger, MaxTagsMap, TagResult, ThresholdMap
 from utils.hash import compute_sha256
@@ -71,6 +72,8 @@ def run_tag_job(
         tagger_sig=cfg.tagger_sig,
         last_tagged_at=tagged_at,
     )
+    # 画像は既に読んでいるので I/O 追加ゼロで署名保存できる
+    ensure_signatures(conn, file_id, image=image, path=str(source))
 
     tag_defs = [{"name": prediction.name, "category": int(prediction.category)} for prediction in tag_result.tags]
     tag_id_map = upsert_tags(conn, tag_defs)

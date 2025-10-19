@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import logging
 import math
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Mapping, Sequence
 
 from sig.phash import hamming64
+
+logger = logging.getLogger(__name__)
 
 _EXTENSION_PRIORITY = {
     "png": 4,
@@ -24,6 +27,55 @@ _EXTENSION_PRIORITY = {
 }
 
 
+def _row_get(row, key, default=None):
+    try:
+        if isinstance(row, dict):
+            return row.get(key, default)
+        if hasattr(row, "keys") and key in row.keys():
+            return row[key]  # sqlite3.Row
+        return getattr(row, key, default)
+    except Exception:
+        return default
+
+
+def _parse_phash_any(raw) -> int | None:
+    if raw is None:
+        return None
+
+    # memoryview / bytes / bytearray (BLOB)
+    if isinstance(raw, (bytes, bytearray, memoryview)):
+        try:
+            v = int.from_bytes(bytes(raw), "big", signed=False)
+            return v & ((1 << 64) - 1)
+        except Exception:
+            return None
+
+    # 文字列 (10進/0x16進/16進っぽい)
+    if isinstance(raw, str):
+        s = raw.strip()
+        if not s:
+            return None
+        try:
+            # base=0 なら "0x…" も 10進も自動判定
+            v = int(s, 0)
+        except Exception:
+            try:
+                v = int(s, 16)  # 最後の手段として16進解釈
+            except Exception:
+                return None
+        return v & ((1 << 64) - 1)
+
+    # それ以外（np.int64 / Decimal などもここで拾う）
+    try:
+        v = int(raw)
+    except Exception:
+        return None
+    return v & ((1 << 64) - 1)
+
+
+PHASH_KEYS = ("phash_u64", "phash", "phash64", "phash_hex", "phash_bytes", "signature", "sig")
+
+
 @dataclass(frozen=True)
 class DuplicateFile:
     """Metadata required for duplicate detection of a single file."""
@@ -38,23 +90,22 @@ class DuplicateFile:
 
     @classmethod
     def from_row(cls, row: Mapping[str, object]) -> DuplicateFile:
-        """Create an instance from a database row."""
-
-        phash_value = row.get("phash_u64")
-        if phash_value is None:
+        raw_ph = None
+        for k in PHASH_KEYS:
+            raw_ph = _row_get(row, k, None)
+            if raw_ph is not None:
+                break
+        ph = _parse_phash_any(raw_ph)
+        if ph is None:
             raise ValueError("Row is missing perceptual hash information")
-        raw_path = Path(str(row.get("path")))
-        size = row.get("size")
-        width = row.get("width")
-        height = row.get("height")
 
         return cls(
-            file_id=int(row.get("file_id")),
-            path=raw_path,
-            size=int(size) if isinstance(size, (int, float)) else None,
-            width=int(width) if isinstance(width, (int, float)) else None,
-            height=int(height) if isinstance(height, (int, float)) else None,
-            phash=int(phash_value),
+            file_id=int(_row_get(row, "file_id", _row_get(row, "id", -1))),
+            path=Path(str(_row_get(row, "path", _row_get(row, "file_path", "")))),
+            size=(lambda v: int(v) if isinstance(v, (int, float)) else None)(_row_get(row, "size")),
+            width=(lambda v: int(v) if isinstance(v, (int, float)) else None)(_row_get(row, "width")),
+            height=(lambda v: int(v) if isinstance(v, (int, float)) else None)(_row_get(row, "height")),
+            phash=ph,
         )
 
     @property
@@ -146,50 +197,81 @@ class DuplicateScanner:
 
     def __init__(self, config: DuplicateScanConfig) -> None:
         self._config = config
+        assert config.band_bits * config.band_count <= 64, "band config too large"
         self._band_mask = (1 << config.band_bits) - 1
 
     def build_clusters(self, files: Iterable[DuplicateFile]) -> list[DuplicateCluster]:
-        """Return clusters of duplicate files."""
+        candidates = [f for f in files if f.phash is not None]
+        logger.info(
+            "dup: candidates=%d band_bits=%d band_count=%d ham_th=%d size_ratio=%s cosine_th=%s",
+            len(candidates),
+            self._config.band_bits,
+            self._config.band_count,
+            self._config.hamming_threshold,
+            self._config.size_ratio,
+            self._config.cosine_threshold,
+        )
 
-        candidates = [file for file in files if file.phash is not None]
         if not candidates:
             return []
 
+        # --- バケット生成 ---
         buckets: dict[tuple[int, int], list[int]] = {}
-        for index, file in enumerate(candidates):
-            for band_index in range(self._config.band_count):
-                shift = band_index * self._config.band_bits
-                bucket_key = (band_index, (file.phash >> shift) & self._band_mask)
-                buckets.setdefault(bucket_key, []).append(index)
+        for idx, f in enumerate(candidates):
+            ph = f.phash & ((1 << 64) - 1)  # 念のため
+            for b in range(self._config.band_count):
+                shift = b * self._config.band_bits
+                key = (b, (ph >> shift) & self._band_mask)
+                buckets.setdefault(key, []).append(idx)
 
+        bucket_sizes = [len(v) for v in buckets.values()]
+        ge2 = sum(1 for s in bucket_sizes if s >= 2)
+        max_bucket = max(bucket_sizes) if bucket_sizes else 0
+        logger.info("dup: buckets=%d (>=2:%d) max_bucket=%d", len(buckets), ge2, max_bucket)
+        if ge2 == 0:
+            logger.warning("dup: no bucket has 2+ items -> edges=0")
+            return []
+
+        # --- ペア生成とフィルタの通過数を計測 ---
         edges: dict[tuple[int, int], DuplicateEdge] = {}
+        pair_total = pair_after_size = pair_after_ham = pair_after_cos = 0
+
         for indices in buckets.values():
             if len(indices) < 2:
                 continue
             for i in range(len(indices) - 1):
-                idx_a = indices[i]
-                file_a = candidates[idx_a]
+                a = candidates[indices[i]]
                 for j in range(i + 1, len(indices)):
-                    idx_b = indices[j]
-                    if idx_a == idx_b:
+                    b = candidates[indices[j]]
+                    if a.file_id == b.file_id:
                         continue
-                    key = tuple(sorted((file_a.file_id, candidates[idx_b].file_id)))
-                    if key in edges:
-                        continue
-                    file_b = candidates[idx_b]
-                    if not self._passes_size_ratio(file_a, file_b):
-                        continue
-                    hamming = hamming64(file_a.phash, file_b.phash)
-                    if hamming > self._config.hamming_threshold:
-                        continue
-                    if not self._passes_cosine_similarity(file_a, file_b):
-                        continue
+                    pair_total += 1
 
-                    edges[key] = DuplicateEdge(
-                        file_id_a=file_a.file_id,
-                        file_id_b=file_b.file_id,
-                        hamming=hamming,
-                    )
+                    if not self._passes_size_ratio(a, b):
+                        continue
+                    pair_after_size += 1
+
+                    h = hamming64(a.phash, b.phash)
+                    if h > self._config.hamming_threshold:
+                        continue
+                    pair_after_ham += 1
+
+                    if not self._passes_cosine_similarity(a, b):
+                        continue
+                    pair_after_cos += 1
+
+                    key = (a.file_id, b.file_id) if a.file_id < b.file_id else (b.file_id, a.file_id)
+                    if key not in edges:
+                        edges[key] = DuplicateEdge(a.file_id, b.file_id, h)
+
+        logger.info(
+            "dup: pairs total=%d -> size=%d -> ham=%d -> cosine=%d -> edges=%d",
+            pair_total,
+            pair_after_size,
+            pair_after_ham,
+            pair_after_cos,
+            len(edges),
+        )
 
         if not edges:
             return []
