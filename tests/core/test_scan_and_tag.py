@@ -47,14 +47,13 @@ def test_scan_and_tag_missing_root_returns_empty_stats(tmp_path: Path) -> None:
 
     stats = scan_and_tag(missing_root)
 
-    assert stats == {
-        "queued": 0,
-        "tagged": 0,
-        "elapsed_sec": 0.0,
-        "missing": 0,
-        "soft_deleted": 0,
-        "hard_deleted": 0,
-    }
+    # 実装では perf_counter を使うため elapsed_sec は 0.0 ちょうどではなく微小正値になり得る
+    assert int(stats.get("queued", -1)) == 0
+    assert int(stats.get("tagged", -1)) == 0
+    assert int(stats.get("missing", -1)) == 0
+    assert int(stats.get("soft_deleted", -1)) == 0
+    assert int(stats.get("hard_deleted", -1)) == 0
+    assert float(stats.get("elapsed_sec", -1.0)) >= 0.0
 
 
 def test_scan_and_tag_unsupported_extension_returns_early(temp_env: Path, tmp_path: Path) -> None:
