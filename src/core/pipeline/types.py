@@ -17,6 +17,7 @@ logger = logging.getLogger(__name__)
 
 class IndexPhase(Enum):
     SCAN = "scan"
+    PREPARE = "prepare"
     TAG = "tag"
     FTS = "fts"
     DONE = "done"

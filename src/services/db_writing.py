@@ -125,7 +125,17 @@ class DBWritingService(DBWriteQueue):
 
     def _apply_pragmas(self, conn: sqlite3.Connection) -> None:
         if self._unsafe_fast:
-            self._apply_unsafe_fast_pragmas(conn)
+            try:
+                self._apply_unsafe_fast_pragmas(conn)
+            except sqlite3.OperationalError as exc:
+                if "locked" in str(exc).lower():
+                    self._log.warning("DBWritingService: EXCLUSIVE lock unavailable; falling back to WAL mode")
+                    # フォールバック：通常フローで書き込む
+                    self._unsafe_fast = False
+                    self._stage_tags_in_temp = False
+                    self._apply_wal_pragmas(conn)
+                else:
+                    raise
         else:
             self._apply_wal_pragmas(conn)
 

@@ -12,8 +12,8 @@ from core.scanner import DEFAULT_EXTENSIONS, iter_images
 from db.connection import bootstrap_if_needed, get_conn
 from db.repository import get_file_by_path, list_untagged_under_path, upsert_file
 from tagger.base import ITagger
-from utils.paths import get_db_path
 from utils.hash import compute_sha256
+from utils.paths import get_db_path
 
 from .resolver import _resolve_tagger
 from .signature import _build_max_tags_map, _build_threshold_map, current_tagger_sig
@@ -311,10 +311,14 @@ def scan_and_tag(
         )
 
         records: list[_FileRecord] = []
+        _emit(IndexProgress(phase=IndexPhase.PREPARE, done=0, total=total, message="Preparing…"), force=True)
 
-        for path_obj in queued_paths:
+        for i, path_obj in enumerate(queued_paths, start=1):
             if _cancelled():
                 break
+            if i % 200 == 0:
+                _emit(IndexProgress(phase=IndexPhase.PREPARE, done=i, total=total, message="Preparing…"))
+
             try:
                 stat_result = path_obj.stat()
             except OSError as exc:
@@ -399,6 +403,16 @@ def scan_and_tag(
             _emit(IndexProgress(phase=IndexPhase.DONE, done=1, total=1, message=str(resolved_root)), force=True)
             return stats_out
 
+        # ここで “準備フェーズ” の書き込みを確定し、接続を閉じる（EXCLUSIVE を通すため）
+        try:
+            conn.commit()
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
+        conn = None  # finally節で二重closeしないように
+
         ctx = PipelineContext(
             db_path=str(db_path),
             settings=settings,
@@ -442,7 +456,8 @@ def scan_and_tag(
         _emit(IndexProgress(phase=IndexPhase.DONE, done=1, total=1, message=str(resolved_root)), force=True)
         return stats_out
     finally:
-        conn.close()
+        if conn is not None:
+            conn.close()
         if tagger is not None:
             closer = getattr(tagger, "close", None)
             if callable(closer):
@@ -450,6 +465,13 @@ def scan_and_tag(
                     closer()
                 except Exception:
                     logger.exception("Failed to close tagger after manual refresh")
+        # --- ここから追加：積極的に GPU メモリを解放 ---
+        try:
+            import gc
+
+            gc.collect()
+        except Exception:
+            pass
 
 
 __all__ = ["scan_and_tag"]
