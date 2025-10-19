@@ -7,7 +7,6 @@ import logging
 import os
 import platform
 import subprocess
-import sys
 import time
 from collections import deque
 from contextlib import closing
@@ -55,16 +54,12 @@ from PyQt6.QtWidgets import (
 )
 from send2trash import send2trash
 
+from core.fastsig import fast_fill_missing_signatures
 from dup.scanner import DuplicateCluster, DuplicateClusterEntry, DuplicateFile, DuplicateScanConfig
 from ui.dup_refine_parallel import refine_by_pixels_parallel, refine_by_tilehash_parallel
 from ui.viewmodels import DupViewModel
 
-LOG = logging.getLogger("dup")
-if not LOG.handlers:
-    LOG.setLevel(logging.DEBUG)
-    h = logging.StreamHandler(sys.stdout)
-    h.setFormatter(logging.Formatter("%(asctime)s %(threadName)s %(levelname)s: %(message)s"))
-    LOG.addHandler(h)
+logger = logging.getLogger(__name__)
 DEBUG_THUMBS = False
 
 
@@ -79,7 +74,7 @@ def _qt_msg(mode, ctx, msg):
         }[mode]
     except Exception:
         level = "QT"
-    LOG.warning(f"QT[{level}] {msg} ({ctx.file}:{ctx.line})")
+    logger.warning(f"QT[{level}] {msg} ({ctx.file}:{ctx.line})")
 
 
 qInstallMessageHandler(_qt_msg)
@@ -335,41 +330,79 @@ class DuplicateScanRunnable(QRunnable):
 
     def run(self) -> None:
         try:
-            LOG.info("scan: start")
+            logger.info("scan: start")
             # settings = load_settings()
 
             # conn はこの with（closing）ブロック内でだけ使う
             with closing(self._view_model.open_connection(self._db_path)) as conn:
                 rows = self._view_model.iter_files_for_dup(conn, self._request.path_like)
-                LOG.info("scan: rows loaded = %d", len(rows))
+                logger.info("scan: rows loaded = %d", len(rows))
+
+            # ---- 署名が足りないぶんを超速で埋める（DupタブScan時のみ） ----
+            missing: list[tuple[int, str]] = []
+            for r in rows:
+                fid = int(r["file_id"])
+                p = str(r["path"])
+                if r.get("phash_u64") is None:
+                    missing.append((fid, p))
+            if missing:
+                logger.info("sig: missing=%d → computing in parallel ...", len(missing))
+
+                def _tick(done, total):
+                    self.signals.progress.emit(done, total)  # プログレスバーで共有
+
+                computed = fast_fill_missing_signatures(
+                    str(self._db_path),
+                    missing,
+                    max_workers=int(os.environ.get("KE_SIG_WORKERS", "8")),  # SSD: 8〜16 / HDD: 4〜8
+                    chunksize=int(os.environ.get("KE_SIG_CHUNK", "64")),
+                    progress=_tick,
+                    apply_to_db=True,
+                    unsafe_fast=True,
+                )
+                # 行データにも即時反映（再クエリ不要）
+                m = {fid: (ph, dh) for (fid, ph, dh) in computed}
+                patched = 0
+                for r in rows:
+                    t = m.get(int(r["file_id"]))
+                    if t is not None:
+                        r["phash_u64"] = int(t[0])
+                        patched += 1
+                logger.info("sig: computed=%d, patched_rows=%d", len(computed), patched)
 
             total = len(rows)
             self.signals.progress.emit(0, total)
 
             files: list[DuplicateFile] = []
+            bad_rows = 0
             for index, row in enumerate(rows, start=1):
                 try:
                     files.append(DuplicateFile.from_row(row))
                 except ValueError:
+                    bad_rows += 1
                     continue
                 if index % 500 == 0:
                     self.signals.progress.emit(index, total)
             self.signals.progress.emit(total, total)
 
+            logger.setLevel(logging.DEBUG)
+            logger.info("scan: files built = %d (skipped rows=%d)", len(files), bad_rows)
+            if files:
+                logger.info("scan: sample phash head = %s", [hex(f.phash & ((1 << 64) - 1)) for f in files[:5]])
             config = DuplicateScanConfig(
                 hamming_threshold=self._request.hamming_threshold,
                 size_ratio=self._request.size_ratio,
             )
 
-            LOG.info("cluster: building ...")
+            logger.info("cluster: building ...")
             t0 = time.perf_counter()
             clusters = self._view_model.build_clusters(config, files)
-            LOG.info("cluster: done; n=%d, %.2fs", len(clusters), time.perf_counter() - t0)
+            logger.info("cluster: done; n=%d, %.2fs", len(clusters), time.perf_counter() - t0)
 
             self.signals.finished.emit(clusters)
 
         except Exception as exc:
-            LOG.exception("scan worker crashed: %s", exc)
+            logger.exception("scan worker crashed: %s", exc)
             try:
                 self.signals.error.emit(str(exc))
             except RuntimeError:
@@ -409,7 +442,7 @@ class _ThumbJob(QRunnable):
                 self._view_model.generate_thumbnail(self._path, self._cache_dir, size=self._size, format="WEBP")
             except Exception as e:
                 if DEBUG_THUMBS:
-                    LOG.info("thumb gen failed:", self._path, e)
+                    logger.info("thumb gen failed:", self._path, e)
 
             # 直接 QImage を作る（GUIスレッドでの再デコードを避ける）
             with Image.open(self._path) as im:
@@ -419,16 +452,16 @@ class _ThumbJob(QRunnable):
                 qimg = ImageQt(im).copy()  # .copy() でバッファを独立させる
         except Exception as e:
             if DEBUG_THUMBS:
-                LOG.info("thumb worker error:", self._path, e)
+                logger.info("thumb worker error:", self._path, e)
             qimg = None
         finally:
             try:
                 self._signals.done.emit(str(self._path), qimg)
                 if DEBUG_THUMBS:
-                    LOG.info("thumb emitted:", self._path, bool(qimg))
+                    logger.info("thumb emitted:", self._path, bool(qimg))
             except Exception as e:
                 # ここに来ることはほぼ無いが保険
-                LOG.info("thumb emit failed:", e)
+                logger.info("thumb emit failed:", e)
 
 
 class DupTab(QWidget):
@@ -622,7 +655,7 @@ class DupTab(QWidget):
         self._alive = 0
         self._hb = QTimer(self)
         self._hb.setInterval(1000)
-        self._hb.timeout.connect(lambda: LOG.debug(f"ui alive {self._alive:=self._alive+1}"))
+        self._hb.timeout.connect(lambda: logger.debug(f"ui alive {self._alive:=self._alive+1}"))
         self._hb.start()
 
     def _update_status_summary(self) -> None:
@@ -927,7 +960,7 @@ class DupTab(QWidget):
         self._thumb_inflight.add(key)
         cache_dir = self._view_model.thumbnail_cache_dir()
         if DEBUG_THUMBS:
-            LOG.info(f"thumb enqueue: {key}")  # ← デバッグ
+            logger.info(f"thumb enqueue: {key}")  # ← デバッグ
         job = _ThumbJob(
             self._view_model,
             path,
@@ -1074,7 +1107,7 @@ class DupTab(QWidget):
         self._thumb_done.add(path_str)
         self._maybe_start_more_thumbs()
         if DEBUG_THUMBS:
-            LOG.info(f"thumb applied: {path_str}")  # ← デバッグ
+            logger.info(f"thumb applied: {path_str}")  # ← デバッグ
 
     def _update_action_states(self) -> None:
         has_clusters = bool(self._clusters)
@@ -1110,7 +1143,7 @@ class DupTab(QWidget):
         self._progress.setValue(current)
 
     def _on_scan_finished(self, payload: object) -> None:
-        LOG.info("ui: _on_scan_finished begin")
+        logger.info("ui: _on_scan_finished begin")
         self._active_scan = None
         self._scan_button.setEnabled(True)
         if not isinstance(payload, list):
@@ -1124,7 +1157,7 @@ class DupTab(QWidget):
             self._tree.clear()
             self._update_action_states()
             return
-        LOG.info("ui: clusters=%d", len(self._clusters))
+        logger.info("ui: clusters=%d", len(self._clusters))
         # ← ここで直接 populate せず、まずリファインへ
         self._start_refine_pipeline(self._clusters)
         # リファイン完了後に populate されるので、ここで_populate_tree()は呼ばない
@@ -1133,7 +1166,7 @@ class DupTab(QWidget):
         files = sum(len(cluster.files) for cluster in self._clusters)
         self._status_label.setText(f"Scan complete: {groups} group(s), {files} file(s).")
         self._update_action_states()
-        LOG.info("ui: _on_scan_finished end")
+        logger.info("ui: _on_scan_finished end")
 
     def _on_scan_error(self, message: str) -> None:
         self._active_scan = None
@@ -1167,7 +1200,7 @@ class DupTab(QWidget):
         return w if isinstance(w, ThumbPanel) else None
 
     def _populate_tree(self) -> None:
-        LOG.info("ui: populate begin")
+        logger.info("ui: populate begin")
         # 古い関連づけを掃除（メモリ＆ゴースト参照対策）
         self._thumb_bindings.clear()
         self._thumb_inflight.clear()
@@ -1219,22 +1252,22 @@ class DupTab(QWidget):
                 import psutil
 
                 rss = psutil.Process(os.getpid()).memory_info().rss / 1048576.0
-                LOG.info("ui: populate %d/%d (%.0fms) RSS=%.1fMB", end, n, dt * 1000, rss)
+                logger.info("ui: populate %d/%d (%.0fms) RSS=%.1fMB", end, n, dt * 1000, rss)
             except Exception:
-                LOG.info("ui: populate %d/%d (%.0fms)", end, n, dt * 1000)
+                logger.info("ui: populate %d/%d (%.0fms)", end, n, dt * 1000)
 
         if end >= n:
             self._populate_timer.stop()
             self._bulk_populating = False
             self._block_item_changed = False
             self._tree.setUpdatesEnabled(True)
-            LOG.info("ui: populate done; groups=%d", self._tree.topLevelItemCount())
+            logger.info("ui: populate done; groups=%d", self._tree.topLevelItemCount())
             QTimer.singleShot(0, self._expand_initial_groups)
             if hasattr(self, "_idle_expand_timer"):
                 self._idle_expand_timer.start()
 
     def _expand_initial_groups(self, approx_px: int | None = None):
-        LOG.info("ui: expand_initial")
+        logger.info("ui: expand_initial")
         vp = self._tree.viewport()
         target_h = approx_px or (vp.height() + 200)
         acc = 0
@@ -1325,7 +1358,7 @@ class DupTab(QWidget):
         item.addChild(placeholder)
 
     def _build_children_for_cluster(self, parent_item: QTreeWidgetItem, cluster: "DuplicateCluster") -> None:
-        # LOG.info("ui: build_panel group_size=%d", len(cluster.files))
+        # logger.info("ui: build_panel group_size=%d", len(cluster.files))
         # 並び替えは既存関数をそのまま利用
         entries = self._sort_entries_for_display(cluster.files, cluster.keeper_id)
         panel_item = QTreeWidgetItem(parent_item)

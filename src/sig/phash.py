@@ -59,7 +59,8 @@ def dhash(image: Image.Image) -> int:
 
 def hamming64(a: int, b: int) -> int:
     """Compute the Hamming distance between two 64-bit hash values."""
-    return int((a ^ b).bit_count())
+    mask = (1 << 64) - 1
+    return int(((int(a) ^ int(b)) & mask).bit_count())
 
 
 __all__ = ["phash", "dhash", "hamming64"]
