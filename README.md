@@ -1,6 +1,6 @@
-![ss](docs/images/ss-tags.png)
-
+![header](docs/images/header.png)
 # kobato-eyes
+![ss](docs/images/ss-tags.png)
 
 **kobato-eyes** は、ローカル PC 上の画像に Danbooru タグを自動付与し、類似画像検出と検索を行う Windows 向けデスクトップアプリケーションです。PyQt6 を用いた GUI と SQLite + FTS5 データベースを組み合わせ、スキャンからタグ付け、検索、重複チェックまでを一貫して実行します。
 
@@ -20,9 +20,9 @@
 - tagsタブでIndex Nowボタンを押す
   - タグ付けはNVIDIA GPU推奨。settingsタブでVRAMに応じてbatch size設定可
 - pixaiのほうが対応タグ数が多く（wd:8000, pixai:13000）、作品名タグにも対応しているので、基本的にpixai推奨
-- パフォーマンス（RTX4090、画像7万枚、バッチサイズ32）
+- パフォーマンス（RTX4090、画像7万枚、バッチサイズ32の場合）
 
-| tagger |   必要VRAM | 想定所要時間 |
+| tagger |   VRAM | 想定所要時間 |
 |:---|:---:|:---:|
 | wd tagger |  13 GB | 約30分 |
 | pixai tagger |   20 GB | 約2時間 |
@@ -31,9 +31,9 @@
 - statsボタンで付けたタグの統計情報表示
 - Copy resultsで検索にヒットした画像を新規別フォルダにコピー
 - フォルダの中身が変わったら🔄refreshボタンで新規・削除画像を検出してデータ更新
-- duplicatesタブを同じrootsが対象
-- hamming, max_bitsは数字を小さくするとわずかな違いで別画像と判定するようになり、大きくすると差異が多くても重複と判定するようになる
-- gridは逆に、数字を大きくすると厳格に、小さくするとゆるく重複判定
+- duplicatesタブは同じsettingsタブのrootsが対象
+- hamming, max_bitsは数字を小さくするとわずかな違いで別画像と判定するようになり、大きくすると差異が多くても重複と判定するようになる (smaller is stricter)
+- gridは逆に、数字を大きくすると厳格に、小さくするとゆるく重複判定 (bigger is stricter)
 
 (以降のドキュメントはAI生成)
 
