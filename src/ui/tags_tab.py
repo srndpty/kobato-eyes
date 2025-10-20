@@ -44,6 +44,7 @@ from PyQt6.QtGui import (
     QStandardItem,
     QStandardItemModel,
     QTextDocument,
+    QTextOption,
 )
 from PyQt6.QtWidgets import (
     QAbstractItemView,
@@ -100,11 +101,11 @@ _PREFIXES = (
 )
 _CATEGORY_KEY_LOOKUP = build_category_lookup()
 _TAG_COLOR_MAP = {
-    TagCategory.GENERAL: "#45A6F7",
+    TagCategory.GENERAL: "#45C5F7",
     TagCategory.CHARACTER: "#63CC69",
     TagCategory.COPYRIGHT: "#C976D8",
 }
-_SCORE_COLOR = "rgba(255, 255, 255, 0.78)"
+_SCORE_COLOR = "rgba(255, 255, 255, 0.80)"
 _NEUTRAL_TAG_COLOR = "#90A4AE"
 _HIGHLIGHT_SCORE_COLOR = "rgba(0, 0, 0, 0.86)"
 _HIGHLIGHT_SCORE_SHADOW = "0 0 3px rgba(0, 0, 0, 0.6)"
@@ -345,6 +346,68 @@ class _CopyRunnable(QRunnable):
             self.signals.finished.emit(str(self.dest_dir), ok, ng)
         except Exception as e:
             self.signals.error.emit(str(e))
+
+
+class _WrappingItemDelegate(QStyledItemDelegate):
+    """Render text on multiple lines instead of eliding."""
+
+    def __init__(
+        self,
+        parent: QWidget | None = None,
+        *,
+        wrap_mode: QTextOption.WrapMode = QTextOption.WrapMode.WrapAnywhere,
+    ) -> None:  # noqa: D401 - Qt signature
+        super().__init__(parent)
+        self._wrap_mode = wrap_mode
+
+    def _create_document(self, option: QStyleOptionViewItem, text: str) -> QTextDocument:
+        doc = QTextDocument()
+        doc.setDocumentMargin(0)
+        doc.setDefaultFont(option.font)
+        text_option = QTextOption()
+        text_option.setWrapMode(self._wrap_mode)
+        alignment = option.displayAlignment or Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop
+        text_option.setAlignment(alignment)
+        doc.setDefaultTextOption(text_option)
+        doc.setPlainText(text)
+        safe = html.escape(text)
+        doc.setHtml(f'<span style="color:{_SCORE_COLOR};">{safe}</span>')
+        return doc
+
+    def paint(self, painter, option: QStyleOptionViewItem, index: QModelIndex):  # noqa: D401 - Qt signature
+        opt = QStyleOptionViewItem(option)
+        self.initStyleOption(opt, index)
+        text = opt.text
+        opt.text = ""
+        style = opt.widget.style() if opt.widget else QApplication.style()
+        style.drawControl(QStyle.ControlElement.CE_ItemViewItem, opt, painter, opt.widget)
+
+        if not text:
+            return
+
+        doc = self._create_document(opt, text)
+        rect = opt.rect
+        painter.save()
+        painter.translate(rect.topLeft())
+        doc.setTextWidth(rect.width())
+        doc.drawContents(painter, QRectF(0, 0, rect.width(), rect.height()))
+        painter.restore()
+
+    def sizeHint(self, option: QStyleOptionViewItem, index: QModelIndex):  # noqa: D401 - Qt signature
+        opt = QStyleOptionViewItem(option)
+        self.initStyleOption(opt, index)
+        text = opt.text
+        if not text:
+            return super().sizeHint(option, index)
+        doc = self._create_document(opt, text)
+        available_width = option.rect.width()
+        if available_width <= 0 and option.widget is not None:
+            available_width = option.widget.width()
+        if available_width > 0:
+            doc.setTextWidth(available_width)
+        size = doc.size().toSize()
+        size.setHeight(size.height() + 4)
+        return size
 
 
 class _HighlightDelegate(QStyledItemDelegate):
@@ -873,11 +936,13 @@ class TagsTab(QWidget):
         self._table_view.setIconSize(QSize(self._THUMB_SIZE, self._THUMB_SIZE))
         self._table_view.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
         self._table_view.setHorizontalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
+        self._table_view.setWordWrap(True)
         scroll_amount = 36
         self._table_view.verticalScrollBar().setSingleStep(scroll_amount)
         self._table_view.horizontalScrollBar().setSingleStep(scroll_amount)
         self._table_view.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self._table_view.customContextMenuRequested.connect(self._on_table_context_menu)
+        self._table_view.setStyleSheet(f"QTableView, QTableView::item {{color: {_SCORE_COLOR};}}")
 
         self._grid_model = QStandardItemModel(self)
         self._grid_view = QListView(self)
@@ -904,9 +969,14 @@ class TagsTab(QWidget):
         self._positive_terms: list[str] = []
         self._relevance_thresholds: dict[int, float] = {}
         self._use_relevance = False
+        self._filename_delegate = _WrappingItemDelegate(self._table_view)
+        self._folder_delegate = _WrappingItemDelegate(self._table_view)
         self._tags_delegate = _HighlightDelegate(lambda: self._highlight_terms, self._table_view)
         tags_col = self._table_model.columnCount() - 1
         if tags_col >= 0:
+            if self._table_model.columnCount() > 2:
+                self._table_view.setItemDelegateForColumn(1, self._filename_delegate)
+                self._table_view.setItemDelegateForColumn(2, self._folder_delegate)
             self._table_view.setItemDelegateForColumn(tags_col, self._tags_delegate)
         self._grid_delegate = GridThumbDelegate(self._THUMB_SIZE, self._grid_view)
         self._grid_view.setItemDelegate(self._grid_delegate)
@@ -1939,6 +2009,14 @@ class TagsTab(QWidget):
                 QStandardItem(tags_text),
             ]
             table_items[0].setData(Qt.AlignmentFlag.AlignCenter, Qt.ItemDataRole.TextAlignmentRole)
+            table_items[1].setData(
+                Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop,
+                Qt.ItemDataRole.TextAlignmentRole,
+            )
+            table_items[2].setData(
+                Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop,
+                Qt.ItemDataRole.TextAlignmentRole,
+            )
             for item in table_items:
                 item.setEditable(False)
             table_items[-1].setToolTip(tags_text)
