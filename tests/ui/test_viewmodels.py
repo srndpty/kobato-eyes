@@ -10,6 +10,7 @@ import pytest
 from PyQt6.QtCore import QCoreApplication
 
 from core.config import PipelineSettings, TaggerSettings
+from core.pipeline import RetagResult
 from dup.scanner import DuplicateScanConfig
 from ui.viewmodels import DupViewModel, SettingsViewModel, TagsViewModel
 
@@ -40,8 +41,9 @@ def test_tags_view_model_wraps_dependencies(tmp_path: Path) -> None:
         connection_factory=lambda path: f"conn:{Path(path)}",
         run_index_once=fake_run_index_once,
         scan_and_tag=fake_scan_and_tag,
-        retag_query=lambda db, predicate, params: len(params),
-        retag_all=lambda db, force, settings: 42,
+        retag_query=lambda db, predicate, params: RetagResult(len(params), [1, 2][: len(params)]),
+        retag_all=lambda db, force, settings: RetagResult(42, [3, 4]),
+        run_retag_selection=lambda *args, **kwargs: {"tagged": 99},
         load_settings=lambda: PipelineSettings(),
         load_thresholds=lambda conn: {"general": 0.5},
         list_tag_names=lambda conn: ["foo"],
@@ -73,9 +75,12 @@ def test_tags_view_model_wraps_dependencies(tmp_path: Path) -> None:
     assert paths == ["/a", "/b"]
 
     retagged = view_model.retag_query(view_model.db_path, "predicate", [1, 2])
-    assert retagged == 2
+    assert isinstance(retagged, RetagResult)
+    assert retagged.affected == 2
     all_retagged = view_model.retag_all(view_model.db_path, force=True, settings=PipelineSettings())
-    assert all_retagged == 42
+    assert all_retagged.affected == 42
+    stats = view_model.run_retag_selection(view_model.db_path, [1, 2], settings=PipelineSettings())
+    assert stats == {"tagged": 99}
 
     fragment = view_model.translate_query("rating:safe", file_alias="f")
     assert fragment["where"] == "rating:safe"
@@ -91,18 +96,19 @@ def test_tags_view_model_wraps_dependencies(tmp_path: Path) -> None:
 def test_tags_view_model_retag_all_keyword_arguments(tmp_path: Path) -> None:
     recorded: dict[str, object] = {}
 
-    def fake_retag_all(db_path: Path, *, force: bool, settings: PipelineSettings) -> int:
+    def fake_retag_all(db_path: Path, *, force: bool, settings: PipelineSettings) -> RetagResult:
         recorded["db_path"] = db_path
         recorded["force"] = force
         recorded["settings"] = settings
-        return 7
+        return RetagResult(7, [1, 2, 3])
 
     view_model = TagsViewModel(
         db_path=tmp_path / "tags.db",
         connection_factory=lambda path: f"conn:{Path(path)}",
         run_index_once=lambda *args, **kwargs: {},
         scan_and_tag=lambda *args, **kwargs: {},
-        retag_query=lambda *args, **kwargs: 0,
+        retag_query=lambda *args, **kwargs: RetagResult(0, []),
+        run_retag_selection=lambda *args, **kwargs: {},
         retag_all=fake_retag_all,
         load_settings=lambda: PipelineSettings(),
         load_thresholds=lambda conn: {},
@@ -118,7 +124,7 @@ def test_tags_view_model_retag_all_keyword_arguments(tmp_path: Path) -> None:
     settings = PipelineSettings()
     result = view_model.retag_all(view_model.db_path, force=True, settings=settings)
 
-    assert result == 7
+    assert result.affected == 7
     assert recorded["db_path"] == view_model.db_path
     assert recorded["force"] is True
     assert recorded["settings"] is settings
