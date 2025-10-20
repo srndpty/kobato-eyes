@@ -10,7 +10,7 @@ import pytest
 pytest.importorskip("pydantic")
 
 from core.config import PipelineSettings
-from core.pipeline.retag import retag_all, retag_query
+from core.pipeline.retag import RetagResult, retag_all, retag_query
 from core.pipeline.signature import current_tagger_sig
 from db.schema import ensure_schema
 
@@ -56,9 +56,11 @@ def test_retag_query_resets_selected_rows(tmp_path: Path) -> None:
         ],
     )
 
-    affected = retag_query(db_path, "path IN (?, ?)", ("file_a", "file_b"))
+    result = retag_query(db_path, "path IN (?, ?)", ("file_a", "file_b"))
 
-    assert affected == 2
+    assert isinstance(result, RetagResult)
+    assert result.affected == 2
+    assert sorted(result.file_ids) == [1, 2]
     state = _fetch_tagging_state(db_path)
     assert state["file_a"] == (None, None)
     assert state["file_b"] == (None, None)
@@ -77,9 +79,10 @@ def test_retag_all_without_force_only_matches_signature(tmp_path: Path) -> None:
         ],
     )
 
-    affected = retag_all(db_path, force=False, settings=settings)
+    result = retag_all(db_path, force=False, settings=settings)
 
-    assert affected == 1
+    assert isinstance(result, RetagResult)
+    assert result.affected == 1
     state = _fetch_tagging_state(db_path)
     assert state["matched"] == (None, None)
     assert state["other"] == ("different", 222.0)
@@ -98,9 +101,10 @@ def test_retag_all_force_updates_all_rows(tmp_path: Path) -> None:
         ],
     )
 
-    affected = retag_all(db_path, force=True, settings=settings)
+    result = retag_all(db_path, force=True, settings=settings)
 
-    assert affected == 3
+    assert isinstance(result, RetagResult)
+    assert result.affected == 3
     state = _fetch_tagging_state(db_path)
     assert state == {
         "match_one": (None, None),

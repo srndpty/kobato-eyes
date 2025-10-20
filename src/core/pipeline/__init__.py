@@ -9,7 +9,7 @@ from .maintenance import _settle_after_quiesce, wait_for_unlock
 from .manual_refresh import scan_and_tag
 from .orchestrator import IndexPipeline, run_index_once
 from .resolver import _resolve_tagger
-from .retag import retag_all, retag_query
+from .retag import RetagResult, retag_all, retag_query, run_retag_selection
 from .scanner import Scanner
 from .signature import _build_max_tags_map, _build_threshold_map, current_tagger_sig
 from .stages.scan_stage import ScanStage, ScanStageDeps, ScanStageResult
@@ -30,6 +30,8 @@ __all__ = [
     "scan_and_tag",
     "retag_all",
     "retag_query",
+    "run_retag_selection",
+    "RetagResult",
     # Signature helpers
     "current_tagger_sig",
     "_build_threshold_map",
