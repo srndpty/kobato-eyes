@@ -16,7 +16,7 @@ from utils.hash import compute_sha256
 from utils.paths import get_db_path
 
 from .resolver import _resolve_tagger
-from .signature import _build_max_tags_map, _build_threshold_map, current_tagger_sig
+from .signature import current_tagger_sig
 from .stages.tag_stage import TagStage
 from .stages.write_stage import WriteStage
 from .types import IndexPhase, IndexProgress
@@ -71,8 +71,8 @@ def scan_and_tag(
         root_exists and resolved_root.is_file() and resolved_root.suffix.lower() not in allow_exts
     )
 
-    thresholds = _build_threshold_map(settings.tagger.thresholds)
-    max_tags_map = _build_max_tags_map(getattr(settings.tagger, "max_tags", None))
+    # thresholds = _build_threshold_map(settings.tagger.thresholds)
+    # max_tags_map = _build_max_tags_map(getattr(settings.tagger, "max_tags", None))
     db_path = get_db_path()
     bootstrap_if_needed(db_path)
     conn = get_conn(db_path, allow_when_quiesced=True)
@@ -298,12 +298,12 @@ def scan_and_tag(
         tagger_obj, th_fallback, max_tags_fallback = _resolve_tagger(
             settings,
             None,
-            thresholds=thresholds,
-            max_tags=max_tags_map,
+            thresholds=None,
+            max_tags=None,
         )
         tagger = tagger_obj
-        effective_thresholds = thresholds or th_fallback or None
-        effective_max_tags = max_tags_map or max_tags_fallback or None
+        effective_thresholds = th_fallback or None
+        effective_max_tags = max_tags_fallback or None
         tagger_sig = current_tagger_sig(
             settings,
             thresholds=effective_thresholds,

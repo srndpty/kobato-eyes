@@ -131,13 +131,15 @@ class TagStage:
         last_logged = 0
         db_items: list[DBItem] = []
 
+        # デフォルト上書き防止のため、resolver 側のデフォルトを優先（設計変更の余地あり）
+        thresholds = None
+        max_tags_map = None
         tagger, th_fallback, k_fallback = _resolve_tagger(
             settings,
             ctx.tagger_override,
             thresholds=thresholds or None,
             max_tags=max_tags_map or None,
         )
-        # 呼び出し側が未指定だった場合のみ、resolver 側のデフォルトを反映
         if not thresholds and th_fallback:
             thresholds = th_fallback
         if (not max_tags_map) and k_fallback:
