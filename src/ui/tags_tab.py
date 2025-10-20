@@ -52,6 +52,7 @@ from PyQt6.QtWidgets import (
     QCompleter,
     QGroupBox,
     QHBoxLayout,
+    QHeaderView,
     QLabel,
     QLineEdit,
     QListView,
@@ -873,6 +874,11 @@ class TagsTab(QWidget):
         self._table_view.setIconSize(QSize(self._THUMB_SIZE, self._THUMB_SIZE))
         self._table_view.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
         self._table_view.setHorizontalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
+        self._table_view.setWordWrap(True)
+        self._table_view.setTextElideMode(Qt.TextElideMode.ElideNone)
+        vertical_header: QHeaderView = self._table_view.verticalHeader()
+        vertical_header.setDefaultSectionSize(self._THUMB_SIZE + 16)
+        vertical_header.setMinimumSectionSize(self._THUMB_SIZE + 16)
         scroll_amount = 36
         self._table_view.verticalScrollBar().setSingleStep(scroll_amount)
         self._table_view.horizontalScrollBar().setSingleStep(scroll_amount)
@@ -1939,8 +1945,13 @@ class TagsTab(QWidget):
                 QStandardItem(tags_text),
             ]
             table_items[0].setData(Qt.AlignmentFlag.AlignCenter, Qt.ItemDataRole.TextAlignmentRole)
-            for item in table_items:
+            for column, item in enumerate(table_items):
                 item.setEditable(False)
+                if column in {1, 2, len(table_items) - 1}:
+                    item.setData(
+                        Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop,
+                        Qt.ItemDataRole.TextAlignmentRole,
+                    )
             table_items[-1].setToolTip(tags_text)
             table_items[-1].setData(tags, int(_TAG_LIST_ROLE))
             self._table_model.appendRow(table_items)
