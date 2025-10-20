@@ -99,41 +99,72 @@ _PREFIXES = (
     "rating:",
 )
 _CATEGORY_KEY_LOOKUP = build_category_lookup()
+_TAG_COLOR_MAP = {
+    TagCategory.GENERAL: "#45A6F7",
+    TagCategory.CHARACTER: "#63CC69",
+    TagCategory.COPYRIGHT: "#C976D8",
+}
+_SCORE_COLOR = "rgba(255, 255, 255, 0.78)"
+_NEUTRAL_TAG_COLOR = "#90A4AE"
+_HIGHLIGHT_SCORE_COLOR = "rgba(0, 0, 0, 0.86)"
+_HIGHLIGHT_SCORE_SHADOW = "0 0 3px rgba(0, 0, 0, 0.6)"
+TagDisplayEntry = tuple[str, float, TagCategory | None]
 
 
-def _category_thresholds(settings: PipelineSettings) -> dict[TagCategory, float]:
-    th = {k.lower(): float(v) for k, v in (settings.tagger.thresholds or {}).items()}
+def _coerce_category(value: object) -> TagCategory | None:
+    """Convert *value* to :class:`TagCategory` when possible."""
 
-    def get(name, default=0.0):
-        return th.get(name, default)
+    if value is None:
+        return None
+    if isinstance(value, TagCategory):
+        try:
+            return TagCategory(int(value))
+        except ValueError:
+            return None
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        try:
+            return TagCategory(int(value))
+        except ValueError:
+            return None
+    if isinstance(value, str):
+        key = value.strip().lower()
+        if key:
+            return _CATEGORY_KEY_LOOKUP.get(key)
+    return None
 
-    return {
-        TagCategory.GENERAL: get("general"),
-        TagCategory.CHARACTER: get("character"),
-        TagCategory.COPYRIGHT: get("copyright"),
-        TagCategory.ARTIST: get("artist"),
-        TagCategory.META: get("meta"),
-        TagCategory.RATING: get("rating"),
-    }
 
-
-def _filter_tags_by_threshold(tag_rows):
+def _filter_tags_by_threshold(tag_rows) -> list[TagDisplayEntry]:
     """tag_rows は (name, score) か (name, score, category) を想定。"""
-    out = []
+
+    out: list[TagDisplayEntry] = []
     for row in tag_rows:
+        name: object | None = None
+        score_value: object | None = None
+        category_value: object | None = None
+
         if isinstance(row, dict):
             name = row.get("name")
-            score = float(row.get("score", 0.0))
+            score_value = row.get("score", 0.0)
+            category_value = row.get("category")
         else:
-            if len(row) == 3:
-                name, score, cat = row
-            elif len(row) == 2:
-                name, score = row
+            try:
+                length = len(row)
+            except TypeError:
+                continue
+            if length == 3:
+                name, score_value, category_value = row
+            elif length == 2:
+                name, score_value = row
             else:
                 continue
 
-        if float(score) >= 0.1:  # 0.1以上で固定！ 細かいロングテールタグ問題が鬱陶しいので強制的に解決
-            out.append((str(name), float(score)))
+        try:
+            score = float(score_value)
+        except (TypeError, ValueError):
+            continue
+
+        if score >= 0.1:  # 0.1以上で固定！ 細かいロングテールタグ問題が鬱陶しいので強制的に解決
+            out.append((str(name), float(score), _coerce_category(category_value)))
 
     return out
 
@@ -167,6 +198,63 @@ def _pick_highlight_colors(palette) -> tuple[str, str]:
 
 
 _TAG_LIST_ROLE = Qt.ItemDataRole.UserRole + 128
+
+
+def _category_color(category: TagCategory | None) -> str:
+    return _TAG_COLOR_MAP.get(category, _NEUTRAL_TAG_COLOR)
+
+
+def _mix_hex(fg: str, bg: str, w: float) -> str:
+    """hex色を合成。w=1.0でfg、0.0でbg。"""
+    w = max(0.0, min(1.0, w))
+
+    def _c(h):
+        h = h.lstrip("#")
+        return int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+
+    fr, fg_, fb = _c(fg)
+    br, bg_, bb = _c(bg)
+    r = round(fr * w + br * (1 - w))
+    g = round(fg_ * w + bg_ * (1 - w))
+    b = round(fb * w + bb * (1 - w))
+    return f"#{r:02x}{g:02x}{b:02x}"
+
+
+def _darken_hex(hex_color: str, factor: float = 0.75) -> str:
+    """色を少し暗く。factorは元色の寄与率（0.7〜0.85あたり推奨）。"""
+    return _mix_hex(hex_color, "#000000", factor)
+
+
+def _render_tag_html(
+    name: str,
+    score: float,
+    category: TagCategory | None,
+    *,
+    highlight: bool,
+    highlight_bg: str,
+    highlight_fg: str,
+) -> str:
+    name_html = html.escape(name)
+    score_html = html.escape(f"({score:.2f})")
+
+    if highlight:
+        # タグ名はカテゴリ色を維持、スコアは黒系。外側は背景のみ指定。
+        base = _category_color(category)  # ex. 緑/マゼンタ/青
+        name_col = _darken_hex(base, 0.5)  # 0.72〜0.80で調整可
+        name_style = f"color:{name_col};"
+        # name_style = f"color:{_category_color(category)};"
+        score_style = f"color:{_HIGHLIGHT_SCORE_COLOR};"
+        return (
+            f'<span style="background-color:{highlight_bg}; padding:0 2px; border-radius:2px;">'
+            f'<span style="{name_style}">{name_html}</span> '
+            f'<span style="{score_style}">{score_html}</span>'
+            f"</span>"
+        )
+
+    tag_color = _category_color(category)
+    name_style = f"color:{tag_color};"
+    score_style = f"color:{_SCORE_COLOR};"
+    return f'<span style="{name_style}">{name_html}</span> <span style="{score_style}">{score_html}</span>'
 
 
 class _ElidingLabel(QLabel):
@@ -274,22 +362,42 @@ class _HighlightDelegate(QStyledItemDelegate):
     def _to_html_with_highlight(
         text: str,
         terms: list[str],
-        tags: Iterable[tuple[str, float]] | None,
+        tags: Iterable[TagDisplayEntry] | None,
         *,
         bg: str,
         fg: str,
     ) -> str:
         term_set = {term.lower() for term in terms if term}
-        if tags and term_set:
+        if tags:
             parts: list[str] = []
-            for name, score in tags:
-                label = f"{name} ({float(score):.2f})"
-                escaped = html.escape(label)
-                if name.lower() in term_set:
-                    parts.append(f'<span style="background-color:{bg}; color:{fg};">{escaped}</span>')
+            for entry in tags:
+                if not entry:
+                    continue
+                if isinstance(entry, (list, tuple)):
+                    name = str(entry[0])
+                    score_value = entry[1] if len(entry) > 1 else None
+                    category_value = entry[2] if len(entry) > 2 else None
                 else:
-                    parts.append(escaped)
-            return ", ".join(parts)
+                    # 想定外の形式は素通り
+                    continue
+                try:
+                    score = float(score_value)
+                except (TypeError, ValueError):
+                    continue
+                category_obj = _coerce_category(category_value)
+                highlighted = term_set and name.lower() in term_set
+                parts.append(
+                    _render_tag_html(
+                        name,
+                        score,
+                        category_obj,
+                        highlight=bool(highlighted),
+                        highlight_bg=bg,
+                        highlight_fg=fg,
+                    )
+                )
+            if parts:
+                return ", ".join(parts)
         return html.escape(text or "")
 
     def paint(self, painter, option: QStyleOptionViewItem, index):  # noqa: D401 - Qt signature
@@ -1922,10 +2030,10 @@ class TagsTab(QWidget):
             self._show_toast("コピー可能なタグがありません。")
             return
         if include_scores:
-            text = ", ".join(f"{name} ({score:.2f})" for name, score in filtered)
+            text = ", ".join(f"{name} ({score:.2f})" for name, score, _ in filtered)
             feedback = "タグ（スコア付き）をクリップボードにコピーしました。"
         else:
-            text = ", ".join(name for name, _ in filtered)
+            text = ", ".join(name for name, _, _ in filtered)
             feedback = "タグをクリップボードにコピーしました。"
         QApplication.clipboard().setText(text)
         self._show_toast(feedback)
@@ -1979,8 +2087,8 @@ class TagsTab(QWidget):
         except (OverflowError, OSError, ValueError):
             return "-"
 
-    def _filter_display_tags(self, tags: Iterable[Sequence[object]]) -> list[tuple[str, float]]:
-        filtered: list[tuple[str, float]] = []
+    def _filter_display_tags(self, tags: Iterable[Sequence[object]]) -> list[TagDisplayEntry]:
+        filtered: list[TagDisplayEntry] = []
         for entry in tags:
             if not entry:
                 continue
@@ -1997,7 +2105,7 @@ class TagsTab(QWidget):
                 threshold = self._tag_thresholds.get(category, 0.0)
             if score < threshold:
                 continue
-            filtered.append((name, score))
+            filtered.append((name, score, category))
         return filtered
 
     def _update_thresholds(self, settings: PipelineSettings | None = None) -> None:
@@ -2017,35 +2125,16 @@ class TagsTab(QWidget):
 
     @staticmethod
     def _normalise_category_value(value: object) -> TagCategory | None:
-        if value is None:
-            return None
-        if isinstance(value, TagCategory):
-            return TagCategory(int(value))
-        if isinstance(value, (int, float)) and not isinstance(value, bool):
-            try:
-                return TagCategory(int(value))
-            except (ValueError, TypeError):
-                return None
-        text = str(value).strip()
-        if not text:
-            return None
-        lowered = text.lower()
-        category = _CATEGORY_KEY_LOOKUP.get(lowered)
-        if category is not None:
-            return category
-        try:
-            return TagCategory(int(float(text)))
-        except (ValueError, TypeError):
-            return None
+        return _coerce_category(value)
 
     @staticmethod
-    def _format_tags(tags: Iterable[tuple[str, float]]) -> str:
-        parts = [f"{name} ({score:.2f})" for name, score in tags]
+    def _format_tags(tags: Iterable[TagDisplayEntry]) -> str:
+        parts = [f"{name} ({score:.2f})" for name, score, _ in tags]
         return ", ".join(parts)
 
     @staticmethod
-    def _format_grid_text(name: str, tags: Iterable[tuple[str, float]]) -> str:
-        tag_names = [tag for tag, _ in tags][:2]
+    def _format_grid_text(name: str, tags: Iterable[TagDisplayEntry]) -> str:
+        tag_names = [entry[0] for entry in tags][:2]
         subtitle = ", ".join(tag_names)
         return f"{name}\n{subtitle}" if subtitle else name
 

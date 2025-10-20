@@ -1,5 +1,7 @@
 ![header](docs/images/header.png)
+
 # kobato-eyes
+
 ![ss](docs/images/ss-tags.png)
 
 **kobato-eyes** は、ローカル PC 上の画像に Danbooru タグを自動付与し、類似画像検出と検索を行う Windows 向けデスクトップアプリケーションです。PyQt6 を用いた GUI と SQLite + FTS5 データベースを組み合わせ、スキャンからタグ付け、検索、重複チェックまでを一貫して実行します。
