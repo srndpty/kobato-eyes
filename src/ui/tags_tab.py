@@ -1385,18 +1385,36 @@ class TagsTab(QWidget):
             return
         params_list = list(params or [])
 
+        retag_ids: list[int] = []
+
         def _pre_run() -> dict[str, object]:
+            nonlocal retag_ids
             if predicate is None:
-                marked = self._view_model.retag_all(self._db_path, force=force_all, settings=settings)
+                result = self._view_model.retag_all(self._db_path, force=force_all, settings=settings)
             else:
-                marked = self._view_model.retag_query(self._db_path, predicate, params_list)
-            return {"retagged_marked": marked}
+                result = self._view_model.retag_query(self._db_path, predicate, params_list)
+            retag_ids = list(result.file_ids)
+            logger.info("Retagging prepared: %d files marked (predicate=%s)", result.affected, predicate)
+            return {"retagged_marked": result.affected, "retag_file_ids": retag_ids}
+
+        def _runner(
+            progress_cb: Callable[[IndexProgress], None],
+            is_cancelled: Callable[[], bool],
+        ) -> dict[str, object]:
+            return self._view_model.run_retag_selection(
+                self._db_path,
+                retag_ids,
+                settings=settings,
+                progress_cb=progress_cb,
+                is_cancelled=is_cancelled,
+            )
 
         task = IndexRunnable(
             self._view_model,
             self._db_path,
             settings=settings,
             pre_run=_pre_run,
+            runner=_runner,
         )
         self._retag_active = True
         self._start_indexing_task(task)
@@ -1421,6 +1439,7 @@ class TagsTab(QWidget):
         if not self._current_where:
             self._show_toast("Search results are required before retagging.")
             return
+        logger.info("Retagging current search results: WHERE=%s, PARAMS=%s", self._current_where, self._current_params)
         self._run_retag(
             predicate=self._current_where,
             params=list(self._current_params),

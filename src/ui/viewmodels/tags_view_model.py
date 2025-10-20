@@ -9,10 +9,11 @@ from PyQt6.QtCore import QObject
 
 from core.config import load_settings as _load_settings
 from core.config.schema import PipelineSettings
-from core.pipeline import IndexProgress
+from core.pipeline import IndexProgress, RetagResult
 from core.pipeline import retag_all as _retag_all
 from core.pipeline import retag_query as _retag_query
 from core.pipeline import run_index_once as _run_index_once
+from core.pipeline import run_retag_selection as _run_retag_selection
 from core.pipeline import scan_and_tag as _scan_and_tag
 from core.query import extract_positive_tag_terms as _extract_positive_tag_terms
 from core.query import translate_query as _translate_query
@@ -37,8 +38,9 @@ class TagsViewModel(QObject):
         connection_factory: Callable[[Path], object] = _get_conn,
         run_index_once: Callable[..., dict[str, object]] = _run_index_once,
         scan_and_tag: Callable[..., dict[str, object]] = _scan_and_tag,
-        retag_query: Callable[[Path, str, Sequence[object]], int] = _retag_query,
-        retag_all: Callable[[Path, bool, PipelineSettings], int] = _retag_all,
+        retag_query: Callable[[Path, str, Sequence[object]], RetagResult] = _retag_query,
+        retag_all: Callable[[Path, bool, PipelineSettings], RetagResult] = _retag_all,
+        run_retag_selection: Callable[..., dict[str, object]] = _run_retag_selection,
         load_settings: Callable[[], PipelineSettings] = _load_settings,
         load_thresholds: Callable[[object], dict[str, float]] = _load_tag_thresholds,
         list_tag_names: Callable[[object], Iterable[str]] = _list_tag_names,
@@ -56,6 +58,7 @@ class TagsViewModel(QObject):
         self._scan_and_tag = scan_and_tag
         self._retag_query = retag_query
         self._retag_all = retag_all
+        self._run_retag_selection = run_retag_selection
         self._load_settings = load_settings
         self._load_thresholds = load_thresholds
         self._list_tag_names = list_tag_names
@@ -232,15 +235,34 @@ class TagsViewModel(QObject):
         }
         return result
 
-    def retag_query(self, db_path: Path, predicate: str, params: Sequence[object]) -> int:
+    def retag_query(self, db_path: Path, predicate: str, params: Sequence[object]) -> RetagResult:
         """Retag files matching the given predicate."""
 
         return self._retag_query(Path(db_path), predicate, list(params))
 
-    def retag_all(self, db_path: Path, *, force: bool, settings: PipelineSettings) -> int:
+    def retag_all(self, db_path: Path, *, force: bool, settings: PipelineSettings) -> RetagResult:
         """Retag the entire library using the current pipeline settings."""
 
         return self._retag_all(Path(db_path), force=force, settings=settings)
+
+    def run_retag_selection(
+        self,
+        db_path: Path,
+        file_ids: Sequence[int],
+        *,
+        settings: PipelineSettings,
+        progress_cb: Callable[[IndexProgress], None] | None = None,
+        is_cancelled: Callable[[], bool] | None = None,
+    ) -> dict[str, object]:
+        """Run the indexing pipeline limited to the supplied file identifiers."""
+
+        return self._run_retag_selection(
+            Path(db_path),
+            list(file_ids),
+            settings=settings,
+            progress_cb=progress_cb,
+            is_cancelled=is_cancelled,
+        )
 
     def translate_query(self, query: str, **kwargs) -> object:
         """Translate user search text into SQL fragments."""
