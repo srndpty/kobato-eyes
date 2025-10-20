@@ -49,17 +49,17 @@ def test_category_thresholds_default_zero_when_unspecified() -> None:
     [
         pytest.param(
             [{"name": "cute", "score": "0.15"}],
-            [("cute", 0.15)],
+            [("cute", 0.15, None)],
             id="dict-input",
         ),
         pytest.param(
             [("tuple", 0.2)],
-            [("tuple", 0.2)],
+            [("tuple", 0.2, None)],
             id="tuple-two",
         ),
         pytest.param(
             [("triple", 0.3, TagCategory.GENERAL)],
-            [("triple", 0.3)],
+            [("triple", 0.3, TagCategory.GENERAL)],
             id="tuple-three",
         ),
         pytest.param(
@@ -69,13 +69,18 @@ def test_category_thresholds_default_zero_when_unspecified() -> None:
         ),
         pytest.param(
             [("low", 0.05), ("edge", 0.1)],
-            [("edge", 0.1)],
+            [("edge", 0.1, None)],
             id="threshold-boundary",
         ),
         pytest.param(
             [(123, 0.25)],
-            [("123", 0.25)],
+            [("123", 0.25, None)],
             id="name-coercion",
+        ),
+        pytest.param(
+            [("str-cat", 0.2, "character")],
+            [("str-cat", 0.2, TagCategory.CHARACTER)],
+            id="string-category",
         ),
     ],
 )
