@@ -101,11 +101,11 @@ _PREFIXES = (
 )
 _CATEGORY_KEY_LOOKUP = build_category_lookup()
 _TAG_COLOR_MAP = {
-    TagCategory.GENERAL: "#45A6F7",
+    TagCategory.GENERAL: "#45C5F7",
     TagCategory.CHARACTER: "#63CC69",
     TagCategory.COPYRIGHT: "#C976D8",
 }
-_SCORE_COLOR = "rgba(255, 255, 255, 0.78)"
+_SCORE_COLOR = "rgba(255, 255, 255, 0.80)"
 _NEUTRAL_TAG_COLOR = "#90A4AE"
 _HIGHLIGHT_SCORE_COLOR = "rgba(0, 0, 0, 0.86)"
 _HIGHLIGHT_SCORE_SHADOW = "0 0 3px rgba(0, 0, 0, 0.6)"
@@ -355,7 +355,7 @@ class _WrappingItemDelegate(QStyledItemDelegate):
         self,
         parent: QWidget | None = None,
         *,
-        wrap_mode: QTextOption.WrapMode = QTextOption.WrapMode.WrapAtWordBoundaryOrAnywhere,
+        wrap_mode: QTextOption.WrapMode = QTextOption.WrapMode.WrapAnywhere,
     ) -> None:  # noqa: D401 - Qt signature
         super().__init__(parent)
         self._wrap_mode = wrap_mode
@@ -370,6 +370,8 @@ class _WrappingItemDelegate(QStyledItemDelegate):
         text_option.setAlignment(alignment)
         doc.setDefaultTextOption(text_option)
         doc.setPlainText(text)
+        safe = html.escape(text)
+        doc.setHtml(f'<span style="color:{_SCORE_COLOR};">{safe}</span>')
         return doc
 
     def paint(self, painter, option: QStyleOptionViewItem, index: QModelIndex):  # noqa: D401 - Qt signature
@@ -940,6 +942,7 @@ class TagsTab(QWidget):
         self._table_view.horizontalScrollBar().setSingleStep(scroll_amount)
         self._table_view.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self._table_view.customContextMenuRequested.connect(self._on_table_context_menu)
+        self._table_view.setStyleSheet(f"QTableView, QTableView::item {{color: {_SCORE_COLOR};}}")
 
         self._grid_model = QStandardItemModel(self)
         self._grid_view = QListView(self)
