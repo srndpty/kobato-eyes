@@ -100,30 +100,15 @@ _PREFIXES = (
 )
 _CATEGORY_KEY_LOOKUP = build_category_lookup()
 _TAG_COLOR_MAP = {
-    TagCategory.GENERAL: "#64B5F6",
-    TagCategory.CHARACTER: "#81C784",
-    TagCategory.COPYRIGHT: "#CE93D8",
+    TagCategory.GENERAL: "#45A6F7",
+    TagCategory.CHARACTER: "#63CC69",
+    TagCategory.COPYRIGHT: "#C976D8",
 }
+_SCORE_COLOR = "rgba(255, 255, 255, 0.78)"
 _NEUTRAL_TAG_COLOR = "#90A4AE"
-_SCORE_COLOR = "rgba(255, 255, 255, 0.88)"
+_HIGHLIGHT_SCORE_COLOR = "rgba(0, 0, 0, 0.86)"
 _HIGHLIGHT_SCORE_SHADOW = "0 0 3px rgba(0, 0, 0, 0.6)"
 TagDisplayEntry = tuple[str, float, TagCategory | None]
-
-
-def _category_thresholds(settings: PipelineSettings) -> dict[TagCategory, float]:
-    th = {k.lower(): float(v) for k, v in (settings.tagger.thresholds or {}).items()}
-
-    def get(name, default=0.0):
-        return th.get(name, default)
-
-    return {
-        TagCategory.GENERAL: get("general"),
-        TagCategory.CHARACTER: get("character"),
-        TagCategory.COPYRIGHT: get("copyright"),
-        TagCategory.ARTIST: get("artist"),
-        TagCategory.META: get("meta"),
-        TagCategory.RATING: get("rating"),
-    }
 
 
 def _coerce_category(value: object) -> TagCategory | None:
@@ -219,6 +204,27 @@ def _category_color(category: TagCategory | None) -> str:
     return _TAG_COLOR_MAP.get(category, _NEUTRAL_TAG_COLOR)
 
 
+def _mix_hex(fg: str, bg: str, w: float) -> str:
+    """hex色を合成。w=1.0でfg、0.0でbg。"""
+    w = max(0.0, min(1.0, w))
+
+    def _c(h):
+        h = h.lstrip("#")
+        return int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+
+    fr, fg_, fb = _c(fg)
+    br, bg_, bb = _c(bg)
+    r = round(fr * w + br * (1 - w))
+    g = round(fg_ * w + bg_ * (1 - w))
+    b = round(fb * w + bb * (1 - w))
+    return f"#{r:02x}{g:02x}{b:02x}"
+
+
+def _darken_hex(hex_color: str, factor: float = 0.75) -> str:
+    """色を少し暗く。factorは元色の寄与率（0.7〜0.85あたり推奨）。"""
+    return _mix_hex(hex_color, "#000000", factor)
+
+
 def _render_tag_html(
     name: str,
     score: float,
@@ -232,11 +238,17 @@ def _render_tag_html(
     score_html = html.escape(f"({score:.2f})")
 
     if highlight:
-        score_style = f"color:{_SCORE_COLOR}; text-shadow:{_HIGHLIGHT_SCORE_SHADOW};"
+        # タグ名はカテゴリ色を維持、スコアは黒系。外側は背景のみ指定。
+        base = _category_color(category)  # ex. 緑/マゼンタ/青
+        name_col = _darken_hex(base, 0.5)  # 0.72〜0.80で調整可
+        name_style = f"color:{name_col};"
+        # name_style = f"color:{_category_color(category)};"
+        score_style = f"color:{_HIGHLIGHT_SCORE_COLOR};"
         return (
-            f'<span style="background-color:{highlight_bg}; color:{highlight_fg}; '
-            f'padding:0 2px; border-radius:2px;">'
-            f'{name_html} <span style="{score_style}">{score_html}</span></span>'
+            f'<span style="background-color:{highlight_bg}; padding:0 2px; border-radius:2px;">'
+            f'<span style="{name_style}">{name_html}</span> '
+            f'<span style="{score_style}">{score_html}</span>'
+            f"</span>"
         )
 
     tag_color = _category_color(category)
