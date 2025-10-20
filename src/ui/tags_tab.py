@@ -1390,6 +1390,7 @@ class TagsTab(QWidget):
                 marked = self._view_model.retag_all(self._db_path, force=force_all, settings=settings)
             else:
                 marked = self._view_model.retag_query(self._db_path, predicate, params_list)
+            logger.info("Retagging prepared: %d files marked (predicate=%s)", marked, predicate)
             return {"retagged_marked": marked}
 
         task = IndexRunnable(
@@ -1421,6 +1422,7 @@ class TagsTab(QWidget):
         if not self._current_where:
             self._show_toast("Search results are required before retagging.")
             return
+        logger.info("Retagging current search results: WHERE=%s, PARAMS=%s", self._current_where, self._current_params)
         self._run_retag(
             predicate=self._current_where,
             params=list(self._current_params),
