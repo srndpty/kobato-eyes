@@ -44,6 +44,7 @@ from PyQt6.QtGui import (
     QStandardItem,
     QStandardItemModel,
     QTextDocument,
+    QTextOption,
 )
 from PyQt6.QtWidgets import (
     QAbstractItemView,
@@ -345,6 +346,64 @@ class _CopyRunnable(QRunnable):
             self.signals.finished.emit(str(self.dest_dir), ok, ng)
         except Exception as e:
             self.signals.error.emit(str(e))
+
+
+class _WrappingItemDelegate(QStyledItemDelegate):
+    """Render plain text wrapped within the available column width."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:  # noqa: D401 - Qt signature
+        super().__init__(parent)
+        self._text_option = QTextOption()
+        self._text_option.setWrapMode(QTextOption.WrapMode.WrapAtWordBoundaryOrAnywhere)
+        self._text_option.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+
+    def paint(self, painter, option: QStyleOptionViewItem, index: QModelIndex) -> None:  # noqa: D401 - Qt signature
+        opt = QStyleOptionViewItem(option)
+        self.initStyleOption(opt, index)
+        text = opt.text
+        opt.text = ""
+        style = opt.widget.style() if opt.widget else QApplication.style()
+        style.drawControl(QStyle.ControlElement.CE_ItemViewItem, opt, painter, opt.widget)
+
+        if not text:
+            return
+
+        text_rect = style.subElementRect(QStyle.SubElement.SE_ItemViewItemText, opt, opt.widget)
+        if text_rect.isNull():
+            return
+
+        painter.save()
+        painter.setClipRect(text_rect)
+
+        doc = QTextDocument()
+        doc.setDocumentMargin(0)
+        doc.setDefaultFont(opt.font)
+        doc.setDefaultTextOption(self._text_option)
+        doc.setPlainText(text)
+        doc.setTextWidth(float(text_rect.width()))
+
+        painter.translate(text_rect.topLeft())
+        doc.drawContents(painter, QRectF(0.0, 0.0, float(text_rect.width()), float(text_rect.height())))
+        painter.restore()
+
+    def sizeHint(self, option: QStyleOptionViewItem, index: QModelIndex) -> QSize:  # noqa: D401 - Qt signature
+        opt = QStyleOptionViewItem(option)
+        self.initStyleOption(opt, index)
+        text = opt.text
+        if not text:
+            return super().sizeHint(option, index)
+
+        doc = QTextDocument()
+        doc.setDocumentMargin(0)
+        doc.setDefaultFont(opt.font)
+        doc.setDefaultTextOption(self._text_option)
+        doc.setPlainText(text)
+
+        available_width = opt.rect.width() if opt.rect.width() > 0 else 200
+        doc.setTextWidth(float(available_width))
+        size = doc.size().toSize()
+        height = max(size.height(), opt.rect.height())
+        return QSize(size.width(), height)
 
 
 class _HighlightDelegate(QStyledItemDelegate):
@@ -873,6 +932,8 @@ class TagsTab(QWidget):
         self._table_view.setIconSize(QSize(self._THUMB_SIZE, self._THUMB_SIZE))
         self._table_view.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
         self._table_view.setHorizontalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
+        self._table_view.setWordWrap(True)
+        self._table_view.setTextElideMode(Qt.TextElideMode.ElideNone)
         scroll_amount = 36
         self._table_view.verticalScrollBar().setSingleStep(scroll_amount)
         self._table_view.horizontalScrollBar().setSingleStep(scroll_amount)
@@ -904,6 +965,16 @@ class TagsTab(QWidget):
         self._positive_terms: list[str] = []
         self._relevance_thresholds: dict[int, float] = {}
         self._use_relevance = False
+        self._wrapping_delegate = _WrappingItemDelegate(self._table_view)
+        try:
+            filename_col = headers.index("File name")
+            folder_col = headers.index("Folder")
+        except ValueError:
+            filename_col = folder_col = -1
+        else:
+            self._table_view.setItemDelegateForColumn(filename_col, self._wrapping_delegate)
+            self._table_view.setItemDelegateForColumn(folder_col, self._wrapping_delegate)
+
         self._tags_delegate = _HighlightDelegate(lambda: self._highlight_terms, self._table_view)
         tags_col = self._table_model.columnCount() - 1
         if tags_col >= 0:
