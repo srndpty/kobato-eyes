@@ -917,6 +917,30 @@ class DupTab(QWidget):
             for t in panel.tiles:
                 yield t
 
+    def _iter_checked_entries(self) -> Iterator[DuplicateClusterEntry]:
+        """Yield entries that are currently marked for deletion."""
+
+        for idx in range(self._tree.topLevelItemCount()):
+            top = self._tree.topLevelItem(idx)
+            if top is None:
+                continue
+            cluster = top.data(0, Qt.ItemDataRole.UserRole)
+            if not isinstance(cluster, DuplicateCluster):
+                continue
+
+            panel = self._panel_of_group(top)
+            if panel is not None:
+                for tile in panel.tiles:
+                    if tile.is_checked():
+                        yield tile.entry
+                continue
+
+            # 未展開のクラスターは keeper 以外が Checked 相当
+            for entry in cluster.files:
+                if entry.file.file_id == cluster.keeper_id:
+                    continue
+                yield entry
+
     def _cluster_hamming_score(self, cluster: "DuplicateCluster") -> int:
         """
         クラスター内で keeper 以外の best_hamming の最大値を返す。
@@ -1414,7 +1438,7 @@ class DupTab(QWidget):
         self._update_action_states()
 
     def _on_trash_checked(self) -> None:
-        checked_entries = [t.entry for t in self._iter_tiles() if t.is_checked()]
+        checked_entries = list(self._iter_checked_entries())
         if not checked_entries:
             QMessageBox.information(self, "Trash duplicates", "No files are checked for deletion.")
             return
@@ -1589,11 +1613,7 @@ class DupTab(QWidget):
                 yield child, entry if isinstance(entry, DuplicateClusterEntry) else None
 
     def _count_checked(self) -> int:
-        tiles = list(self._iter_tiles())
-        if tiles:  # 既に可視タイルがあるときは実際のチェック状態
-            return sum(1 for t in tiles if t.is_checked())
-        # まだ何も展開していない初期状態は、keeper 以外が Checked 相当
-        return sum(max(0, len(c.files) - 1) for c in self._clusters)
+        return sum(1 for _ in self._iter_checked_entries())
 
     @staticmethod
     def _format_size(value: int | None) -> str:
