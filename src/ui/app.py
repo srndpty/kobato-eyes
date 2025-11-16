@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import multiprocessing as mp
 import os
 import sys
 from logging.handlers import RotatingFileHandler
@@ -298,4 +299,5 @@ else:
 
 
 if __name__ == "__main__":
+    mp.freeze_support()
     run()
