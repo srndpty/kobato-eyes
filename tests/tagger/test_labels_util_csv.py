@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from tagger.labels_util import TagMeta, load_selected_tags, sort_by_popularity
+from tagger.labels_util import BROKEN_TAG_PREFIX, TagMeta, discover_labels_csv, load_selected_tags, sort_by_popularity
 
 
 def test_load_selected_tags_single_column(tmp_path: Path) -> None:
@@ -38,3 +38,34 @@ def test_sort_by_popularity_orders_by_count_then_name() -> None:
     ]
     ordered = sort_by_popularity(tags)
     assert [tag.name for tag in ordered] == ["a", "aa", "abc", "ab"]
+
+
+def test_load_selected_tags_parses_name_category_count_and_ips(tmp_path: Path) -> None:
+    csv_path = tmp_path / "selected_tags_extra.csv"
+    csv_path.write_text(
+        "tag,category,count,ips\n"
+        'rating:safe,rating,25,["safe"]\n'
+        'bad-count,meta,not-a-number,"ignored"\n'
+        "  ,general,1,[]\n",
+        encoding="utf-8",
+    )
+
+    tags = load_selected_tags(csv_path)
+
+    assert TagMeta(name="rating:safe", category=2, count=25, ips=("safe",)) in tags
+    assert TagMeta(name="bad-count", category=5, count=0, ips=()) in tags
+    assert any(tag.name.startswith(BROKEN_TAG_PREFIX) and tag.category == 5 for tag in tags)
+
+
+def test_discover_labels_csv_prefers_explicit_then_model_directory(tmp_path: Path) -> None:
+    model_path = tmp_path / "model.onnx"
+    model_path.write_bytes(b"onnx")
+    default_csv = tmp_path / "selected_tags.csv"
+    default_csv.write_text("1girl\n", encoding="utf-8")
+    explicit_csv = tmp_path / "explicit.csv"
+    explicit_csv.write_text("solo\n", encoding="utf-8")
+
+    assert discover_labels_csv(model_path, explicit_csv) == explicit_csv
+    assert discover_labels_csv(model_path, tmp_path / "missing.csv") is None
+    assert discover_labels_csv(model_path, None) == default_csv
+    assert discover_labels_csv(None, None) is None

@@ -96,7 +96,7 @@ Invoke-Step "ruff format check" {
 
 if ($NoCoverage) {
     Invoke-Step "pytest" {
-        & $Python -m pytest
+        & $Python -m pytest -q
     }
 } else {
     $CoverageDir = Split-Path $CoverageFile -Parent
@@ -107,7 +107,7 @@ if ($NoCoverage) {
     $env:COVERAGE_FILE = $CoverageFile
 
     Invoke-Step "coverage run pytest" {
-        & $Python -m coverage run -m pytest
+        & $Python -m coverage run -m pytest -q
     }
 
     Invoke-Step "coverage report" {

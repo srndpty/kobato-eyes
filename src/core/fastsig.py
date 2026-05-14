@@ -1,4 +1,5 @@
-# src/core/fastsig.py
+"""Fast perceptual signature calculation and database upsert helpers."""
+
 from __future__ import annotations
 
 import multiprocessing as mp

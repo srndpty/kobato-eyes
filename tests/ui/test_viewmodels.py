@@ -9,10 +9,11 @@ from typing import Iterable, Sequence
 import pytest
 from PyQt6.QtCore import QCoreApplication
 
+import ui.viewmodels.main_view_model as main_view_model_module
 from core.config import PipelineSettings, TaggerSettings
 from core.pipeline import RetagResult
 from dup.scanner import DuplicateScanConfig
-from ui.viewmodels import DupViewModel, SettingsViewModel, TagsViewModel
+from ui.viewmodels import DupViewModel, MainViewModel, SettingsViewModel, TagsViewModel
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -130,6 +131,86 @@ def test_tags_view_model_retag_all_keyword_arguments(tmp_path: Path) -> None:
     assert recorded["settings"] is settings
 
 
+def test_tags_view_model_refresh_roots_aggregates_and_stops_on_cancel(tmp_path: Path) -> None:
+    calls: list[Path] = []
+
+    def fake_scan_and_tag(folder: Path, **kwargs):
+        calls.append(folder)
+        return {
+            "queued": 2,
+            "tagged": 1,
+            "elapsed_sec": 0.5,
+            "missing": 1,
+            "soft_deleted": 1,
+            "hard_deleted": 0,
+            "cancelled": folder.name == "second",
+        }
+
+    view_model = TagsViewModel(
+        db_path=tmp_path / "tags.db",
+        connection_factory=lambda path: None,
+        run_index_once=lambda *args, **kwargs: {},
+        scan_and_tag=fake_scan_and_tag,
+        retag_query=lambda *args, **kwargs: RetagResult(0, []),
+        run_retag_selection=lambda *args, **kwargs: {},
+        retag_all=lambda *args, **kwargs: RetagResult(0, []),
+        load_settings=lambda: PipelineSettings(),
+        load_thresholds=lambda conn: {},
+        list_tag_names=lambda conn: [],
+        search_files=lambda *args, **kwargs: [],
+        iter_paths_for_search=lambda *args, **kwargs: [],
+        ensure_directories=lambda: None,
+        make_export_dir=lambda query: tmp_path,
+        translate_query=lambda query, **kwargs: {},
+        extract_positive_terms=lambda query: set(),
+    )
+
+    result = view_model.refresh_roots(
+        [Path("first"), Path("second"), Path("third")],
+        settings=PipelineSettings(batch_size=4),
+        hard_delete_missing=True,
+    )
+
+    assert calls == [Path("first"), Path("second")]
+    assert result["queued"] == 4.0
+    assert result["tagged"] == 2.0
+    assert result["missing"] == 2.0
+    assert result["soft_deleted"] == 2.0
+    assert result["hard_delete"] is True
+    assert result["cancelled"] is True
+    assert len(result["roots"]) == 2
+
+
+def test_tags_view_model_refresh_roots_handles_cancel_callback_exception(tmp_path: Path) -> None:
+    view_model = TagsViewModel(
+        db_path=tmp_path / "tags.db",
+        connection_factory=lambda path: None,
+        run_index_once=lambda *args, **kwargs: {},
+        scan_and_tag=lambda *args, **kwargs: {"queued": 1},
+        retag_query=lambda *args, **kwargs: RetagResult(0, []),
+        run_retag_selection=lambda *args, **kwargs: {},
+        retag_all=lambda *args, **kwargs: RetagResult(0, []),
+        load_settings=lambda: PipelineSettings(),
+        load_thresholds=lambda conn: {},
+        list_tag_names=lambda conn: [],
+        search_files=lambda *args, **kwargs: [],
+        iter_paths_for_search=lambda *args, **kwargs: [],
+        ensure_directories=lambda: None,
+        make_export_dir=lambda query: tmp_path,
+        translate_query=lambda query, **kwargs: {},
+        extract_positive_terms=lambda query: set(),
+    )
+
+    result = view_model.refresh_roots(
+        [Path("never-scanned")],
+        settings=PipelineSettings(),
+        is_cancelled=lambda: (_ for _ in ()).throw(RuntimeError("stop")),
+    )
+
+    assert result["cancelled"] is True
+    assert result["roots"] == []
+
+
 def test_dup_view_model_cluster_and_thumbnails(tmp_path: Path) -> None:
     generated: dict[str, object] = {}
 
@@ -229,3 +310,38 @@ def test_settings_view_model_reset_failure(tmp_path: Path) -> None:
         view_model.reset_database(backup=False)
 
     assert errors and errors[0] == "boom"
+
+
+def test_main_view_model_bootstrap_and_factories(monkeypatch, tmp_path: Path) -> None:
+    calls: list[object] = []
+    settings = PipelineSettings(batch_size=12)
+    db_path = tmp_path / "main.db"
+
+    monkeypatch.setattr(main_view_model_module, "migrate_data_dir_if_needed", lambda: calls.append("migrate"))
+    monkeypatch.setattr(main_view_model_module, "ensure_dirs", lambda: calls.append("ensure"))
+    monkeypatch.setattr(main_view_model_module, "get_db_path", lambda: db_path)
+    monkeypatch.setattr(main_view_model_module, "_quick_settle_sqlite", lambda path: calls.append(("settle", path)))
+    monkeypatch.setattr(main_view_model_module, "bootstrap_if_needed", lambda path: calls.append(("bootstrap", path)))
+    monkeypatch.setattr(main_view_model_module, "load_settings", lambda: settings)
+
+    saved: list[PipelineSettings] = []
+    monkeypatch.setattr(main_view_model_module, "save_settings", saved.append)
+
+    view_model = MainViewModel()
+    emitted: list[PipelineSettings] = []
+    view_model.settings_changed.connect(emitted.append)
+
+    assert view_model.db_path == db_path
+    assert view_model.current_settings is settings
+    assert calls == ["migrate", "ensure", ("settle", db_path), ("bootstrap", db_path)]
+    assert isinstance(view_model.create_tags_view_model(), TagsViewModel)
+    assert isinstance(view_model.create_dup_view_model(), DupViewModel)
+    settings_view_model = view_model.create_settings_view_model()
+    assert isinstance(settings_view_model, SettingsViewModel)
+
+    new_settings = PipelineSettings(batch_size=3)
+    view_model.apply_settings(new_settings)
+
+    assert saved == [new_settings]
+    assert emitted == [new_settings]
+    assert view_model.current_settings is new_settings

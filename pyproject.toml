@@ -78,3 +78,13 @@ source = ["src"]
 [tool.coverage.report]
 show_missing = true
 skip_covered = true
+fail_under = 70
+omit = [
+    "src/tagger/pixai_onnx.py",
+    "src/tagger/wd14_onnx.py",
+    "src/ui/app.py",
+    "src/ui/dup_tab.py",
+    "src/ui/settings_tab.py",
+    "src/ui/splash_screen.py",
+    "src/ui/tags_tab.py",
+]
