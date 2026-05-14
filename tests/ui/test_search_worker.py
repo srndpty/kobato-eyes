@@ -64,6 +64,48 @@ def test_search_worker_reports_operational_error(monkeypatch, tmp_path: Path) ->
     assert finished == [(False, False)]
 
 
+def test_search_worker_reports_connection_error(monkeypatch, tmp_path: Path) -> None:
+    def fail_connect(*args, **kwargs):
+        raise search_worker.sqlite3.OperationalError("cannot open database")
+
+    monkeypatch.setattr(search_worker.sqlite3, "connect", fail_connect)
+    worker = SearchWorker(tmp_path / "db.sqlite", "1=1", [])
+    errors: list[str] = []
+    finished: list[tuple[bool, bool]] = []
+    worker.error.connect(errors.append)
+    worker.finished.connect(lambda ok, cancelled: finished.append((ok, cancelled)))
+
+    worker.run()
+
+    assert errors == ["cannot open database"]
+    assert finished == [(False, False)]
+
+
+def test_search_worker_cancel_after_chunk_reports_cancelled(monkeypatch, tmp_path: Path) -> None:
+    def fake_search_files(conn, where_sql, params, **kwargs):
+        offset = int(kwargs["offset"])
+        if offset:
+            return []
+        return [{"id": 1}]
+
+    monkeypatch.setattr(search_worker, "_search_files", fake_search_files)
+    worker = SearchWorker(tmp_path / "db.sqlite", "1=1", [], chunk=10, chunk_delay=60.0)
+    chunks: list[list[dict[str, int]]] = []
+    finished: list[tuple[bool, bool]] = []
+
+    def on_chunk(rows):
+        chunks.append(rows)
+        worker.cancel()
+
+    worker.chunkReady.connect(on_chunk)
+    worker.finished.connect(lambda ok, cancelled: finished.append((ok, cancelled)))
+
+    worker.run()
+
+    assert chunks == [[{"id": 1}]]
+    assert finished == [(False, True)]
+
+
 def test_search_worker_cancel_sets_progress_handler() -> None:
     worker = SearchWorker(":memory:", "1=1", [])
 

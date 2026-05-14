@@ -6,9 +6,9 @@ import hashlib
 import logging
 import os
 from collections import OrderedDict
+from contextlib import suppress
 from pathlib import Path
 from threading import Lock
-from typing import Optional
 
 from PIL import Image, ImageFile, UnidentifiedImageError
 from PIL.Image import DecompressionBombError
@@ -47,11 +47,12 @@ def safe_load_image(
     source: str | Path,
     *,
     max_side: int = DEFAULT_MAX_SIDE,
-    bomb_pixel_cap: Optional[int] = DEFAULT_BOMB_CAP,
-    hard_skip_pixels: Optional[int] = None,  # ← 追加: これ超は開かない
+    bomb_pixel_cap: int | None = DEFAULT_BOMB_CAP,
+    hard_skip_pixels: int | None = None,  # ← 追加: これ超は開かない
     rgb: bool = True,
     skip_on_bomb: bool = False,
-):
+) -> Image.Image | None:
+    """Load an image defensively and return ``None`` for unsafe or unreadable files."""
     p = str(source)
     old_cap = Image.MAX_IMAGE_PIXELS
     if bomb_pixel_cap is not None:
@@ -66,17 +67,13 @@ def safe_load_image(
         # 超巨大は最初からスキップ（ここが肝）
         if hard_skip_pixels is not None and px > hard_skip_pixels:
             logger.warning("Skip very large image (header %dx%d ~%d px): %s", w, h, px, p)
-            try:
+            with suppress(Exception):
                 img.close()
-            except Exception:
-                pass
             return None
 
         # JPEG 等は draft で縮小デコードを促す
-        try:
+        with suppress(Exception):
             img.draft("RGB", (max_side, max_side))
-        except Exception:
-            pass
 
         ImageFile.LOAD_TRUNCATED_IMAGES = True
         try:
@@ -84,30 +81,22 @@ def safe_load_image(
         except DecompressionBombError as e:
             logger.warning("Huge image detected (bomb): %s (%s)", p, e)
             if skip_on_bomb:
-                try:
+                with suppress(Exception):
                     img.close()
-                except Exception:
-                    pass
                 return None
             # 通す場合は制限を外して開き直し
-            try:
+            with suppress(Exception):
                 img.close()
-            except Exception:
-                pass
             Image.MAX_IMAGE_PIXELS = None
             img = Image.open(p)
-            try:
+            with suppress(Exception):
                 img.draft("RGB", (max_side, max_side))
-            except Exception:
-                pass
             img.load()
         except MemoryError:
             # ここで落ちていた。スキップに切り替え
             logger.error("MemoryError while decoding (header %dx%d ~%d px): %s", w, h, px, p)
-            try:
+            with suppress(Exception):
                 img.close()
-            except Exception:
-                pass
             return None
 
         # ここまで来たら即縮小して RAM を抑える
@@ -149,6 +138,19 @@ def _thumbnail_cache_key(path: Path, size: tuple[int, int], mode: str | None, fm
     return hashlib.sha1(payload.encode("utf-8")).hexdigest()
 
 
+def _cached_thumbnail_is_readable(path: Path) -> bool:
+    """Return whether an existing thumbnail cache entry can still be decoded."""
+    try:
+        with Image.open(path) as image:
+            image.verify()
+    except (UnidentifiedImageError, OSError):
+        logger.warning("Discarding corrupt thumbnail cache entry: %s", path)
+        with suppress(OSError):
+            path.unlink()
+        return False
+    return True
+
+
 def generate_thumbnail(
     source_path: str | Path,
     cache_dir: str | Path,
@@ -168,19 +170,28 @@ def generate_thumbnail(
     key = _thumbnail_cache_key(source, size, mode, format)
     thumb_path = cache_root / f"{key}.{format.lower()}"
     if thumb_path.exists():
-        return thumb_path
+        if _cached_thumbnail_is_readable(thumb_path):
+            return thumb_path
 
     image = safe_load_image(source)
     # image = safe_load_image(source, mode)
     if image is None:
         return None
 
-    thumbnail = resize_image(image, size)
-
     tmp_path = thumb_path.with_suffix(thumb_path.suffix + ".tmp")
-    thumbnail.save(tmp_path, format=format)
-    os.replace(tmp_path, thumb_path)
-    return thumb_path
+    try:
+        thumbnail = resize_image(image, size)
+        thumbnail.save(tmp_path, format=format)
+        os.replace(tmp_path, thumb_path)
+        return thumb_path
+    except OSError as exc:
+        logger.warning("Failed to write thumbnail cache for %s: %s", source, exc)
+        with suppress(OSError):
+            tmp_path.unlink()
+        return None
+    finally:
+        with suppress(Exception):
+            image.close()
 
 
 def get_thumbnail(

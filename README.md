@@ -87,9 +87,11 @@ python -m venv .venv
 .venv\Scripts\activate
 python --version  # Python 3.10.x であることを確認
 python -m pip install --upgrade pip
-pip install -e .[dev]
+pip install -e .[dev,tagging-cpu]
 pre-commit install
 ```
+
+GPU で ONNX タガーを実行する開発環境では、CPU 版の代わりに `pip install -e .[dev,tagging-gpu]` を使用してください。将来の CLIP / hnswlib ベクトル検索を試す場合は `vector` extra を追加します。
 
 ### モデルファイルの配置
 
@@ -150,7 +152,7 @@ CI などで GUI を起動しない場合は、環境変数 `KOE_HEADLESS=1` を
 ## トラブルシューティング
 
 - モデルが見つからない場合は設定タブまたは `config.yaml` のパスを再確認してください。
-- GPU が無い環境では `pip uninstall onnxruntime-gpu` の後に `pip install onnxruntime` へ切替えることで CPU 実行が可能です。
+- GPU が無い環境では `tagging-cpu` extra、CUDA 対応環境では `tagging-gpu` extra を使って ONNX Runtime を選択してください。
 - データディレクトリを移動したい場合は `KOE_DATA_DIR` を設定した上で再起動すると自動移行が行われます。
 
 # License

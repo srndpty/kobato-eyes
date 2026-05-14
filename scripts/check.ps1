@@ -1,6 +1,7 @@
 param(
     [switch]$NoCoverage,
     [switch]$Fix,
+    [switch]$SkipTypeCheck,
     [string]$CoverageFile = "tmp/coverage/.coverage"
 )
 
@@ -92,6 +93,12 @@ Invoke-Step "ruff check" {
 
 Invoke-Step "ruff format check" {
     & $Python -m ruff format @FormatCheckTargets --check
+}
+
+if (-not $SkipTypeCheck) {
+    Invoke-Step "mypy" {
+        & $Python -m mypy
+    }
 }
 
 if ($NoCoverage) {

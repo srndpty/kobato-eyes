@@ -32,6 +32,22 @@ def test_generate_thumbnail_creates_cached_file(tmp_path: Path) -> None:
     assert second_path == thumbnail_path
 
 
+def test_generate_thumbnail_recovers_corrupt_cache_file(tmp_path: Path) -> None:
+    source = tmp_path / "source.png"
+    cache_dir = tmp_path / "cache"
+    _create_sample_image(source)
+
+    thumbnail_path = generate_thumbnail(source, cache_dir, size=(32, 32))
+    assert thumbnail_path is not None
+    thumbnail_path.write_bytes(b"broken-cache")
+
+    regenerated_path = generate_thumbnail(source, cache_dir, size=(32, 32))
+
+    assert regenerated_path == thumbnail_path
+    with Image.open(regenerated_path) as thumb:
+        assert thumb.size == (32, 32)
+
+
 def test_safe_load_image_handles_corrupted_file(tmp_path: Path) -> None:
     broken = tmp_path / "broken.jpg"
     broken.write_bytes(b"not-an-image")

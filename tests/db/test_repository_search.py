@@ -69,7 +69,7 @@ def test_search_files_returns_expected_record(conn) -> None:
         ("dress", 0.6),
         ("outdoors", 0.5),
     ]
-    for idx, (name, score) in enumerate(tags):
+    for _idx, (name, score) in enumerate(tags):
         _insert_tag(conn, name, score, file_a)
 
     _insert_tag(conn, "landscape", 0.4, file_b)

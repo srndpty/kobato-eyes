@@ -10,3 +10,13 @@ repos:
       - id: ruff
         args: ["--fix"]
       - id: ruff-format
+  - repo: local
+    hooks:
+      - id: mypy
+        name: mypy
+        entry: mypy
+        language: python
+        additional_dependencies:
+          - mypy>=1.18.0,<2.0
+          - types-PyYAML>=6.0.12.20250915
+        pass_filenames: false
