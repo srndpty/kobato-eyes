@@ -39,6 +39,11 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -e ".[dev]"
 
+      - name: Show tool versions
+        run: |
+          python --version
+          python -m ruff --version
+
       - name: Ruff lint
         run: python -m ruff check .
 
