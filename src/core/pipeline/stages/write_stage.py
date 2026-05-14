@@ -97,8 +97,8 @@ class WriteStage:
 
         def _dbw_progress(kind: str, done: int, total_count: int) -> None:
             nonlocal fts_processed
-            fts_processed = done
-            emitter.emit(IndexProgress(phase=IndexPhase.FTS, done=done, total=total_count))
+            fts_processed = max(fts_processed, int(done))
+            emitter.emit(IndexProgress(phase=IndexPhase.FTS, done=fts_processed, total=total_count))
             try:
                 logger.info("finalizing: %s %d/%d", kind.split(".")[0], done, total_count)
             except Exception:

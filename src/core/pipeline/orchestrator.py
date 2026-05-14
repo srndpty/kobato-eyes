@@ -118,9 +118,15 @@ class IndexPipeline:
 
         cancelled = self.emitter.cancelled(self.ctx.is_cancelled)
         if not cancelled and records:
+            retag_candidates = sum(
+                1
+                for record in records
+                if record.needs_tagging and record.tag_exists and not record.is_new and not record.changed
+            )
             tag_result = self._run_tag(records)
             if tag_result is not None:
                 stats["tagged"] = tag_result.tagged_count
+                stats["retagged"] = min(retag_candidates, tag_result.tagged_count)
                 cancelled = self.emitter.cancelled(self.ctx.is_cancelled)
                 if not cancelled:
                     write_result = self._run_write(tag_result)

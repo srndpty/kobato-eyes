@@ -98,7 +98,6 @@ jobs:
     env:
       PYTHONPATH: src
       QT_QPA_PLATFORM: offscreen
-      KOE_HEADLESS: "1"
       PIP_DISABLE_PIP_VERSION_CHECK: "1"
 
     steps:

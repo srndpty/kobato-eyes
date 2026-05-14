@@ -5,6 +5,7 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
+import numpy as np
 import pytest
 from PIL import Image
 
@@ -19,6 +20,13 @@ pytestmark = pytest.mark.integration
 class _StubTagger(ITagger):
     def __init__(self, label: str) -> None:
         self._label = label
+
+    def prepare_batch_from_rgb_np(self, images):  # type: ignore[override]
+        return np.stack([np.asarray(image, dtype=np.float32) for image in images], axis=0)
+
+    def infer_batch_prepared(self, batch, *, thresholds=None, max_tags=None):  # type: ignore[override]
+        predictions = [TagPrediction(name=self._label, score=0.9, category=TagCategory.GENERAL)]
+        return [TagResult(tags=predictions) for _ in range(len(batch))]
 
     def infer_batch(self, images, *, thresholds=None, max_tags=None):  # type: ignore[override]
         predictions = [TagPrediction(name=self._label, score=0.9, category=TagCategory.GENERAL)]
@@ -43,6 +51,7 @@ def test_retagging_on_signature_change(tmp_path: Path) -> None:
 
     settings_dummy = PipelineSettings(
         roots=[str(tmp_path / "assets")],
+        excluded=[],
         tagger=TaggerSettings(name="dummy"),
     )
 
@@ -71,6 +80,7 @@ def test_retagging_on_signature_change(tmp_path: Path) -> None:
 
     settings_wd14 = PipelineSettings(
         roots=[str(tmp_path / "assets")],
+        excluded=[],
         tagger=TaggerSettings(name="wd14-onnx", model_path=str(model_path)),
     )
 

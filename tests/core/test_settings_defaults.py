@@ -28,6 +28,13 @@ def test_defaults_are_applied() -> None:
         "character": pytest.approx(0.25),
         "copyright": pytest.approx(0.25),
     }
+    assert any(path.endswith("Windows") for path in settings.excluded)
+
+
+def test_explicit_empty_excluded_disables_default_exclusions() -> None:
+    settings = PipelineSettings(excluded=[])
+
+    assert settings.excluded == []
 
 
 def test_legacy_mapping_fills_missing_fields(tmp_path: Path) -> None:
