@@ -119,10 +119,10 @@ class PipelineSettings(BaseModel):
     @field_validator("excluded", mode="before")
     @classmethod
     def _normalise_excluded(cls, value: Any) -> list[str]:
-        if not value:
+        if value is None:
             return _default_excluded()
         normalised = [_normalise_path(str(item)) for item in value if item]
-        return normalised or _default_excluded()
+        return normalised
 
     @field_validator("allow_exts", mode="before")
     @classmethod

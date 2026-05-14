@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
+import threading
 from pathlib import Path
 from typing import Iterable
 from unittest import mock
@@ -28,19 +29,31 @@ def qapp() -> Iterable[QApplication]:
 
 @pytest.fixture()
 def tags_tab(qapp: QApplication):
-    conn = sqlite3.connect(":memory:")
-    conn.row_factory = sqlite3.Row
-    apply_schema(conn)
-    with patch("ui.tags_tab.get_conn", return_value=conn):
+    connections: list[sqlite3.Connection] = []
+
+    def _make_connection(*args, **kwargs) -> sqlite3.Connection:
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        apply_schema(conn)
+        connections.append(conn)
+        return conn
+
+    with patch("ui.tags_tab.get_conn", side_effect=_make_connection):
         widget = TagsTab()
         widget._view_model.load_settings = mock.MagicMock(  # type: ignore[attr-defined]
             return_value=PipelineSettings(roots=[str(Path.cwd())])
         )
+        widget.show()
+        qapp.processEvents()
         try:
             yield widget
         finally:
             widget.deleteLater()
-            conn.close()
+            for conn in connections:
+                try:
+                    conn.close()
+                except sqlite3.Error:
+                    pass
 
 
 def test_toggle_views(tags_tab: TagsTab) -> None:
@@ -54,7 +67,7 @@ def test_toggle_views(tags_tab: TagsTab) -> None:
 
 
 def test_index_now_triggers_pipeline(tags_tab: TagsTab) -> None:
-    done = mock.Event()
+    done = threading.Event()
 
     def _fake_run_index_once(*args, **kwargs):
         done.set()

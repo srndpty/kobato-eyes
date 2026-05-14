@@ -170,7 +170,9 @@ def _exec_pragma_retry(cur: sqlite3.Cursor, sql: str, retries: int = 40, sleep_s
             if "locked" not in str(e).lower() and "busy" not in str(e).lower():
                 raise
             time.sleep(sleep_sec)
-    raise last
+    if last is not None:
+        raise last
+    raise sqlite3.OperationalError(f"failed to execute pragma after {retries} retries: {sql}")
 
 
 def _apply_pragmas(conn: sqlite3.Connection, *, is_memory: bool) -> None:

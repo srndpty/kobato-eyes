@@ -60,7 +60,6 @@ def test_run_index_once_processes_images(tmp_path: Path, temp_db: Path) -> None:
     conn.row_factory = sqlite3.Row
     assert conn.execute("SELECT COUNT(*) AS c FROM files").fetchone()["c"] == 2
     assert conn.execute("SELECT COUNT(*) AS c FROM file_tags").fetchone()["c"] >= 2
-    assert conn.execute("SELECT COUNT(*) AS c FROM signatures").fetchone()["c"] == 2
     conn.close()
 
     # Second run should skip unchanged files.

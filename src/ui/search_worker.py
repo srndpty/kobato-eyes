@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import logging
 import sqlite3
 import threading
-import time
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Mapping, Sequence
@@ -12,6 +13,8 @@ from typing import Mapping, Sequence
 from PyQt6.QtCore import QObject, pyqtSignal, pyqtSlot
 
 from db.repository import search_files as _search_files
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -74,6 +77,7 @@ class SearchWorker(QObject):
         try:
             conn = sqlite3.connect(self._db_path, check_same_thread=False)
         except sqlite3.Error as exc:  # pragma: no cover - connection errors are surfaced to UI
+            logger.warning("SearchWorker failed to open database %s: %s", self._db_path, exc)
             self.error.emit(str(exc))
             self.finished.emit(False, False)
             return
@@ -112,7 +116,7 @@ class SearchWorker(QObject):
                 emitted += len(rows)
                 offset += len(rows)
                 if self._chunk_delay:
-                    time.sleep(self._chunk_delay)
+                    self._cancel.wait(self._chunk_delay)
                 if params.max_rows is not None and emitted >= params.max_rows:
                     break
                 if len(rows) < limit:
@@ -121,9 +125,11 @@ class SearchWorker(QObject):
             if "interrupted" in str(exc).lower() and self._cancel.is_set():
                 self.finished.emit(False, True)
             else:
+                logger.warning("SearchWorker query failed: %s", exc)
                 self.error.emit(str(exc))
                 self.finished.emit(False, False)
         except Exception as exc:  # pragma: no cover - defensive logging
+            logger.exception("SearchWorker crashed")
             self.error.emit(str(exc))
             self.finished.emit(False, False)
         else:
@@ -141,10 +147,8 @@ class SearchWorker(QObject):
         self._cancel.set()
         connection = self._connection
         if connection is not None:
-            try:
+            with suppress(sqlite3.Error):
                 connection.interrupt()
-            except sqlite3.Error:  # pragma: no cover - best effort
-                pass
 
     def _progress_handler(self) -> int:
         return 1 if self._cancel.is_set() else 0

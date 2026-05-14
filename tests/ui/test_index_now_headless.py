@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
+import threading
 import time
 from pathlib import Path
 from typing import Iterable
@@ -30,24 +31,36 @@ def qapp() -> Iterable[QApplication]:
 
 @pytest.fixture()
 def tags_tab(qapp: QApplication):
-    conn = sqlite3.connect(":memory:")
-    conn.row_factory = sqlite3.Row
-    apply_schema(conn)
-    with patch("ui.tags_tab.get_conn", return_value=conn):
+    connections: list[sqlite3.Connection] = []
+
+    def _make_connection(*args, **kwargs) -> sqlite3.Connection:
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        apply_schema(conn)
+        connections.append(conn)
+        return conn
+
+    with patch("ui.tags_tab.get_conn", side_effect=_make_connection):
         widget = TagsTab()
         widget._view_model.load_settings = mock.MagicMock(  # type: ignore[attr-defined]
             return_value=PipelineSettings(roots=[str(Path.cwd())])
         )
+        widget.show()
+        qapp.processEvents()
         try:
             yield widget
         finally:
             widget.deleteLater()
-            conn.close()
+            for conn in connections:
+                try:
+                    conn.close()
+                except sqlite3.Error:
+                    pass
 
 
 def test_index_now_async_flow(tags_tab: TagsTab, qapp: QApplication) -> None:
-    started = mock.Event()
-    allow_finish = mock.Event()
+    started = threading.Event()
+    allow_finish = threading.Event()
 
     def _fake_run_index_once(*args, **kwargs):
         started.set()
@@ -77,11 +90,11 @@ def test_index_now_async_flow(tags_tab: TagsTab, qapp: QApplication) -> None:
 
             for _ in range(100):
                 qapp.processEvents()
-                if not getattr(tags_tab, "_indexing_active", True):
+                if not getattr(tags_tab, "_indexing_active", True) and search_spy.called:
                     break
                 time.sleep(0.01)
 
-    assert search_spy.called
+        assert search_spy.called
     assert getattr(tags_tab, "_indexing_active", False) is False
     assert tags_tab._status_label.text().startswith("Indexing complete")  # type: ignore[attr-defined]
     assert tags_tab._toast_label.isVisible()  # type: ignore[attr-defined]

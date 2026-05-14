@@ -72,7 +72,8 @@ from PyQt6.QtWidgets import (
 )
 
 from core.config import PipelineSettings
-from core.pipeline import IndexProgress
+from core.pipeline import IndexProgress, run_index_once
+from db.connection import get_conn
 from tagger import labels_util
 from tagger.base import TagCategory
 from tagger.categories import build_category_lookup
@@ -783,7 +784,11 @@ class TagsTab(QWidget):
         search_chunk_delay: float = 0.0,
     ) -> None:
         super().__init__(parent)
-        self._view_model = view_model or TagsViewModel(self)
+        self._view_model = view_model or TagsViewModel(
+            self,
+            connection_factory=lambda path: get_conn(path),
+            run_index_once=lambda *args, **kwargs: run_index_once(*args, **kwargs),
+        )
         self._search_chunk_size = max(1, int(search_chunk_size or self._PAGE_SIZE))
         self._search_chunk_delay = max(0.0, float(search_chunk_delay))
         self._query_edit = QLineEdit(self)
@@ -2373,7 +2378,7 @@ class TagsTab(QWidget):
             self._status_label.setText(f"Indexing complete in {elapsed:.2f}s.")
 
         tagger_name = str(stats.get("tagger_name") or "unknown")
-        message = f"Indexed: {int(stats.get('scanned', 0))} files / Tagged: {int(stats.get('tagged', 0))} / "
+        message = f"Indexed: {int(stats.get('scanned', 0))} files / Tagged: {int(stats.get('tagged', 0))}"
         retagged = int(stats.get("retagged", 0) or 0)
         requested = int(stats.get("retagged_marked", retagged) or 0)
         if self._retag_active:
