@@ -11,7 +11,7 @@ authors = [
     { name = "kobato-eyes developers" }
 ]
 license = { file = "LICENSE" }
-requires-python = ">=3.10"
+requires-python = ">=3.10,<3.11"
 dependencies = [
     "PyQt6>=6.7.0",
     "pillow>=10.4.0",
@@ -29,7 +29,7 @@ dependencies = [
 dev = [
     "black>=24.8.0",
     "isort>=5.13.2",
-    "ruff>=0.5.6",
+    "ruff==0.14.0",
     "pytest>=8.3.0",
     "pytest-cov>=6.2.1,<7.0",
     "coverage>=7.6.12,<7.14",
@@ -48,7 +48,7 @@ where = ["src"]
 [tool.black]
 line-length = 120
 skip-string-normalization = true
-target-version = ["py311"]
+target-version = ["py310"]
 
 [tool.isort]
 profile = "black"
@@ -58,7 +58,7 @@ known_first_party = ["ui", "core", "db", "tagger", "dup", "sig", "index", "utils
 
 [tool.ruff]
 line-length = 120
-target-version = "py311"
+target-version = "py310"
 src = ["src"]
 
 [tool.ruff.lint]

@@ -82,9 +82,9 @@ def test_iter_images_handles_special_path_names(tmp_path: Path) -> None:
             continue
         expected.add(resolved_file)
 
-    assert (
-        results == expected
-    ), f"Iterated files mismatch. Missing: {sorted(expected - results)}; Unexpected: {sorted(results - expected)}"
+    assert results == expected, (
+        f"Iterated files mismatch. Missing: {sorted(expected - results)}; Unexpected: {sorted(results - expected)}"
+    )
 
 
 def test_iter_images_skips_hidden_components(tmp_path: Path) -> None:
