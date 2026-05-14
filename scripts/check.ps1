@@ -28,6 +28,12 @@ $ChangedPythonFiles = @(
     ) | Where-Object { $_ -match '\.py$' } | Sort-Object -Unique
 )
 
+if ($ChangedPythonFiles.Count -eq 0) {
+    $FormatCheckTargets = @(".")
+} else {
+    $FormatCheckTargets = $ChangedPythonFiles
+}
+
 function Invoke-Step {
     param(
         [Parameter(Mandatory = $true)]
@@ -73,7 +79,7 @@ Invoke-Step "git diff --cached --check" {
 
 if ($ChangedPythonFiles.Count -eq 0) {
     Write-Host ""
-    Write-Host "==> no changed Python files to check with isort/ruff format" -ForegroundColor Cyan
+    Write-Host "==> no changed Python files to check with isort" -ForegroundColor Cyan
 } else {
     Invoke-Step "isort check" {
         & $Python -m isort @ChangedPythonFiles --check-only
@@ -84,10 +90,8 @@ Invoke-Step "ruff check" {
     & $Python -m ruff check .
 }
 
-if ($ChangedPythonFiles.Count -ne 0) {
-    Invoke-Step "ruff format check" {
-        & $Python -m ruff format @ChangedPythonFiles --check
-    }
+Invoke-Step "ruff format check" {
+    & $Python -m ruff format @FormatCheckTargets --check
 }
 
 if ($NoCoverage) {
