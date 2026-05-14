@@ -7,14 +7,7 @@ from typing import Sequence
 import numpy as np
 from PIL import Image
 
-from tagger.base import (
-    ITagger,
-    MaxTagsMap,
-    TagCategory,
-    TagPrediction,
-    TagResult,
-    ThresholdMap,
-)
+from tagger.base import ITagger, MaxTagsMap, TagCategory, TagPrediction, TagResult, ThresholdMap
 
 
 class DummyTagger(ITagger):

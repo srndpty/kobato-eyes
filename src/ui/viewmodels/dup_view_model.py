@@ -8,10 +8,13 @@ from typing import Callable, Iterable, Sequence
 from PyQt6.QtCore import QObject
 
 from db.connection import get_conn as _get_conn
-from db.repository import iter_files_for_dup as _iter_files_for_dup, mark_files_absent as _mark_files_absent
+from db.repository import iter_files_for_dup as _iter_files_for_dup
+from db.repository import mark_files_absent as _mark_files_absent
 from dup.scanner import DuplicateScanConfig, DuplicateScanner
-from utils.image_io import generate_thumbnail as _generate_thumbnail, get_thumbnail as _get_thumbnail
-from utils.paths import get_cache_dir as _get_cache_dir, get_db_path as _get_db_path
+from utils.image_io import generate_thumbnail as _generate_thumbnail
+from utils.image_io import get_thumbnail as _get_thumbnail
+from utils.paths import get_cache_dir as _get_cache_dir
+from utils.paths import get_db_path as _get_db_path
 
 
 class DupViewModel(QObject):

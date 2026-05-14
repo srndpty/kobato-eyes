@@ -69,9 +69,7 @@ def test_iter_images_handles_special_path_names(tmp_path: Path) -> None:
         excluded_argument.append(str(excluded) if offset % 2 == 0 else excluded)
 
     missing_root = tmp_path / "does-not-exist"
-    results = set(
-        iter_images([missing_root, tmp_path], excluded=excluded_argument)
-    )
+    results = set(iter_images([missing_root, tmp_path], excluded=excluded_argument))
 
     excluded_resolved = [_resolve(path) for path in excluded_paths]
     expected = set()
@@ -84,11 +82,9 @@ def test_iter_images_handles_special_path_names(tmp_path: Path) -> None:
             continue
         expected.add(resolved_file)
 
-    assert results == expected, (
-        "Iterated files mismatch. "
-        f"Missing: {sorted(expected - results)}; "
-        f"Unexpected: {sorted(results - expected)}"
-    )
+    assert (
+        results == expected
+    ), f"Iterated files mismatch. Missing: {sorted(expected - results)}; Unexpected: {sorted(results - expected)}"
 
 
 def test_iter_images_skips_hidden_components(tmp_path: Path) -> None:
@@ -158,11 +154,7 @@ def test_iter_images_honours_mixed_case_extension_filters(tmp_path: Path) -> Non
             path.write_text("text", encoding="utf-8")
 
     filtered = set(iter_images([tmp_path], extensions=["jpg", "PNG", ".webp"]))
-    expected = {
-        _resolve(tmp_path / name)
-        for name, is_image in files.items()
-        if is_image
-    }
+    expected = {_resolve(tmp_path / name) for name, is_image in files.items() if is_image}
 
     assert filtered == expected, "Mixed-case extension filtering failed."
 

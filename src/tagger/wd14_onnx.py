@@ -223,7 +223,7 @@ class WD14Tagger(ITagger):
         """
 
         if len(output_names) != 1:
-            raise RuntimeError("Expected a single output tensor from WD14 ONNX model, got " f"{output_names}")
+            raise RuntimeError(f"Expected a single output tensor from WD14 ONNX model, got {output_names}")
         return output_names
 
     @staticmethod

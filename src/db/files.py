@@ -38,15 +38,12 @@ def bulk_upsert_files_meta(
                 to_update.append((width, height, sig, ts_float, fid_int))
             else:
                 existing.add(fid_int)
-                to_insert.extend(
-                    (fid_int, f"__bulk__:{fid_int}", width, height, sig, ts_float)
-                )
+                to_insert.extend((fid_int, f"__bulk__:{fid_int}", width, height, sig, ts_float))
 
         if to_insert:
             values = ",".join(["(?, ?, ?, ?, ?, ?)"] * (len(to_insert) // 6))
             conn.execute(
-                "INSERT INTO files (id, path, width, height, tagger_sig, last_tagged_at) "
-                f"VALUES {values}",
+                f"INSERT INTO files (id, path, width, height, tagger_sig, last_tagged_at) VALUES {values}",
                 to_insert,
             )
 
@@ -78,11 +75,7 @@ def bulk_update_files_meta_by_id(
             "WHERE id = ?"
         )
     else:
-        sql = (
-            "UPDATE files "
-            "SET width = ?, height = ?, tagger_sig = ?, last_tagged_at = ? "
-            "WHERE id = ?"
-        )
+        sql = "UPDATE files SET width = ?, height = ?, tagger_sig = ?, last_tagged_at = ? WHERE id = ?"
     with conn:
         conn.executemany(sql, rows)
 

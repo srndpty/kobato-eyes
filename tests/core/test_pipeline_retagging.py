@@ -8,8 +8,8 @@ from pathlib import Path
 import pytest
 from PIL import Image
 
-from core.pipeline import current_tagger_sig, run_index_once
 from core.config import PipelineSettings, TaggerSettings
+from core.pipeline import current_tagger_sig, run_index_once
 from db.connection import get_conn
 from tagger.base import ITagger, TagCategory, TagPrediction, TagResult
 

@@ -29,6 +29,7 @@ if "yaml" not in sys.modules:
 
 
 if "pydantic" not in sys.modules:
+
     def _field(default=None, *, default_factory=None, **_kwargs):
         if default_factory is not None:
             return default_factory()
@@ -82,6 +83,7 @@ if "pydantic" not in sys.modules:
 
 
 if "numpy" not in sys.modules:
+
     class _FakeNdArray(list):
         pass
 

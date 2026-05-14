@@ -44,13 +44,11 @@ if is_headless():
                 return stack[-1]
             return None
 
-
     class QRunnable:
         """Minimal runnable base class compatible with the Qt API."""
 
         def run(self) -> None:  # noqa: D401 - Qt-compatible signature
             raise NotImplementedError
-
 
     class QThreadPool:
         """Thread pool that mimics the Qt API using Python threads."""
@@ -84,7 +82,6 @@ if is_headless():
                 self._threads.clear()
             return finished
 
-
     class QTimer:
         """Provide the static Qt timer helpers needed by JobManager."""
 
@@ -96,7 +93,6 @@ if is_headless():
             timer = threading.Timer(interval_ms / 1000.0, callback)
             timer.daemon = True
             timer.start()
-
 
     class _Signal:
         def __init__(self, owner: QObject) -> None:
@@ -120,7 +116,6 @@ if is_headless():
                 finally:
                     QObject._pop_sender()
 
-
     class _SignalDescriptor:
         def __init__(self) -> None:
             self._name: str | None = None
@@ -138,7 +133,6 @@ if is_headless():
                 signal = _Signal(instance)
                 instance.__dict__[self._name] = signal
             return signal
-
 
     def pyqtSignal(*_args, **_kwargs) -> _SignalDescriptor:  # noqa: D401 - Qt-compatible signature
         return _SignalDescriptor()

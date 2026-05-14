@@ -69,8 +69,7 @@ def test_bulk_upsert_coalesce_width_height(
 
     file_id = 10
     memory_conn.execute(
-        "INSERT INTO files(id, path, width, height, tagger_sig, last_tagged_at) "
-        "VALUES (?, ?, ?, ?, ?, ?)",
+        "INSERT INTO files(id, path, width, height, tagger_sig, last_tagged_at) VALUES (?, ?, ?, ?, ?, ?)",
         (file_id, "C:/images/existing.png", 320, 240, "sig-old", 21.0),
     )
 

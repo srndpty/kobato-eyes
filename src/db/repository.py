@@ -7,16 +7,11 @@ from collections.abc import Iterable, Mapping, Sequence
 from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 from .common import DEFAULT_CATEGORY_THRESHOLDS
-from .common import chunk as _chunk
-from .common import fts_is_contentless as _fts_is_contentless
 from .common import load_tag_thresholds as _load_tag_thresholds
 from .common import normalise_category as _normalise_category
 from .files import bulk_update_files_meta_by_id, bulk_upsert_files_meta
 from .fts import fts_delete_rows, fts_replace_rows
 from .tags import replace_file_tags, replace_file_tags_many, upsert_tags
-
- 
-
 
 # ----------------------------------------
 # files テーブル

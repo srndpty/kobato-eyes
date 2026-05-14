@@ -108,9 +108,7 @@ def test_scanner_honours_ratio_and_cosine_thresholds() -> None:
             embedding=(-0.5, 0.3),
         ),
     ]
-    scanner = DuplicateScanner(
-        DuplicateScanConfig(hamming_threshold=4, size_ratio=0.5, cosine_threshold=0.9)
-    )
+    scanner = DuplicateScanner(DuplicateScanConfig(hamming_threshold=4, size_ratio=0.5, cosine_threshold=0.9))
     clusters = scanner.build_clusters(files)
     assert len(clusters) == 1
     ids = {entry.file.file_id for entry in clusters[0].files}

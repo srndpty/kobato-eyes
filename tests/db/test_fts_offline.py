@@ -168,8 +168,6 @@ def test_truncate_fts_handles_missing_tables(tmp_path: Path) -> None:
     # No FTS5 tables are defined; truncation should simply return.
     _truncate_fts(conn)
 
-    tables = conn.execute(
-        "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
-    ).fetchall()
+    tables = conn.execute("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name").fetchall()
     assert [str(row["name"]) for row in tables] == ["example"]
     conn.close()

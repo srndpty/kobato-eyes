@@ -46,10 +46,10 @@ if "core.pipeline.contracts" not in sys.modules:
         spec.loader.exec_module(contracts_mod)
         pipeline_pkg.contracts = contracts_mod
 
+import services.db_writing as db_writing_module
 from core.pipeline.contracts import DBFlush, DBItem, DBStop
 from db.connection import get_conn
 from db.repository import upsert_file
-import services.db_writing as db_writing_module
 from services.db_writing import DBWritingService
 
 

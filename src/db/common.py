@@ -9,9 +9,7 @@ from typing import Any
 from tagger.base import TagCategory
 from tagger.categories import build_category_lookup
 
-_CATEGORY_KEY_LOOKUP = {
-    key: int(category) for key, category in build_category_lookup().items()
-}
+_CATEGORY_KEY_LOOKUP = {key: int(category) for key, category in build_category_lookup().items()}
 
 _DEFAULT_CATEGORY_THRESHOLDS = {
     TagCategory.GENERAL.value: 0.35,
@@ -92,9 +90,7 @@ def fts_is_contentless(conn: sqlite3.Connection) -> bool:
         return not value
     except sqlite3.Error:
         try:
-            sql_row = conn.execute(
-                "SELECT sql FROM sqlite_master WHERE type='table' AND name='fts_files'"
-            ).fetchone()
+            sql_row = conn.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='fts_files'").fetchone()
         except sqlite3.Error:
             return False
         if not sql_row:

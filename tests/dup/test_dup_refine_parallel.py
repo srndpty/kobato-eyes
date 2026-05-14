@@ -11,12 +11,7 @@ import pytest
 pytest.importorskip("PIL")
 from PIL import Image
 
-from ui.dup_refine_parallel import (
-    refine_by_pixels_parallel,
-    refine_by_tilehash_parallel,
-    tile_ahash_bits,
-    tile_hamming,
-)
+from ui.dup_refine_parallel import refine_by_pixels_parallel, refine_by_tilehash_parallel, tile_ahash_bits, tile_hamming
 
 
 @dataclass
@@ -261,6 +256,7 @@ def test_refine_by_pixels_parallel_logs_failures(tmp_path: Path, caplog: pytest.
     assert any(str(missing_keeper_path) in msg for msg in warning_messages)
     assert any("image load errors" in msg for msg in warning_messages)
     assert any(str(missing_member_path) in msg for msg in warning_messages)
+
 
 def test_refine_by_pixels_parallel_cancelled(tmp_path: Path) -> None:
     base_path = tmp_path / "base.png"

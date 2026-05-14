@@ -12,7 +12,7 @@ from core.pipeline.types import IndexPhase, IndexProgress, PipelineContext, Prog
 from utils.env import safe_int
 
 from ..maintenance import _settle_after_quiesce
-from ..testhooks import TaggingDeps
+from ..testhooks import IDBWriterLike, TaggingDeps
 from .tag_stage import TagStageResult
 
 logger = logging.getLogger(__name__)
@@ -21,17 +21,13 @@ logger = logging.getLogger(__name__)
 class WriteStageDeps(Protocol):
     """Protocol describing dependencies required by :class:`WriteStage`."""
 
-    def build_writer(self, *, ctx: PipelineContext, progress_cb) -> "IDBWriterLike":
-        ...
+    def build_writer(self, *, ctx: PipelineContext, progress_cb) -> "IDBWriterLike": ...
 
-    def begin_quiesce(self) -> None:
-        ...
+    def begin_quiesce(self) -> None: ...
 
-    def end_quiesce(self) -> None:
-        ...
+    def end_quiesce(self) -> None: ...
 
-    def connect(self, db_path: str):
-        ...
+    def connect(self, db_path: str): ...
 
 
 class _DefaultWriteStageDeps:

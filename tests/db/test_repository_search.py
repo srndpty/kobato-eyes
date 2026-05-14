@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-import pytest
-
 import sys
 from pathlib import Path
+
+import pytest
 
 SRC_DIR = Path(__file__).resolve().parents[2] / "src"
 if str(SRC_DIR) not in sys.path:
@@ -35,9 +35,7 @@ def conn():
     connection.close()
 
 
-def _insert_tag(
-    connection, name: str, score: float, file_id: int, *, category: int = 0
-) -> None:
+def _insert_tag(connection, name: str, score: float, file_id: int, *, category: int = 0) -> None:
     cursor = connection.execute(
         "INSERT INTO tags (name, category) VALUES (?, ?) "
         "ON CONFLICT(name) DO UPDATE SET category = excluded.category "
@@ -77,7 +75,7 @@ def test_search_files_returns_expected_record(conn) -> None:
     _insert_tag(conn, "landscape", 0.4, file_b)
 
     where_sql = (
-        "EXISTS (SELECT 1 FROM file_tags ft JOIN tags t ON t.id = ft.tag_id " "WHERE ft.file_id = f.id AND t.name = ?)"
+        "EXISTS (SELECT 1 FROM file_tags ft JOIN tags t ON t.id = ft.tag_id WHERE ft.file_id = f.id AND t.name = ?)"
     )
     results = search_files(conn, where_sql, ["1girl"])
 
@@ -130,8 +128,7 @@ def test_search_files_includes_tag_categories(conn) -> None:
     _insert_tag(conn, "original_character", 0.85, file_id, category=1)
 
     where_sql = (
-        "EXISTS (SELECT 1 FROM file_tags ft JOIN tags t ON t.id = ft.tag_id "
-        "WHERE ft.file_id = f.id AND t.name = ?)"
+        "EXISTS (SELECT 1 FROM file_tags ft JOIN tags t ON t.id = ft.tag_id WHERE ft.file_id = f.id AND t.name = ?)"
     )
     results = search_files(conn, where_sql, ["1girl"])
 

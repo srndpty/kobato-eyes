@@ -50,7 +50,7 @@ def test_category_and_score_filters() -> None:
         "EXISTS (SELECT 1 FROM file_tags ft JOIN tags t ON t.id = ft.tag_id "
         f"WHERE ft.file_id = {ALIAS}.id AND t.category = ?)"
     )
-    score_clause = "EXISTS (SELECT 1 FROM file_tags ft " f"WHERE ft.file_id = {ALIAS}.id AND ft.score > ? )"
+    score_clause = f"EXISTS (SELECT 1 FROM file_tags ft WHERE ft.file_id = {ALIAS}.id AND ft.score > ? )"
     expected = f"({category_clause}) AND ({score_clause})"
     fragment = translate_query("category:character score>0.75", file_alias=ALIAS)
     assert fragment.where == expected

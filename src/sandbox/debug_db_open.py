@@ -18,7 +18,7 @@ t = time.perf_counter()
 
 p("connect() ...")
 conn = sqlite3.connect(str(db), timeout=3.0)
-p(f"connect ok ({time.perf_counter()-t:.2f}s)")
+p(f"connect ok ({time.perf_counter() - t:.2f}s)")
 
 conn.row_factory = sqlite3.Row
 
@@ -27,7 +27,7 @@ def q(sql):
     t0 = time.perf_counter()
     try:
         r = conn.execute(sql).fetchall()
-        p(f"{sql} -> ok ({time.perf_counter()-t0:.2f}s)")
+        p(f"{sql} -> ok ({time.perf_counter() - t0:.2f}s)")
         return r
     except Exception as e:
         p(f"{sql} -> ERROR: {e}")
@@ -48,7 +48,7 @@ t0 = time.perf_counter()
 try:
     conn.execute("BEGIN IMMEDIATE")
     conn.commit()
-    p(f"BEGIN/COMMIT ok ({time.perf_counter()-t0:.2f}s)")
+    p(f"BEGIN/COMMIT ok ({time.perf_counter() - t0:.2f}s)")
 except Exception as e:
     p(f"BEGIN/COMMIT ERROR: {e}")
 
@@ -56,7 +56,7 @@ except Exception as e:
 t0 = time.perf_counter()
 try:
     conn.execute("PRAGMA optimize")
-    p(f"PRAGMA optimize ok ({time.perf_counter()-t0:.2f}s)")
+    p(f"PRAGMA optimize ok ({time.perf_counter() - t0:.2f}s)")
 except Exception as e:
     p(f"PRAGMA optimize ERROR: {e}")
 
@@ -64,7 +64,7 @@ except Exception as e:
 t0 = time.perf_counter()
 try:
     conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-    p(f"wal_checkpoint(TRUNCATE) ok ({time.perf_counter()-t0:.2f}s)")
+    p(f"wal_checkpoint(TRUNCATE) ok ({time.perf_counter() - t0:.2f}s)")
 except Exception as e:
     p(f"wal_checkpoint(TRUNCATE) ERROR: {e}")
 

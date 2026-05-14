@@ -1068,12 +1068,7 @@ class TagsTab(QWidget):
         self._toast_label = QLabel("", self)
         self._toast_label.setObjectName("toastLabel")
         self._toast_label.setStyleSheet(
-            "#toastLabel {"
-            "color: white;"
-            "background-color: rgba(0, 0, 0, 180);"
-            "border-radius: 6px;"
-            "padding: 8px 12px;"
-            "}"
+            "#toastLabel {color: white;background-color: rgba(0, 0, 0, 180);border-radius: 6px;padding: 8px 12px;}"
         )
         self._toast_label.setVisible(False)
         self._toast_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -1526,7 +1521,7 @@ class TagsTab(QWidget):
             )
         else:
             message = (
-                "No scan roots are configured.\n" "Open Settings → Roots and add at least one folder before indexing."
+                "No scan roots are configured.\nOpen Settings → Roots and add at least one folder before indexing."
             )
 
         QMessageBox.warning(self, "Configure scan roots", message)
@@ -1603,7 +1598,7 @@ class TagsTab(QWidget):
         answer = QMessageBox.question(
             self,
             "Retag all files",
-            ("Retagging the entire library may take a long time.\n" "Do you want to continue?"),
+            ("Retagging the entire library may take a long time.\nDo you want to continue?"),
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,
         )
@@ -2378,7 +2373,7 @@ class TagsTab(QWidget):
             self._status_label.setText(f"Indexing complete in {elapsed:.2f}s.")
 
         tagger_name = str(stats.get("tagger_name") or "unknown")
-        message = f"Indexed: {int(stats.get('scanned', 0))} files / " f"Tagged: {int(stats.get('tagged', 0))} / "
+        message = f"Indexed: {int(stats.get('scanned', 0))} files / Tagged: {int(stats.get('tagged', 0))} / "
         retagged = int(stats.get("retagged", 0) or 0)
         requested = int(stats.get("retagged_marked", retagged) or 0)
         if self._retag_active:
