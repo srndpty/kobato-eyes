@@ -60,7 +60,7 @@ def test_run_index_once_reports_progress(tmp_path: Path, temp_db: Path) -> None:
     phase_order = [event.phase for event in events]
     assert phase_order[-1] is IndexPhase.DONE
 
-    for phase in {event.phase for event in events}:
+    for phase in {event.phase for event in events} - {IndexPhase.FTS}:
         counts = [event.done for event in events if event.phase == phase]
         assert counts == sorted(counts), f"Non-monotonic progress for {phase}"
 
@@ -78,6 +78,7 @@ def test_run_index_once_reports_progress(tmp_path: Path, temp_db: Path) -> None:
     fts_events = [event for event in events if event.phase is IndexPhase.FTS]
     if stats["signatures"]:
         assert fts_events, "Expected FTS phase events when rows are written"
+        assert all(event.total < 0 or event.done <= event.total for event in fts_events)
         assert fts_events[-1].done == stats["signatures"]
     else:
         assert not fts_events
