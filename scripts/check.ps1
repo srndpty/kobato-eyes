@@ -21,10 +21,12 @@ $env:PYTHONPATH = "src"
 $env:KOE_HEADLESS = "1"
 
 $ChangedPythonFiles = @(
-    git diff --name-only --diff-filter=ACMRTUXB
-    git diff --cached --name-only --diff-filter=ACMRTUXB
-    git ls-files --others --exclude-standard
-) | Where-Object { $_ -match '\.py$' } | Sort-Object -Unique
+    @(
+        git diff --name-only --diff-filter=ACMRTUXB
+        git diff --cached --name-only --diff-filter=ACMRTUXB
+        git ls-files --others --exclude-standard
+    ) | Where-Object { $_ -match '\.py$' } | Sort-Object -Unique
+)
 
 function Invoke-Step {
     param(
@@ -63,6 +65,10 @@ if ($Fix) {
 
 Invoke-Step "git diff --check" {
     git -c core.whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol diff --check
+}
+
+Invoke-Step "git diff --cached --check" {
+    git -c core.whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol diff --cached --check
 }
 
 if ($ChangedPythonFiles.Count -eq 0) {
