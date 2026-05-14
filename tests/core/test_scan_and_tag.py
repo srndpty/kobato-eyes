@@ -4,7 +4,6 @@ import base64
 import hashlib
 import sys
 from pathlib import Path
-
 from types import SimpleNamespace
 
 import pytest
@@ -95,9 +94,7 @@ def test_scan_and_tag_unsupported_extension_returns_early(temp_env: Path, tmp_pa
     assert stats["elapsed_sec"] >= 0.0
 
 
-def test_scan_and_tag_deduplicates_paths(
-    temp_env: Path, tmp_path: Path, fake_pipeline: dict[str, list]
-) -> None:
+def test_scan_and_tag_deduplicates_paths(temp_env: Path, tmp_path: Path, fake_pipeline: dict[str, list]) -> None:
     root = tmp_path / "library"
     root.mkdir()
     image_path = root / "untagged.png"

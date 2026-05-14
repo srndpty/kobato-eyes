@@ -12,9 +12,9 @@ from PIL import Image
 pytest.importorskip("PyQt6.QtCore", reason="PyQt6 core required", exc_type=ImportError)
 from PyQt6.QtCore import QCoreApplication
 
+from core.config import PipelineSettings
 from core.jobs import JobManager
 from core.pipeline import ProcessingPipeline
-from core.config import PipelineSettings
 from db.connection import get_conn
 from db.schema import apply_schema
 from tagger.base import ITagger, TagCategory, TagPrediction, TagResult
@@ -65,9 +65,7 @@ def _wait_for_completion(manager: JobManager, app: QCoreApplication, timeout: fl
             raise TimeoutError("Jobs did not finish in time")
 
 
-def test_pipeline_processes_paths_without_indexer(
-    tmp_path: Path, qapp: QCoreApplication
-) -> None:
+def test_pipeline_processes_paths_without_indexer(tmp_path: Path, qapp: QCoreApplication) -> None:
     db_path = tmp_path / "kobato.db"
     conn = get_conn(db_path)
     apply_schema(conn)

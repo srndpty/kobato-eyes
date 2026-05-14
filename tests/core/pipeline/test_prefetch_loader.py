@@ -12,7 +12,6 @@ from PIL import Image
 
 from core.pipeline import loaders
 
-
 np = pytest.importorskip("numpy")
 pytest.importorskip("cv2")
 

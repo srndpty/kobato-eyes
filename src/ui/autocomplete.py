@@ -33,9 +33,7 @@ def abbreviate_count(value: object) -> str:
     return str(count)
 
 
-def extract_completion_token(
-    text: str, cursor_position: int | None = None
-) -> tuple[str, int, int]:
+def extract_completion_token(text: str, cursor_position: int | None = None) -> tuple[str, int, int]:
     """Return the token under the cursor and its range."""
 
     if cursor_position is None:
@@ -55,9 +53,7 @@ def extract_completion_token(
     return text[start:end], start, end
 
 
-def replace_completion_token(
-    text: str, start: int, end: int, replacement: str
-) -> tuple[str, int]:
+def replace_completion_token(text: str, start: int, end: int, replacement: str) -> tuple[str, int]:
     """Replace the substring in ``text`` and return the new text and cursor."""
 
     start = max(0, min(start, len(text)))
@@ -76,4 +72,3 @@ def replace_completion_token(
 
 
 __all__ = ["abbreviate_count", "extract_completion_token", "replace_completion_token"]
-

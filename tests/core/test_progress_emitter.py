@@ -103,9 +103,7 @@ def test_emit_disables_callback_after_exception(caplog: pytest.LogCaptureFixture
 
     assert call_count == 1
     assert emitter._cb is None  # type: ignore[attr-defined]
-    assert any(
-        "Progress callback raised" in record.getMessage() for record in caplog.records
-    )
+    assert any("Progress callback raised" in record.getMessage() for record in caplog.records)
 
 
 def test_cancelled_logs_exception(caplog: pytest.LogCaptureFixture) -> None:
@@ -121,7 +119,6 @@ def test_cancelled_logs_exception(caplog: pytest.LogCaptureFixture) -> None:
 
     assert result is False
     assert any(
-        "Cancellation callback failed" in record.getMessage()
-        and record.name == MODULE_NAME
+        "Cancellation callback failed" in record.getMessage() and record.name == MODULE_NAME
         for record in caplog.records
     )

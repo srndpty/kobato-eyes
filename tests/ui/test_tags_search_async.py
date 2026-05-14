@@ -14,9 +14,9 @@ from PyQt6.QtWidgets import QApplication
 
 from core.config import PipelineSettings
 from db.schema import apply_schema
+from tagger.labels_util import TagMeta
 from ui.tags_tab import TagsTab
 from ui.viewmodels import TagsViewModel
-from tagger.labels_util import TagMeta
 
 pytestmark = pytest.mark.gui
 
@@ -142,4 +142,3 @@ def test_typing_does_not_trigger_search(tags_tab: TagsTab, qapp: QApplication) -
     assert _wait_for(lambda: tags_tab._search_worker is None, qapp, timeout=0.5)  # type: ignore[attr-defined]
     assert not tags_tab._search_busy  # type: ignore[attr-defined]
     assert tags_tab._table_model.rowCount() == initial_rows  # type: ignore[attr-defined]
-

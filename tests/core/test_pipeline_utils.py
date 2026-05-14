@@ -53,31 +53,23 @@ def test_format_sig_mapping(mapping: dict[str, float | int], expected: str) -> N
     assert _format_sig_mapping(mapping) == expected
 
 
-def test_normalise_sig_source_and_digest(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_normalise_sig_source_and_digest(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.chdir(tmp_path)
 
     path_value = tmp_path / "as_path" / "file.bin"
     expected_path = str(path_value.resolve())
     assert _normalise_sig_source(path_value) == expected_path
-    assert _digest_identifier(path_value) == hashlib.sha256(
-        expected_path.encode("utf-8")
-    ).hexdigest()
+    assert _digest_identifier(path_value) == hashlib.sha256(expected_path.encode("utf-8")).hexdigest()
 
     relative_value = Path("relative") / "file.dat"
     expected_relative = str((tmp_path / relative_value).resolve())
     assert _normalise_sig_source(str(relative_value)) == expected_relative
-    assert _digest_identifier(str(relative_value)) == hashlib.sha256(
-        expected_relative.encode("utf-8")
-    ).hexdigest()
+    assert _digest_identifier(str(relative_value)) == hashlib.sha256(expected_relative.encode("utf-8")).hexdigest()
 
     numeric_value = 123
     expected_numeric = str((tmp_path / str(numeric_value)).resolve())
     assert _normalise_sig_source(numeric_value) == expected_numeric
-    assert _digest_identifier(numeric_value) == hashlib.sha256(
-        expected_numeric.encode("utf-8")
-    ).hexdigest()
+    assert _digest_identifier(numeric_value) == hashlib.sha256(expected_numeric.encode("utf-8")).hexdigest()
 
     assert _normalise_sig_source(None) is None
     assert _digest_identifier(None) == "none"

@@ -10,9 +10,7 @@ from core.config import AppPaths
 from utils import paths
 
 
-def test_migrate_data_dir_moves_legacy_contents(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_migrate_data_dir_moves_legacy_contents(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Ensure legacy data directories are migrated without overwriting files."""
 
     legacy_dir = tmp_path / "KobatoEyes"

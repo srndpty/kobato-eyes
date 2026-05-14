@@ -102,9 +102,7 @@ def test_fts_is_contentless_detects_contentless_table(memory_conn: sqlite3.Conne
     """The helper should detect FTS tables created with ``content=''``."""
 
     memory_conn.execute("DROP TABLE IF EXISTS fts_files")
-    memory_conn.execute(
-        "CREATE VIRTUAL TABLE fts_files USING fts5(text, content='', tokenize='unicode61')"
-    )
+    memory_conn.execute("CREATE VIRTUAL TABLE fts_files USING fts5(text, content='', tokenize='unicode61')")
 
     assert fts_is_contentless(memory_conn) is True
 

@@ -79,7 +79,6 @@ def test_core_layers_do_not_depend_on_ui() -> None:
             if ui_deps:
                 offenders[scope].add(f"{module}: {sorted(ui_deps)}")
 
-    assert not offenders, (
-        "ui layer must not be imported from core or tests/core: "
-        + "; ".join(f"{scope} -> {sorted(dep)}" for scope, dep in offenders.items())
+    assert not offenders, "ui layer must not be imported from core or tests/core: " + "; ".join(
+        f"{scope} -> {sorted(dep)}" for scope, dep in offenders.items()
     )

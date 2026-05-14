@@ -37,10 +37,7 @@ def _fetch_tagging_state(db_path: Path) -> dict[str, tuple[str | None, float | N
         rows = conn.execute(
             "SELECT path, tagger_sig, last_tagged_at FROM files ORDER BY path",
         ).fetchall()
-        return {
-            str(row["path"]): (row["tagger_sig"], row["last_tagged_at"])
-            for row in rows
-        }
+        return {str(row["path"]): (row["tagger_sig"], row["last_tagged_at"]) for row in rows}
     finally:
         conn.close()
 
@@ -111,4 +108,3 @@ def test_retag_all_force_updates_all_rows(tmp_path: Path) -> None:
         "match_three": (None, None),
         "match_two": (None, None),
     }
-

@@ -21,7 +21,7 @@ def test_load_selected_tags_two_columns(tmp_path: Path) -> None:
 def test_load_selected_tags_four_columns(tmp_path: Path) -> None:
     csv_path = tmp_path / "selected_tags_four.csv"
     csv_path.write_text(
-        "id,tag_id,name,category,count,ips\n" "1,1,solo,0,1000,[]\n" "2,2,artist:name,4,50,[]\n",
+        "id,tag_id,name,category,count,ips\n1,1,solo,0,1000,[]\n2,2,artist:name,4,50,[]\n",
         encoding="utf-8",
     )
     tags = load_selected_tags(csv_path)

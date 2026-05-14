@@ -46,7 +46,7 @@ class PixaiOnnxTagger(WD14Tagger):
         if len(output_names) == 1:
             return output_names
 
-        raise RuntimeError("PixAI: unable to determine prediction tensor from outputs " f"{output_names}")
+        raise RuntimeError(f"PixAI: unable to determine prediction tensor from outputs {output_names}")
 
     def __init__(
         self,

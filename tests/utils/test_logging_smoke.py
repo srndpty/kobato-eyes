@@ -53,4 +53,3 @@ def test_setup_logging_creates_rotating_file(tmp_path, monkeypatch) -> None:
     contents = log_path.read_text(encoding="utf-8")
     assert message in contents
     assert log_path.stat().st_size > 0
-

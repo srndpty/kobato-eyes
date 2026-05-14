@@ -290,7 +290,7 @@ class SettingsTab(QWidget):
             QMessageBox.critical(
                 self,
                 "Reset failed",
-                ("Database reset failed. Ensure no other process is accessing the database.\n" f"Details: {exc}"),
+                (f"Database reset failed. Ensure no other process is accessing the database.\nDetails: {exc}"),
             )
             return
 

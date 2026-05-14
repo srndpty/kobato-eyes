@@ -12,7 +12,7 @@ pytest.importorskip("PyQt6.QtCore", reason="PyQt6 core required", exc_type=Impor
 from PyQt6.QtCore import QCoreApplication, Qt
 
 from db.schema import apply_schema
-from ui.tag_stats import _TagStatsModel, _load_thresholds
+from ui.tag_stats import _load_thresholds, _TagStatsModel
 
 pytestmark = pytest.mark.gui
 

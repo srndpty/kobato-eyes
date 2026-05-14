@@ -359,8 +359,7 @@ def test_write_tagging_batch_updates_related_tables(
     assert count == 2
 
     first_row = conn.execute(
-        "SELECT size, mtime, sha256, width, height, tagger_sig, last_tagged_at, is_present"
-        " FROM files WHERE id = ?",
+        "SELECT size, mtime, sha256, width, height, tagger_sig, last_tagged_at, is_present FROM files WHERE id = ?",
         (files["first"],),
     ).fetchone()
     assert first_row is not None
@@ -374,8 +373,7 @@ def test_write_tagging_batch_updates_related_tables(
     assert first_row["is_present"] == 1
 
     second_row = conn.execute(
-        "SELECT size, mtime, sha256, width, height, tagger_sig, last_tagged_at, is_present"
-        " FROM files WHERE id = ?",
+        "SELECT size, mtime, sha256, width, height, tagger_sig, last_tagged_at, is_present FROM files WHERE id = ?",
         (files["second"],),
     ).fetchone()
     assert second_row is not None

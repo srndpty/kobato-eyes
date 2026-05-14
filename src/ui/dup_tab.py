@@ -1259,7 +1259,7 @@ class DupTab(QWidget):
             it = QTreeWidgetItem([""])
             it.setData(0, Qt.ItemDataRole.UserRole, cl)
             # テキストだけ先に入れる（bar は遅延で）
-            it.setText(0, f"Group #{i+1} ({len(cl.files)} items)")
+            it.setText(0, f"Group #{i + 1} ({len(cl.files)} items)")
             ph = QTreeWidgetItem(["(expand to load)"])
             ph.setData(0, Qt.ItemDataRole.UserRole, "__placeholder__")
             it.addChild(ph)

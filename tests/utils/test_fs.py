@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
+import ctypes
 from pathlib import Path
 from types import SimpleNamespace
 
-import ctypes
 import pytest
 
 from utils import fs
@@ -52,7 +52,9 @@ def test_from_system_path_strips_prefix_on_windows(monkeypatch: pytest.MonkeyPat
     assert result == target
 
 
-def test_from_system_path_returns_path_unchanged_when_not_prefixed(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_from_system_path_returns_path_unchanged_when_not_prefixed(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     monkeypatch.setattr(fs, "WINDOWS", True)
     target = tmp_path / "regular.txt"
 

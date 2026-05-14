@@ -6,12 +6,7 @@ from core.config import PipelineSettings
 from tagger.base import TagCategory
 from tagger.categories import build_category_lookup
 
-from .utils import (
-    _digest_identifier,
-    _format_sig_mapping,
-    _normalise_sig_source,
-    detect_tagger_provider,
-)
+from .utils import _digest_identifier, _format_sig_mapping, _normalise_sig_source, detect_tagger_provider
 
 # 外部から使う：_build_threshold_map / _build_max_tags_map / current_tagger_sig
 
@@ -64,10 +59,7 @@ def current_tagger_sig(
     csv_digest = _digest_identifier(_normalise_sig_source(tags_csv))
     thresholds_part = _format_sig_mapping(serialised_thresholds)
     max_tags_part = _format_sig_mapping(serialised_max_tags)
-    return (
-        f"{tagger_name}:{provider}:{model_digest}:"
-        f"csv={csv_digest}:thr={thresholds_part}:max={max_tags_part}"
-    )
+    return f"{tagger_name}:{provider}:{model_digest}:csv={csv_digest}:thr={thresholds_part}:max={max_tags_part}"
 
 
 __all__ = [
