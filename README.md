@@ -74,7 +74,7 @@ src/
 ## 前提条件
 
 - Windows 10 以降を想定 (開発環境は他 OS でも可)
-- Python 3.10 以上
+- Python 3.10.x（3.11 以降への広範囲対応は将来対応）
 - CUDA 対応 GPU (onnxruntime-gpu 使用時。CPU 版に差し替える場合は `onnxruntime` を利用)
 - Visual C++ 再頒布可能パッケージ / GPU ドライバ等の依存関係
 
@@ -85,6 +85,7 @@ git clone https://github.com/srndpty/kobato-eyes.git
 cd kobato-eyes
 python -m venv .venv
 .venv\Scripts\activate
+python --version  # Python 3.10.x であることを確認
 python -m pip install --upgrade pip
 pip install -e .[dev]
 pre-commit install
@@ -123,14 +124,25 @@ CI などで GUI を起動しない場合は、環境変数 `KOE_HEADLESS=1` を
 - 将来的にベクトル近傍探索を格納するための `index/` ディレクトリを用意しています。
 - ログは `%APPDATA%\kobato-eyes\logs\app.log` にローテーション出力されます。
 
-## テスト
+## テスト / CI
 
-- ヘッドレスでユニットテスト: `KOE_HEADLESS=1 PYTHONPATH=src pytest`
-- GUI / 統合テストを含めて実行: `PYTHONPATH=src pytest -m "gui or integration"`
+- CI は GitHub Actions 上の Windows + Python 3.10 で実行します。
+- ヘッドレスでユニットテスト:
+  ```powershell
+  $env:PYTHONPATH="src"
+  $env:QT_QPA_PLATFORM="offscreen"
+  pytest
+  ```
+- GUI / 統合テストを含めて実行:
+  ```powershell
+  $env:PYTHONPATH="src"
+  pytest -m "gui or integration"
+  ```
+- pre-commit と CI の整形差分を避けるため、Ruff は `pyproject.toml` と `.pre-commit-config.yaml` のバージョン・ターゲットを揃えています。
 
 ## パッケージング
 
-1. 開発依存をインストール: `pip install -e .[dev]`
+1. Python 3.10.x の環境で開発依存をインストール: `pip install -e .[dev]`
 2. Windows バイナリを生成: `pyinstaller tools/kobato-eyes.spec`
 3. `dist/kobato-eyes/` に成果物が出力されます
 4. 実行前に `onnxruntime-gpu` とモデルファイルを同梱してください

@@ -294,6 +294,6 @@ def test_iter_images_property_based(entries: list[FileEntry], extensions: list[s
 
         missing = expected - results
         unexpected = results - expected
-        assert (
-            not missing and not unexpected
-        ), f"Property mismatch. Missing: {sorted(missing)}; Unexpected: {sorted(unexpected)}"
+        assert not missing and not unexpected, (
+            f"Property mismatch. Missing: {sorted(missing)}; Unexpected: {sorted(unexpected)}"
+        )
