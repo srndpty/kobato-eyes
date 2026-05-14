@@ -103,6 +103,7 @@ omit = [
 
 [tool.mypy]
 python_version = "3.10"
+platform = "win32"
 ignore_missing_imports = true
 follow_imports = "silent"
 show_error_codes = true
