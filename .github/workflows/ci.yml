@@ -50,5 +50,7 @@ jobs:
       - name: Ruff format check
         run: python -m ruff format --check .
 
-      - name: Pytest
-        run: python -m pytest
+      - name: Pytest with coverage
+        run: |
+          python -m coverage run -m pytest -p no:cov
+          python -m coverage report
