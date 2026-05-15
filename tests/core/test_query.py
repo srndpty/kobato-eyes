@@ -77,6 +77,32 @@ def test_tag_with_parentheses_is_single_token() -> None:
     assert fragment.params == ["mallow_(pokemon)"]
 
 
+@pytest.mark.parametrize(
+    "tag",
+    [
+        'don\'t_say_"lazy"',
+        "!?",
+        "tag",
+        "cute_&_girly_(idolmaster)",
+        "=_=",
+        "^^^",
+        "<|>_<|>",
+        "@_@",
+        ";)",
+        ">:)",
+        "st._gloriana's_military_uniform",
+        r"double_\m/",
+        "kaguya-sama_wa_kokurasetai_~tensai-tachi_no_renai_zunousen~",
+        "otome_game_no_hametsu_flag_shika_nai_akuyaku_reijou_ni_tensei_shite_shimatta",
+    ],
+)
+def test_special_character_tags_are_single_tokens(tag: str) -> None:
+    clause = expected_tag_exists()
+    fragment = translate_query(tag, file_alias=ALIAS)
+    assert fragment.where == clause
+    assert fragment.params == [tag]
+
+
 def test_tag_with_colons_is_treated_as_tag() -> None:
     clause = expected_tag_exists()
     fragment = translate_query("artist:name:with:colon", file_alias=ALIAS)
