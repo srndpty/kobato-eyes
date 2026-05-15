@@ -89,7 +89,26 @@ _CATEGORY_ALIASES = {
 _SCORE_RE = re.compile(r"score\s*(>=|<=|=|>|<)\s*([0-9]*\.?[0-9]+)", re.IGNORECASE)
 
 
-def _split_parens_safely(raw: str, group_depth: int) -> tuple[list[str], int]:
+def _has_unescaped_rparen(text: str, start: int = 0) -> bool:
+    """Return whether ``text`` contains a non-escaped right parenthesis."""
+
+    i = max(0, start)
+    while i < len(text):
+        if text[i] == "\\" and i + 1 < len(text) and text[i + 1] in "()":
+            i += 2
+            continue
+        if text[i] == ")":
+            return True
+        i += 1
+    return False
+
+
+def _split_parens_safely(
+    raw: str,
+    group_depth: int,
+    *,
+    has_future_rparen: bool,
+) -> tuple[list[str], int]:
     """Split parentheses tokens while keeping tag-like strings intact."""
 
     if "(" in raw and ")" in raw and not any(char.isspace() for char in raw):
@@ -105,7 +124,8 @@ def _split_parens_safely(raw: str, group_depth: int) -> tuple[list[str], int]:
             buffer.append(raw[i + 1])
             i += 2
             continue
-        if char == "(":
+        opens_group = char == "(" and (raw == "(" or _has_unescaped_rparen(raw, i + 1) or has_future_rparen)
+        if opens_group:
             if buffer:
                 tokens.append("".join(buffer))
                 buffer = []
@@ -140,8 +160,13 @@ def _tokenize(query: str) -> list[_Token]:
     raw_tokens = _split_words(query)
     tokens: list[_Token] = []
     group_depth = 0
-    for raw_token in raw_tokens:
-        split_tokens, group_depth = _split_parens_safely(raw_token, group_depth)
+    for index, raw_token in enumerate(raw_tokens):
+        has_future_rparen = any(_has_unescaped_rparen(token) for token in raw_tokens[index + 1 :])
+        split_tokens, group_depth = _split_parens_safely(
+            raw_token,
+            group_depth,
+            has_future_rparen=has_future_rparen,
+        )
         for raw in split_tokens:
             upper = raw.upper()
             if raw == "(":
