@@ -35,3 +35,12 @@
 
 ## 開発環境に関する注意
 - `PYTHONPATH=src` を前提にしています
+
+## テスト方針
+- 通常の高速確認は `.\scripts\check.ps1` を使う。このスクリプトは `KOE_HEADLESS=1` を設定し、GUI / integration / db_stress を除外するため、開発速度を優先した標準チェックである。
+- PyQt6実backend、`core.jobs`、QThread/QRunnable、pipeline、DB bootstrap、GUI/integrationテストに関わる変更では、返答の最後に以下のCI再現コマンドを明記し、可能なら実行する。
+  - `.\scripts\check-integration.ps1`
+  - 直接実行する場合: `Remove-Item Env:KOE_HEADLESS -ErrorAction SilentlyContinue; $env:PYTHONPATH = "src"; .\.venv\Scripts\python.exe -m pytest -m "integration and not gpu" -p no:cov`
+- SQLiteロック、WAL、並行DB書き込み、checkpoint、quiesceに関わる変更では、必要に応じて `.\scripts\check-db-stress.ps1` を案内または実行する。
+- GPU / ONNX Runtime CUDA / open_clip / 推論backendに関わる変更では、RTX4090搭載PCであれば `.\scripts\check-gpu.ps1` を案内または実行する。ただしGPU確認は環境依存なので通常チェックや必須確認には混ぜない。
+- 返答では、実際に実行したチェックと、未実行だが変更内容から推奨される追加チェックを分けて書く。
