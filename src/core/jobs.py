@@ -65,8 +65,8 @@ if is_headless():
 
         def start(self, runnable: QRunnable) -> None:
             thread = threading.Thread(target=runnable.run, daemon=True)
-            self._threads.append(thread)
             thread.start()
+            self._threads.append(thread)
 
         def waitForDone(self, timeout_ms: int = -1) -> bool:
             deadline = None
@@ -87,10 +87,8 @@ if is_headless():
 
         @staticmethod
         def singleShot(interval_ms: int, callback: Callable[[], None]) -> None:
-            if interval_ms <= 0:
-                callback()
-                return
-            timer = threading.Timer(interval_ms / 1000.0, callback)
+            delay = max(0.001, interval_ms / 1000.0)
+            timer = threading.Timer(delay, callback)
             timer.daemon = True
             timer.start()
 
@@ -278,6 +276,20 @@ class JobManager(QObject):
 
     def wait_for_done(self, timeout_ms: int = -1) -> bool:
         """Block until all jobs complete or ``timeout_ms`` elapses."""
+        if is_headless():
+            deadline = None if timeout_ms < 0 else time.monotonic() + (timeout_ms / 1000.0)
+            while self.has_pending_jobs():
+                if deadline is None:
+                    slice_ms = 100
+                else:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        return False
+                    slice_ms = max(1, min(100, int(remaining * 1000)))
+                self._pool.waitForDone(slice_ms)
+                if self.has_pending_jobs():
+                    time.sleep(0.001)
+            return self._pool.waitForDone(0)
         return self._pool.waitForDone(timeout_ms)
 
     def shutdown(self, timeout_ms: int = -1) -> bool:
@@ -313,7 +325,7 @@ class JobManager(QObject):
         self._active_signals.discard(signals)
         signals.deleteLater()
         self._running = max(0, self._running - 1)
-        self._start_available_jobs()
+        self._request_schedule()
 
 
 __all__ = [

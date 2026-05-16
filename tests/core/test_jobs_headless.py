@@ -160,3 +160,173 @@ def test_headless_job_manager_emits_cancelled_after_load_cancel(headless_jobs) -
     assert finished == [None]
     assert job.wrote is False
     assert job.cleaned is True
+
+
+def test_headless_job_manager_completes_empty_job(headless_jobs) -> None:
+    class _EmptyJob(headless_jobs.BatchJob):
+        def __init__(self, start_event: threading.Event) -> None:
+            super().__init__([])
+            self._start_event = start_event
+            self.cleaned = False
+
+        def prepare(self) -> None:
+            assert self._start_event.wait(2.0)
+
+        def finalize(self) -> str:
+            return "empty-complete"
+
+        def cleanup(self) -> None:
+            self.cleaned = True
+
+    manager = headless_jobs.JobManager(max_workers=1)
+    start_event = threading.Event()
+    job = _EmptyJob(start_event)
+    signals = manager.submit(job)
+    completions: list[str] = []
+    progress: list[tuple[int, int]] = []
+    finished: list[None] = []
+
+    signals.completed.connect(completions.append)
+    signals.progress.connect(lambda done, total: progress.append((done, total)))
+    signals.finished.connect(lambda: finished.append(None))
+
+    start_event.set()
+    assert manager.shutdown(2000)
+    _wait_until(lambda: bool(finished))
+
+    assert completions == ["empty-complete"]
+    assert progress == []
+    assert job.cleaned is True
+
+
+def test_headless_job_manager_emits_cancelled_after_prepare_cancel(headless_jobs) -> None:
+    class _CancelInPrepareJob(headless_jobs.BatchJob):
+        def __init__(self, start_event: threading.Event) -> None:
+            super().__init__([1])
+            self._start_event = start_event
+            self.processed = False
+
+        def prepare(self) -> None:
+            assert self._start_event.wait(2.0)
+            self.cancel()
+
+        def process_item(self, item: int, loaded: int) -> int:
+            self.processed = True
+            return item
+
+    manager = headless_jobs.JobManager(max_workers=1)
+    start_event = threading.Event()
+    job = _CancelInPrepareJob(start_event)
+    signals = manager.submit(job)
+    cancellations: list[None] = []
+    finished: list[None] = []
+
+    signals.cancelled.connect(lambda: cancellations.append(None))
+    signals.finished.connect(lambda: finished.append(None))
+
+    start_event.set()
+    assert manager.wait_for_done(2000)
+    _wait_until(lambda: bool(finished))
+
+    assert cancellations == [None]
+    assert job.processed is False
+
+
+def test_headless_job_manager_emits_cancelled_after_process_cancel(headless_jobs) -> None:
+    class _CancelAfterProcessJob(headless_jobs.BatchJob):
+        def __init__(self, start_event: threading.Event) -> None:
+            super().__init__([1])
+            self._start_event = start_event
+            self.wrote = False
+
+        def prepare(self) -> None:
+            assert self._start_event.wait(2.0)
+
+        def process_item(self, item: int, loaded: int) -> int:
+            self.cancel()
+            return loaded
+
+        def write_item(self, item: int, processed: int) -> None:
+            self.wrote = True
+
+    manager = headless_jobs.JobManager(max_workers=1)
+    start_event = threading.Event()
+    job = _CancelAfterProcessJob(start_event)
+    signals = manager.submit(job)
+    cancellations: list[None] = []
+    finished: list[None] = []
+
+    signals.cancelled.connect(lambda: cancellations.append(None))
+    signals.finished.connect(lambda: finished.append(None))
+
+    start_event.set()
+    assert manager.wait_for_done(2000)
+    _wait_until(lambda: bool(finished))
+
+    assert cancellations == [None]
+    assert job.wrote is False
+
+
+def test_headless_job_manager_drains_pending_jobs_by_priority(headless_jobs) -> None:
+    class _OrderedJob(headless_jobs.BatchJob):
+        def __init__(self, name: str, order: list[str], gate: threading.Event | None = None) -> None:
+            super().__init__([name])
+            self._name = name
+            self._order = order
+            self._gate = gate
+
+        def prepare(self) -> None:
+            if self._gate is not None:
+                assert self._gate.wait(2.0)
+
+        def process_item(self, item: str, loaded: str) -> str:
+            self._order.append(self._name)
+            return loaded
+
+    manager = headless_jobs.JobManager(max_workers=1)
+    order: list[str] = []
+    gate = threading.Event()
+
+    first = manager.submit(_OrderedJob("first", order, gate), priority=headless_jobs.JobPriority.FOREGROUND)
+    background = manager.submit(_OrderedJob("background", order), priority=headless_jobs.JobPriority.BACKGROUND)
+    foreground = manager.submit(_OrderedJob("foreground", order), priority=headless_jobs.JobPriority.FOREGROUND)
+    finished: list[str] = []
+
+    first.finished.connect(lambda: finished.append("first"))
+    background.finished.connect(lambda: finished.append("background"))
+    foreground.finished.connect(lambda: finished.append("foreground"))
+
+    _wait_until(lambda: manager.has_pending_jobs())
+    gate.set()
+    assert manager.wait_for_done(2000)
+    _wait_until(lambda: len(finished) == 3)
+
+    assert order == ["first", "foreground", "background"]
+    assert finished == ["first", "foreground", "background"]
+    assert not manager.has_pending_jobs()
+
+
+def test_headless_job_signal_sender_and_cleanup_state(headless_jobs) -> None:
+    class _OneItemJob(headless_jobs.BatchJob):
+        def __init__(self, start_event: threading.Event) -> None:
+            super().__init__([1])
+            self._start_event = start_event
+
+        def prepare(self) -> None:
+            assert self._start_event.wait(2.0)
+
+    manager = headless_jobs.JobManager(max_workers=1)
+    start_event = threading.Event()
+    signals = manager.submit(_OneItemJob(start_event))
+    senders: list[object | None] = []
+    finished: list[None] = []
+
+    signals.finished.connect(lambda: (senders.append(signals.sender()), finished.append(None)))
+
+    start_event.set()
+    assert manager.wait_for_done(2000)
+    _wait_until(lambda: bool(finished))
+
+    assert senders == [signals]
+    assert signals not in manager._active_signals
+    assert signals not in manager._signal_to_runnable
