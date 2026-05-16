@@ -111,7 +111,7 @@ def _split_parens_safely(
 ) -> tuple[list[str], int]:
     """Split parentheses tokens while keeping tag-like strings intact."""
 
-    if "(" in raw and ")" in raw and not any(char.isspace() for char in raw):
+    if "(" in raw and ")" in raw and not raw.startswith("-(") and not any(char.isspace() for char in raw):
         return [raw], group_depth
 
     tokens: list[str] = []
@@ -168,11 +168,16 @@ def _tokenize(query: str) -> list[_Token]:
             has_future_rparen=has_future_rparen,
         )
         for raw in split_tokens:
+            if raw.startswith("-") and len(raw) > 1:
+                tokens.append(_Token(_TokenKind.NOT, "-"))
+                raw = raw[1:]
             upper = raw.upper()
             if raw == "(":
                 tokens.append(_Token(_TokenKind.LPAREN, raw))
             elif raw == ")":
                 tokens.append(_Token(_TokenKind.RPAREN, raw))
+            elif raw == "-":
+                tokens.append(_Token(_TokenKind.NOT, raw))
             elif upper == "AND":
                 tokens.append(_Token(_TokenKind.AND, raw))
             elif upper == "OR":

@@ -10,6 +10,7 @@ from unittest import mock
 import pytest
 
 pytest.importorskip("PyQt6.QtWidgets", reason="PyQt6 widgets required", exc_type=ImportError)
+from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import QApplication
 
 from core.config import PipelineSettings
@@ -142,3 +143,27 @@ def test_typing_does_not_trigger_search(tags_tab: TagsTab, qapp: QApplication) -
     assert _wait_for(lambda: tags_tab._search_worker is None, qapp, timeout=0.5)  # type: ignore[attr-defined]
     assert not tags_tab._search_busy  # type: ignore[attr-defined]
     assert tags_tab._table_model.rowCount() == initial_rows  # type: ignore[attr-defined]
+
+
+def test_negative_autocomplete_displays_hyphen(tags_tab: TagsTab, qapp: QApplication) -> None:
+    _await_idle(tags_tab, qapp)
+    tags_tab._completion_candidates = [TagMeta(name="tag0", category=0, count=1234)]  # type: ignore[attr-defined]
+    tags_tab._query_edit.setText("-ta")  # type: ignore[attr-defined]
+    tags_tab._query_edit.setCursorPosition(3)  # type: ignore[attr-defined]
+    tags_tab._refresh_completions()  # type: ignore[attr-defined]
+
+    index = tags_tab._tag_model.index(0, 0)  # type: ignore[attr-defined]
+    assert index.data(Qt.ItemDataRole.DisplayRole) == "-tag0 (1.23k)"
+    assert index.data(int(tags_tab._tag_model.NAME_ROLE)) == "tag0"  # type: ignore[attr-defined]
+
+
+def test_logical_operators_are_not_autocomplete_candidates(tags_tab: TagsTab, qapp: QApplication) -> None:
+    _await_idle(tags_tab, qapp)
+    names = {tag.name for tag in tags_tab._completion_candidates}  # type: ignore[attr-defined]
+    assert {"AND", "OR", "NOT"}.isdisjoint(names)
+
+    tags_tab._query_edit.setText("-an")  # type: ignore[attr-defined]
+    tags_tab._query_edit.setCursorPosition(3)  # type: ignore[attr-defined]
+    tags_tab._refresh_completions()  # type: ignore[attr-defined]
+
+    assert tags_tab._tag_model.rowCount() == 0  # type: ignore[attr-defined]
