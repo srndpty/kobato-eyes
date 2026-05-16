@@ -5,6 +5,8 @@ from __future__ import annotations
 from pathlib import Path
 
 import ui.search_worker as search_worker
+from db.fts import fts_replace_rows
+from db.schema import apply_schema
 from ui.search_worker import SearchWorker
 
 
@@ -362,3 +364,43 @@ def test_search_worker_cancel_sets_progress_handler() -> None:
     assert worker._progress_handler() == 0
     worker.cancel()
     assert worker._progress_handler() == 1
+
+
+def test_search_worker_reads_rebuilt_fts_with_offset_and_max_rows(tmp_path: Path) -> None:
+    db_path = tmp_path / "search-rebuilt.db"
+    conn = search_worker.sqlite3.connect(db_path)
+    conn.row_factory = search_worker.sqlite3.Row
+    try:
+        apply_schema(conn)
+        file_ids: list[int] = []
+        for idx in range(4):
+            cursor = conn.execute(
+                "INSERT INTO files(path, size, mtime, is_present) VALUES (?, ?, ?, 1)",
+                (f"C:/images/{idx}.png", 100 + idx, float(idx)),
+            )
+            file_ids.append(int(cursor.lastrowid))
+        fts_replace_rows(conn, [(file_id, "tag_alpha") for file_id in file_ids])
+        conn.commit()
+    finally:
+        conn.close()
+
+    worker = SearchWorker(
+        db_path,
+        "f.id IN (SELECT rowid FROM fts_files WHERE fts_files MATCH ?)",
+        ["tag_alpha"],
+        chunk=1,
+        offset=1,
+        max_rows=2,
+    )
+    chunks: list[list[dict[str, object]]] = []
+    finished: list[tuple[bool, bool]] = []
+    worker.chunkReady.connect(chunks.append)
+    worker.finished.connect(lambda ok, cancelled: finished.append((ok, cancelled)))
+
+    worker.run()
+
+    assert [[row["path"] for row in chunk] for chunk in chunks] == [
+        ["C:/images/2.png"],
+        ["C:/images/1.png"],
+    ]
+    assert finished == [(True, False)]

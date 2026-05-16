@@ -147,7 +147,9 @@ class WriteStage:
                     written += 1
 
                 writer.stop(flush=True, wait_forever=True)
+                stopped_writer = writer
                 writer = None
+                stopped_writer.raise_if_failed()
             try:
                 _settle_after_quiesce(str(ctx.db_path))
             except Exception:

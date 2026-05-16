@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib.util
 import queue
+import sqlite3
 import sys
 import threading
 import time
@@ -49,6 +50,7 @@ if "core.pipeline.contracts" not in sys.modules:
 import services.db_writing as db_writing_module
 from core.pipeline.contracts import DBFlush, DBItem, DBStop
 from db.connection import get_conn
+from db.fts_offline import rebuild_fts_offline
 from db.repository import upsert_file
 from services.db_writing import DBWritingService
 
@@ -265,6 +267,77 @@ def test_flush_batch_skips_fts_when_topk_is_zero(tmp_path: Path) -> None:
         assert count == 0
     finally:
         conn.close()
+
+
+def test_skip_fts_write_becomes_searchable_after_offline_rebuild(tmp_path: Path) -> None:
+    db_path = tmp_path / "skipfts-rebuild.db"
+    file_id = _prepare_db(str(db_path), "C:/images/skipfts-rebuild.png")
+
+    service = DBWritingService(str(db_path), flush_chunk=2, skip_fts=True)
+    conn = service._open_connection()
+    try:
+        service._apply_pragmas(conn)
+        service._flush_batch(
+            conn,
+            [
+                DBItem(
+                    file_id,
+                    [("tag_alpha", 0.9, 0), ("tag_beta", 0.8, 0)],
+                    64,
+                    48,
+                    "sig:v1",
+                    1234.5,
+                )
+            ],
+        )
+        assert conn.execute("SELECT COUNT(*) FROM fts_files").fetchone()[0] == 0
+    finally:
+        conn.close()
+
+    rebuilt = rebuild_fts_offline(str(db_path), topk=2)
+
+    conn = get_conn(str(db_path))
+    try:
+        rows = conn.execute(
+            """
+            SELECT f.path
+            FROM fts_files AS fts
+            JOIN files AS f ON f.id = fts.rowid
+            WHERE fts_files MATCH ?
+            """,
+            ("tag_alpha",),
+        ).fetchall()
+    finally:
+        conn.close()
+
+    assert rebuilt == 1
+    assert [row["path"] for row in rows] == ["C:/images/skipfts-rebuild.png"]
+
+
+def test_worker_failure_is_rejected_by_public_api(monkeypatch: pytest.MonkeyPatch) -> None:
+    started = threading.Event()
+
+    def fail_open_connection(self: DBWritingService) -> sqlite3.Connection:
+        started.set()
+        raise RuntimeError("database writer cannot start")
+
+    monkeypatch.setattr(DBWritingService, "_open_connection", fail_open_connection)
+
+    service = DBWritingService("ignored.db")
+    service.start()
+    assert started.wait(1.0)
+
+    for _ in range(100):
+        if service._stop_evt.is_set():
+            break
+        time.sleep(0.01)
+    else:
+        pytest.fail("DBWritingService did not record startup failure")
+
+    with pytest.raises(RuntimeError, match="database writer cannot start"):
+        service.raise_if_failed()
+    with pytest.raises(RuntimeError, match="database writer cannot start"):
+        service.put(DBItem(1, [("tag", 0.5, 0)], None, None, None, None))
 
 
 @pytest.mark.db_stress
