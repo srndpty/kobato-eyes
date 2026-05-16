@@ -5,10 +5,12 @@ from __future__ import annotations
 import sqlite3
 from collections.abc import Sequence
 
+FileMetaRow = tuple[int, int | None, int | None, str | None, float]
+
 
 def bulk_upsert_files_meta(
     conn: sqlite3.Connection,
-    rows: Sequence[tuple[int, object, object, str, float]],
+    rows: Sequence[FileMetaRow],
     *,
     coalesce_wh: bool = True,
     chunk: int = 400,

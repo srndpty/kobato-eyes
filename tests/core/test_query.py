@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import pytest
+from hypothesis import given
+from hypothesis import strategies as st
 
 from core.query import QueryFragment, translate_query
 from tagger.base import TagCategory
@@ -144,3 +146,28 @@ def test_invalid_trailing_token_raises() -> None:
 def test_empty_query_returns_trivial_fragment() -> None:
     fragment = translate_query("", file_alias=ALIAS)
     assert fragment == QueryFragment(where="1=1", params=[])
+
+
+_DANBOORU_TAGS = st.text(
+    alphabet=st.characters(
+        whitelist_categories=("Ll", "Lu", "Nd"),
+        whitelist_characters="_:.",
+    ),
+    min_size=1,
+    max_size=24,
+).filter(
+    lambda value: not value.startswith(("-", "(", ")"))
+    and not value.lower().startswith("category:")
+    and value.upper() not in {"AND", "OR", "NOT"}
+)
+
+
+@given(_DANBOORU_TAGS, _DANBOORU_TAGS, st.floats(min_value=0.0, max_value=1.0, allow_nan=False))
+def test_danbooru_query_combinations_do_not_raise(tag_a: str, tag_b: str, score: float) -> None:
+    query = f"{tag_a} OR (-{tag_b} category:general score>={score:.3f})"
+
+    fragment = translate_query(query, file_alias=ALIAS)
+
+    assert " OR " in fragment.where
+    assert tag_a in fragment.params
+    assert tag_b in fragment.params

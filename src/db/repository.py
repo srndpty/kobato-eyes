@@ -13,6 +13,15 @@ from .files import bulk_update_files_meta_by_id, bulk_upsert_files_meta
 from .fts import fts_delete_rows, fts_replace_rows
 from .tags import replace_file_tags, replace_file_tags_many, upsert_tags
 
+_ALLOWED_SEARCH_ORDER_BY = {
+    "f.mtime DESC": "f.mtime DESC",
+    "f.mtime ASC": "f.mtime ASC",
+    "f.path ASC": "f.path ASC",
+    "f.path DESC": "f.path DESC",
+    "f.id ASC": "f.id ASC",
+    "f.id DESC": "f.id DESC",
+}
+
 # ----------------------------------------
 # files テーブル
 # ----------------------------------------
@@ -330,7 +339,9 @@ def search_files(
         join_clause = ""
 
     if order_by:
-        order_clause = order_by
+        order_clause = _ALLOWED_SEARCH_ORDER_BY.get(order_by.strip())
+        if order_clause is None:
+            raise ValueError(f"Unsupported search order_by clause: {order_by!r}")
     elif use_relevance:
         order_clause = "relevance DESC, f.mtime DESC"
     else:

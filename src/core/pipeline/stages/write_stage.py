@@ -5,6 +5,8 @@ from __future__ import annotations
 import logging
 import os
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -57,10 +59,22 @@ class _DefaultWriteStageDeps:
 
     def connect(self, db_path: str):
         conn = self._deps.conn_factory(str(db_path))
-        try:
-            conn.close()
-        except Exception:
-            pass
+        if hasattr(conn, "close"):
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+
+@contextmanager
+def _quiesced_with(deps: WriteStageDeps) -> Iterator[None]:
+    """Run a write-stage block with quiesce always released."""
+
+    deps.begin_quiesce()
+    try:
+        yield
+    finally:
+        deps.end_quiesce()
 
 
 @dataclass(slots=True)
@@ -93,7 +107,6 @@ class WriteStage:
         fts_processed = 0
         written = 0
         writer = None
-        quiesced = False
 
         def _dbw_progress(kind: str, done: int, total_count: int) -> None:
             nonlocal fts_processed
@@ -110,25 +123,20 @@ class WriteStage:
 
         try:
             self._deps.connect(str(ctx.db_path))
-            self._deps.begin_quiesce()
-            quiesced = True
+            with _quiesced_with(self._deps):
+                writer = self._deps.build_writer(ctx=ctx, progress_cb=_dbw_progress)
+                writer.start()
+                time.sleep(0.2)
+                writer.raise_if_failed()
 
-            writer = self._deps.build_writer(ctx=ctx, progress_cb=_dbw_progress)
-            writer.start()
-            time.sleep(0.2)
-            writer.raise_if_failed()
+                for item in tag_result.db_items:
+                    if emitter.cancelled(ctx.is_cancelled):
+                        break
+                    writer.put(item)
+                    written += 1
 
-            for item in tag_result.db_items:
-                if emitter.cancelled(ctx.is_cancelled):
-                    break
-                writer.put(item)
-                written += 1
-
-            writer.stop(flush=True, wait_forever=True)
-            writer = None
-            if quiesced:
-                self._deps.end_quiesce()
-                quiesced = False
+                writer.stop(flush=True, wait_forever=True)
+                writer = None
             try:
                 _settle_after_quiesce(str(ctx.db_path))
             except Exception:
@@ -145,11 +153,6 @@ class WriteStage:
                     writer.stop(flush=True, wait_forever=True)
                 except Exception:
                     pass
-            if quiesced:
-                try:
-                    self._deps.end_quiesce()
-                except Exception:
-                    logger.exception("end_quiesce failed")
             try:
                 _settle_after_quiesce(str(ctx.db_path))
             except Exception:

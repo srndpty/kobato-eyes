@@ -81,6 +81,39 @@ def test_search_worker_reports_connection_error(monkeypatch, tmp_path: Path) -> 
     assert finished == [(False, False)]
 
 
+def test_search_worker_cancel_before_run_does_not_connect(monkeypatch, tmp_path: Path) -> None:
+    def fail_connect(*args, **kwargs):
+        raise AssertionError("connect should not be called after pre-run cancellation")
+
+    monkeypatch.setattr(search_worker.sqlite3, "connect", fail_connect)
+    worker = SearchWorker(tmp_path / "db.sqlite", "1=1", [])
+    finished: list[tuple[bool, bool]] = []
+    worker.finished.connect(lambda ok, cancelled: finished.append((ok, cancelled)))
+
+    worker.cancel()
+    worker.run()
+
+    assert finished == [(False, True)]
+
+
+def test_search_worker_cancelled_connection_error_reports_cancelled(monkeypatch, tmp_path: Path) -> None:
+    def fail_connect(*args, **kwargs):
+        worker.cancel()
+        raise search_worker.sqlite3.OperationalError("cannot open database")
+
+    monkeypatch.setattr(search_worker.sqlite3, "connect", fail_connect)
+    worker = SearchWorker(tmp_path / "db.sqlite", "1=1", [])
+    errors: list[str] = []
+    finished: list[tuple[bool, bool]] = []
+    worker.error.connect(errors.append)
+    worker.finished.connect(lambda ok, cancelled: finished.append((ok, cancelled)))
+
+    worker.run()
+
+    assert errors == []
+    assert finished == [(False, True)]
+
+
 def test_search_worker_cancel_after_chunk_reports_cancelled(monkeypatch, tmp_path: Path) -> None:
     def fake_search_files(conn, where_sql, params, **kwargs):
         offset = int(kwargs["offset"])
@@ -103,6 +136,24 @@ def test_search_worker_cancel_after_chunk_reports_cancelled(monkeypatch, tmp_pat
     worker.run()
 
     assert chunks == [[{"id": 1}]]
+    assert finished == [(False, True)]
+
+
+def test_search_worker_cancelled_operational_error_reports_cancelled(monkeypatch, tmp_path: Path) -> None:
+    def fake_search_files(*args, **kwargs):
+        worker.cancel()
+        raise search_worker.sqlite3.OperationalError("interrupted")
+
+    monkeypatch.setattr(search_worker, "_search_files", fake_search_files)
+    worker = SearchWorker(tmp_path / "db.sqlite", "1=1", [])
+    errors: list[str] = []
+    finished: list[tuple[bool, bool]] = []
+    worker.error.connect(errors.append)
+    worker.finished.connect(lambda ok, cancelled: finished.append((ok, cancelled)))
+
+    worker.run()
+
+    assert errors == []
     assert finished == [(False, True)]
 
 

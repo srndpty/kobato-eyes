@@ -12,6 +12,7 @@ import sqlite3
 import subprocess
 import sys
 import threading
+from contextlib import AbstractContextManager, nullcontext
 from datetime import datetime
 from pathlib import Path
 from typing import Callable, Iterable, List, Optional, Sequence
@@ -1077,6 +1078,7 @@ class TagsTab(QWidget):
         self._progress_dialog: QProgressDialog | None = None
         self._current_index_task: IndexRunnable | None = None
         self._active_refresh_folder: Sequence[Path] | None = None
+        self._quiesce_guard: AbstractContextManager[None] = nullcontext()
 
         self._toast_label = QLabel("", self)
         self._toast_label.setObjectName("toastLabel")
@@ -1702,10 +1704,12 @@ class TagsTab(QWidget):
 
     def _start_indexing_task(self, task: IndexRunnable) -> None:
         # UIの長寿命接続を閉じて静穏化
-        from db.connection import begin_quiesce
+        from db.connection import quiesced
 
         self.prepare_for_database_reset()
-        begin_quiesce()
+        self._enter_quiesce()
+        self._quiesce_guard = quiesced()
+        self._quiesce_guard.__enter__()
 
         self._current_index_task = task
         task.signals.progress.connect(self._handle_index_progress)
@@ -1714,6 +1718,17 @@ class TagsTab(QWidget):
         self._handle_index_started()
         self._progress_dialog = self._create_progress_dialog()
         self._index_pool.start(task)
+
+    def _enter_quiesce(self) -> None:
+        self._release_quiesce()
+
+    def _release_quiesce(self) -> None:
+        guard = self._quiesce_guard
+        self._quiesce_guard = nullcontext()
+        try:
+            guard.__exit__(None, None, None)
+        except Exception:
+            logger.exception("end_quiesce() failed in UI")
 
     def _create_progress_dialog(self) -> QProgressDialog:
         dialog = QProgressDialog("Preparing…", "Cancel", 0, 0, self)
@@ -2309,8 +2324,6 @@ class TagsTab(QWidget):
         self._update_control_states()
 
     def _handle_index_finished(self, stats: dict[str, object]) -> None:
-        from db.connection import end_quiesce
-
         task = self._current_index_task
         if task is not None:
             try:
@@ -2367,10 +2380,8 @@ class TagsTab(QWidget):
                 if self._current_where:
                     QTimer.singleShot(0, self._on_search_clicked)
             self._update_control_states()
-            try:
-                end_quiesce()
-            finally:
-                self.restore_connection()
+            self._release_quiesce()
+            self.restore_connection()
             return
 
         prefix = "Retagging" if self._retag_active else "Indexing"
@@ -2379,6 +2390,8 @@ class TagsTab(QWidget):
             self._show_toast(f"{prefix} cancelled.")
             self._retag_active = False
             self._update_control_states()
+            self._release_quiesce()
+            self.restore_connection()
             return
 
         if self._retag_active:
@@ -2402,14 +2415,10 @@ class TagsTab(QWidget):
         self._retag_active = False
         self._update_control_states()
         QTimer.singleShot(0, self._on_search_clicked)
-        try:
-            end_quiesce()
-        finally:
-            self.restore_connection()
+        self._release_quiesce()
+        self.restore_connection()
 
     def _handle_index_failed(self, message: str) -> None:
-        from db.connection import end_quiesce
-
         task = self._current_index_task
         if task is not None:
             try:
@@ -2435,11 +2444,7 @@ class TagsTab(QWidget):
         self._refresh_active = False
         self._retag_active = False
         self._update_control_states()
-        # ① まず quiesce を解除
-        try:
-            end_quiesce()
-        except Exception:
-            logger.exception("end_quiesce() failed in UI")
+        self._release_quiesce()
 
         # ② 次に接続を復旧（ロックなら短いバックオフで何度か再試行）
         self._restore_connection_with_retry()

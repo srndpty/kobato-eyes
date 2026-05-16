@@ -301,6 +301,40 @@ def test_flush_batch_unsafe_fast_merges_into_persistent(tmp_path: Path) -> None:
         conn.close()
 
 
+def test_apply_pragmas_falls_back_when_unsafe_fast_lock_unavailable() -> None:
+    class _FakeConn:
+        def __init__(self) -> None:
+            self.statements: list[str] = []
+            self.fail_exclusive = True
+
+        def execute(self, sql: str):
+            self.statements.append(sql)
+            if self.fail_exclusive and sql == "BEGIN EXCLUSIVE":
+                self.fail_exclusive = False
+                raise db_writing_module.sqlite3.OperationalError("database is locked")
+            return None
+
+    conn = _FakeConn()
+    service = DBWritingService("ignored.db", unsafe_fast=True)
+
+    service._apply_pragmas(conn)  # type: ignore[arg-type]
+
+    assert service._unsafe_fast is False
+    assert service._stage_tags_in_temp is False
+    assert "PRAGMA journal_mode=WAL" in conn.statements
+
+
+def test_maybe_checkpoint_ignores_checkpoint_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    class _FakeConn:
+        def execute(self, sql: str):
+            raise db_writing_module.sqlite3.OperationalError(f"failed: {sql}")
+
+    service = DBWritingService("ignored.db")
+    monkeypatch.setattr(service, "_wal_size_mb", lambda: 300)
+
+    service._maybe_checkpoint(_FakeConn())  # type: ignore[arg-type]
+
+
 def test_flush_batch_triggers_checkpoint_when_wal_large(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     db_path = tmp_path / "checkpoint.db"
     file_id = _prepare_db(str(db_path), "C:/images/checkpoint.png")

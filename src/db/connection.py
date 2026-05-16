@@ -6,6 +6,8 @@ import logging
 import os
 import sqlite3
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from threading import Lock
 
@@ -34,6 +36,17 @@ def end_quiesce() -> None:
     with _QUIESCE_LOCK:
         _QUIESCE = False
     logger.info("end_quiesce(): quiesce=%s", _QUIESCE)
+
+
+@contextmanager
+def quiesced() -> Iterator[None]:
+    """Temporarily block normal DB connections during unsafe write phases."""
+
+    begin_quiesce()
+    try:
+        yield
+    finally:
+        end_quiesce()
 
 
 def _ensure_indexes(conn: sqlite3.Connection) -> None:
@@ -303,4 +316,4 @@ def get_conn(
     return conn
 
 
-__all__ = ["bootstrap_if_needed", "get_conn", "begin_quiesce", "end_quiesce"]
+__all__ = ["bootstrap_if_needed", "get_conn", "begin_quiesce", "end_quiesce", "quiesced"]

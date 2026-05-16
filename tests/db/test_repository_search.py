@@ -111,6 +111,13 @@ def test_search_files_order_limit_offset(conn) -> None:
     assert second[0]["id"] == file_d
 
 
+def test_search_files_rejects_unsupported_order_by(conn) -> None:
+    _insert_file(conn, path="unsafe.png", size=100, mtime=50.0, sha="unsafe")
+
+    with pytest.raises(ValueError, match="Unsupported search order_by"):
+        search_files(conn, "1=1", [], order_by="f.mtime ASC; DROP TABLE files")
+
+
 def test_translate_query_integrates_with_search(conn) -> None:
     file_id = _insert_file(conn, path="E.png", size=111, mtime=10.0, sha="e")
     _insert_tag(conn, "1girl", 0.88, file_id)
