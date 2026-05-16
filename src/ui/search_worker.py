@@ -81,7 +81,7 @@ class SearchWorker(QObject):
         """Execute the configured search, emitting results progressively."""
 
         if self._cancel.is_set():
-            self.finished.emit(False, True)
+            self._emit_finished(False, True)
             return
 
         try:
@@ -89,10 +89,10 @@ class SearchWorker(QObject):
         except sqlite3.Error as exc:  # pragma: no cover - connection errors are surfaced to UI
             logger.warning("SearchWorker failed to open database %s: %s", self._db_path, exc)
             if self._cancel.is_set():
-                self.finished.emit(False, True)
+                self._emit_finished(False, True)
             else:
                 self.error.emit(str(exc))
-                self.finished.emit(False, False)
+                self._emit_finished(False, False)
             return
 
         self._connection = conn
@@ -126,11 +126,12 @@ class SearchWorker(QObject):
                 if not rows:
                     break
                 try:
-                    self.chunkReady.emit(rows)
+                    self._emit_chunk(rows)
                 except RuntimeError as exc:
                     if _is_deleted_qobject_error(exc):
                         logger.debug("SearchWorker stopped because the QObject was deleted")
                         self._cancel.set()
+                        self._emit_finished(False, True)
                         return
                     raise
                 emitted += len(rows)
@@ -143,23 +144,25 @@ class SearchWorker(QObject):
                     break
         except sqlite3.OperationalError as exc:
             if self._cancel.is_set() or "interrupted" in str(exc).lower() and self._cancel.is_set():
-                self.finished.emit(False, True)
+                self._emit_finished(False, True)
             else:
                 logger.warning("SearchWorker query failed: %s", exc)
                 self.error.emit(str(exc))
-                self.finished.emit(False, False)
+                self._emit_finished(False, False)
         except RuntimeError as exc:
             if _is_deleted_qobject_error(exc):
                 logger.debug("SearchWorker stopped because the QObject was deleted")
+                self._cancel.set()
+                self._emit_finished(False, True)
             else:
                 raise
         except Exception as exc:  # pragma: no cover - defensive logging
             logger.exception("SearchWorker crashed")
             self.error.emit(str(exc))
-            self.finished.emit(False, False)
+            self._emit_finished(False, False)
         else:
             is_cancelled = self._cancel.is_set()
-            self.finished.emit(not is_cancelled, is_cancelled)
+            self._emit_finished(not is_cancelled, is_cancelled)
         finally:
             try:
                 conn.close()
@@ -177,6 +180,22 @@ class SearchWorker(QObject):
 
     def _progress_handler(self) -> int:
         return 1 if self._cancel.is_set() else 0
+
+    def _emit_finished(self, ok: bool, cancelled: bool) -> None:
+        """Emit completion unless the underlying QObject has already been deleted."""
+
+        try:
+            self.finished.emit(ok, cancelled)
+        except RuntimeError as exc:
+            if _is_deleted_qobject_error(exc):
+                logger.debug("SearchWorker could not emit finished because the QObject was deleted")
+                return
+            raise
+
+    def _emit_chunk(self, rows: list[object]) -> None:
+        """Emit a result chunk."""
+
+        self.chunkReady.emit(rows)
 
 
 __all__ = ["SearchWorker"]

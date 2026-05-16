@@ -139,6 +139,26 @@ def test_search_worker_cancel_after_chunk_reports_cancelled(monkeypatch, tmp_pat
     assert finished == [(False, True)]
 
 
+def test_search_worker_deleted_during_chunk_emit_reports_cancelled(monkeypatch, tmp_path: Path) -> None:
+    def fake_search_files(*args, **kwargs):
+        return [{"id": 1}]
+
+    def fail_emit_chunk(rows):
+        assert rows == [{"id": 1}]
+        raise RuntimeError("wrapped C/C++ object of type SearchWorker has been deleted")
+
+    monkeypatch.setattr(search_worker, "_search_files", fake_search_files)
+    worker = SearchWorker(tmp_path / "db.sqlite", "1=1", [])
+    monkeypatch.setattr(worker, "_emit_chunk", fail_emit_chunk)
+    finished: list[tuple[bool, bool]] = []
+    worker.finished.connect(lambda ok, cancelled: finished.append((ok, cancelled)))
+
+    worker.run()
+
+    assert finished == [(False, True)]
+    assert worker._progress_handler() == 1
+
+
 def test_search_worker_cancelled_operational_error_reports_cancelled(monkeypatch, tmp_path: Path) -> None:
     def fake_search_files(*args, **kwargs):
         worker.cancel()
