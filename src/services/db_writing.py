@@ -35,8 +35,9 @@ class DBWritingService(DBWriteQueue):
     ) -> None:
         self._log = logging.getLogger(__name__)
         self._db_path = db_path
-        self._flush_chunk = int(flush_chunk)
-        self._fts_topk = int(fts_topk)
+        self._flush_chunk = self._require_positive_int("flush_chunk", flush_chunk)
+        self._fts_topk = max(0, int(fts_topk))
+        queue_size = self._require_positive_int("queue_size", queue_size)
         self._queue: "queue.Queue[object]" = queue.Queue(maxsize=queue_size)
         self._default_tagger_sig = default_tagger_sig
         self._unsafe_fast = bool(unsafe_fast)
@@ -46,6 +47,7 @@ class DBWritingService(DBWriteQueue):
         self._exc_lock = threading.Lock()
         self._stop_evt = threading.Event()
         self._thread = threading.Thread(target=self._thread_main, name="DBWritingService", daemon=True)
+        self._started = False
         self._written = 0
         self._flush_count = 0
         self._tag_cache: Dict[str, int] = {}
@@ -59,7 +61,10 @@ class DBWritingService(DBWriteQueue):
     # ------------------------------------------------------------------
     def start(self) -> None:
         self.raise_if_failed()
+        if self._started:
+            return
         if not self._thread.is_alive():
+            self._started = True
             self._thread.start()
 
     def raise_if_failed(self) -> None:
@@ -98,6 +103,15 @@ class DBWritingService(DBWriteQueue):
             except RuntimeError:
                 pass
         self.raise_if_failed()
+
+    @staticmethod
+    def _require_positive_int(name: str, value: int) -> int:
+        """Return ``value`` as a positive integer or raise a clear error."""
+
+        normalized = int(value)
+        if normalized < 1:
+            raise ValueError(f"{name} must be >= 1")
+        return normalized
 
     # ------------------------------------------------------------------
     # Thread entry point and helpers

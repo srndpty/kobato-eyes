@@ -366,6 +366,225 @@ def test_write_stage_reports_fts_rebuild_failure(monkeypatch, tmp_path):
     assert settle_calls == [str(ctx.db_path), str(ctx.db_path)]
 
 
+def test_write_stage_rebuilds_fts_after_partial_cancel(monkeypatch, tmp_path):
+    settle_calls: list[str] = []
+
+    monkeypatch.setattr(
+        write_stage,
+        "_settle_after_quiesce",
+        lambda path: settle_calls.append(str(path)),
+    )
+
+    class _Writer:
+        def __init__(self) -> None:
+            self.items: list[object] = []
+            self.stop_calls = 0
+
+        def start(self) -> None:
+            return None
+
+        def raise_if_failed(self) -> None:
+            return None
+
+        def put(self, item) -> None:
+            self.items.append(item)
+
+        def stop(self, *, flush: bool, wait_forever: bool) -> None:
+            assert flush is True
+            assert wait_forever is True
+            self.stop_calls += 1
+
+    class _Deps:
+        def __init__(self) -> None:
+            self.begin_calls = 0
+            self.end_calls = 0
+            self.writer = _Writer()
+            self.rebuild_calls: list[tuple[str, int]] = []
+
+        def connect(self, db_path: str) -> None:
+            assert db_path
+
+        def begin_quiesce(self) -> None:
+            self.begin_calls += 1
+
+        def end_quiesce(self) -> None:
+            self.end_calls += 1
+
+        def build_writer(self, *, ctx: PipelineContext, progress_cb):
+            assert ctx
+            assert callable(progress_cb)
+            return self.writer
+
+        def rebuild_fts(self, db_path: str, *, topk: int) -> int:
+            self.rebuild_calls.append((db_path, topk))
+            return 1
+
+    cancel_checks = iter([False, True])
+    deps = _Deps()
+    stage = WriteStage(deps=deps)
+    ctx = _make_ctx(tmp_path)
+    ctx.is_cancelled = lambda: next(cancel_checks)
+    emitter = ProgressEmitter(lambda _progress: None)
+    first = object()
+    second = object()
+    tag_result = TagStageResult(records=[], db_items=[first, second], tagged_count=2)
+
+    result = stage.run(ctx, emitter, tag_result)
+
+    assert result.written == 1
+    assert result.fts_processed == 1
+    assert result.success is False
+    assert result.cancelled is True
+    assert result.error is None
+    assert deps.writer.items == [first]
+    assert deps.writer.stop_calls == 1
+    assert deps.begin_calls == 1
+    assert deps.end_calls == 1
+    assert deps.rebuild_calls == [(str(ctx.db_path), 32)]
+    assert settle_calls == [str(ctx.db_path), str(ctx.db_path)]
+
+
+def test_write_stage_reports_put_failure_and_releases_quiesce(monkeypatch, tmp_path):
+    settle_calls: list[str] = []
+
+    monkeypatch.setattr(
+        write_stage,
+        "_settle_after_quiesce",
+        lambda path: settle_calls.append(str(path)),
+    )
+
+    class _Writer:
+        def __init__(self) -> None:
+            self.stop_calls = 0
+
+        def start(self) -> None:
+            return None
+
+        def raise_if_failed(self) -> None:
+            return None
+
+        def put(self, item) -> None:
+            assert item
+            raise RuntimeError("put failed")
+
+        def stop(self, *, flush: bool, wait_forever: bool) -> None:
+            assert flush is True
+            assert wait_forever is True
+            self.stop_calls += 1
+
+    class _Deps:
+        def __init__(self) -> None:
+            self.begin_calls = 0
+            self.end_calls = 0
+            self.writer = _Writer()
+
+        def connect(self, db_path: str) -> None:
+            assert db_path
+
+        def begin_quiesce(self) -> None:
+            self.begin_calls += 1
+
+        def end_quiesce(self) -> None:
+            self.end_calls += 1
+
+        def build_writer(self, *, ctx: PipelineContext, progress_cb):
+            assert ctx
+            assert callable(progress_cb)
+            return self.writer
+
+        def rebuild_fts(self, db_path: str, *, topk: int) -> int:
+            pytest.fail("FTS rebuild should not run when no item was written")
+
+    deps = _Deps()
+    stage = WriteStage(deps=deps)
+    ctx = _make_ctx(tmp_path)
+    emitter = ProgressEmitter(lambda _progress: None)
+    tag_result = TagStageResult(records=[], db_items=[object()], tagged_count=1)
+
+    result = stage.run(ctx, emitter, tag_result)
+
+    assert result.written == 0
+    assert result.fts_processed == 0
+    assert result.success is False
+    assert result.error == "put failed"
+    assert deps.writer.stop_calls == 1
+    assert deps.begin_calls == 1
+    assert deps.end_calls == 1
+    assert settle_calls == [str(ctx.db_path)]
+
+
+def test_write_stage_reports_stop_failure_and_releases_quiesce(monkeypatch, tmp_path):
+    settle_calls: list[str] = []
+
+    monkeypatch.setattr(
+        write_stage,
+        "_settle_after_quiesce",
+        lambda path: settle_calls.append(str(path)),
+    )
+
+    class _Writer:
+        def __init__(self) -> None:
+            self.items: list[object] = []
+            self.stop_calls = 0
+
+        def start(self) -> None:
+            return None
+
+        def raise_if_failed(self) -> None:
+            return None
+
+        def put(self, item) -> None:
+            self.items.append(item)
+
+        def stop(self, *, flush: bool, wait_forever: bool) -> None:
+            assert flush is True
+            assert wait_forever is True
+            self.stop_calls += 1
+            raise RuntimeError("stop failed")
+
+    class _Deps:
+        def __init__(self) -> None:
+            self.begin_calls = 0
+            self.end_calls = 0
+            self.writer = _Writer()
+
+        def connect(self, db_path: str) -> None:
+            assert db_path
+
+        def begin_quiesce(self) -> None:
+            self.begin_calls += 1
+
+        def end_quiesce(self) -> None:
+            self.end_calls += 1
+
+        def build_writer(self, *, ctx: PipelineContext, progress_cb):
+            assert ctx
+            assert callable(progress_cb)
+            return self.writer
+
+        def rebuild_fts(self, db_path: str, *, topk: int) -> int:
+            pytest.fail("FTS rebuild should not run after stop failure")
+
+    deps = _Deps()
+    stage = WriteStage(deps=deps)
+    ctx = _make_ctx(tmp_path)
+    emitter = ProgressEmitter(lambda _progress: None)
+    item = object()
+    tag_result = TagStageResult(records=[], db_items=[item], tagged_count=1)
+
+    result = stage.run(ctx, emitter, tag_result)
+
+    assert result.written == 1
+    assert result.fts_processed == 0
+    assert result.success is False
+    assert result.error == "stop failed"
+    assert deps.writer.items == [item]
+    assert deps.writer.stop_calls == 2
+    assert deps.begin_calls == 1
+    assert deps.end_calls == 1
+    assert settle_calls == [str(ctx.db_path)]
+
+
 def test_write_stage_cleanup_stop_failure_preserves_original_error(monkeypatch, tmp_path):
     settle_calls: list[str] = []
 

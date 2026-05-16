@@ -3,9 +3,11 @@
 ## 現状
 
 - 基準チェック: `.\scripts\check.ps1`
-- 直近の基準値: `334 passed, 34 deselected`
+- 直近の基準値: `346 passed, 35 deselected`
 - 総カバレッジ: `81%`
 - mypy対象: 45ファイルへ段階拡大済み
+- DBストレスチェック: `.\scripts\check-db-stress.ps1` 成功（`8 passed, 373 deselected`）
+- Integrationチェック: `.\scripts\check-integration.ps1` 成功（`7 passed, 374 deselected`）
 
 ## 短期: データ整合性と検索安定性
 
@@ -18,7 +20,8 @@
 - 検証:
   - `pytest tests/core/pipeline/test_write_stage.py -q`
   - `pytest tests/db/test_fts_offline.py -q`
-  - `pytest -m db_stress -q`
+  - `.\scripts\check-db-stress.ps1`
+  - `.\scripts\check-integration.ps1`
 
 ## 中期: 型チェックと例外境界
 
