@@ -143,11 +143,11 @@ class PrefetchLoaderPrepared:
             logger.warning("PrefetchLoaderPrepared: failed to load %s: %s (fallback PIL)", p, e)
             # --- フォールバック: PIL ---
             try:
-                with Image.open(p) as im:
-                    w, h = im.size
-                    im = im.convert("RGBA")
-                    bg = Image.new("RGBA", im.size, "WHITE")
-                    bg.paste(im, mask=im.split()[-1])
+                with Image.open(p) as pil_image:
+                    w, h = pil_image.size
+                    rgba = pil_image.convert("RGBA")
+                    bg = Image.new("RGBA", rgba.size, "WHITE")
+                    bg.paste(rgba, mask=rgba.split()[-1])
                     rgb = bg.convert("RGB")
                     # ここでは軽く縮小のみ（最終整形は tagger に任せる）
                     rgb.thumbnail((_TARGET, _TARGET))

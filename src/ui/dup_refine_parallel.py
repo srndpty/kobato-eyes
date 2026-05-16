@@ -22,12 +22,12 @@ def tile_ahash_bits(path: Path, grid: int = 4, tile: int = 8) -> int:
     - ビット列（gy, gx, ty, tx の順に走る）を little-endian で int にパック
     """
     side = grid * tile
-    with Image.open(path) as im:
+    with Image.open(path) as opened:
         # 向き補正が要らなければ次行は省略可
-        im = ImageOps.exif_transpose(im)
-        im = im.convert("L").resize((side, side), Image.Resampling.BILINEAR)
+        transposed = ImageOps.exif_transpose(opened)
+        gray = transposed.convert("L").resize((side, side), Image.Resampling.BILINEAR)
 
-    arr = np.asarray(im, dtype=np.uint8)  # (side, side)
+    arr = np.asarray(gray, dtype=np.uint8)  # (side, side)
     # 形状を (gy, gx, ty, tx) に並べ替える（元の for gy->gx->tile.flatten と同じ順）
     a = arr.reshape(grid, tile, grid, tile).transpose(0, 2, 1, 3)  # (gy, gx, ty, tx)
 
@@ -160,10 +160,10 @@ def refine_by_tilehash_parallel(
 
 
 def _load_small_gray(path: Path, size=128):
-    with Image.open(path) as im:
-        im = im.convert("L")
-        im.thumbnail((size, size), Image.Resampling.BILINEAR)
-        return np.asarray(im, dtype=np.uint8)
+    with Image.open(path) as opened:
+        gray = opened.convert("L")
+        gray.thumbnail((size, size), Image.Resampling.BILINEAR)
+        return np.asarray(gray, dtype=np.uint8)
 
 
 def _mae01(a: np.ndarray, b: np.ndarray) -> float:
