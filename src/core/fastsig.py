@@ -7,7 +7,7 @@ import os
 import sqlite3
 from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
-from typing import Iterable, List, Optional, Tuple
+from typing import Callable, Iterable, List, Optional, Tuple
 
 from PIL import Image
 
@@ -67,7 +67,7 @@ def compute_signatures_mp(
     *,
     max_workers: Optional[int] = None,
     chunksize: int = 64,
-    progress: Optional[callable] = None,  # progress(done:int, total:int)
+    progress: Optional[Callable[[int, int], None]] = None,
 ) -> List[Tuple[int, int, int]]:
     """(file_id, path) を並列で処理して (file_id, ph, dh) を返す。"""
     if not tasks:
@@ -99,7 +99,7 @@ def fast_fill_missing_signatures(
     *,
     max_workers: Optional[int] = None,
     chunksize: int = 64,
-    progress: Optional[callable] = None,
+    progress: Optional[Callable[[int, int], None]] = None,
     apply_to_db: bool = True,
     unsafe_fast: bool = True,
 ) -> List[Tuple[int, int, int]]:

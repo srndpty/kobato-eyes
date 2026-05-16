@@ -2,7 +2,13 @@ param(
     [switch]$NoCoverage,
     [switch]$Fix,
     [switch]$SkipTypeCheck,
-    [string]$CoverageFile = "tmp/coverage/.coverage"
+    [string]$CoverageFile = "tmp/coverage/.coverage",
+    [string[]]$CoverageFocus = @(
+        "src/core/jobs.py",
+        "src/core/pipeline/retag.py",
+        "src/db/fts.py",
+        "src/ui/search_worker.py"
+    )
 )
 
 Set-StrictMode -Version Latest
@@ -119,5 +125,12 @@ if ($NoCoverage) {
 
     Invoke-Step "coverage report" {
         & $Python -m coverage report --show-missing --skip-covered
+    }
+
+    if ($CoverageFocus.Count -gt 0) {
+        $CoverageFocusPattern = ($CoverageFocus -join ",")
+        Invoke-Step "coverage focus report" {
+            & $Python -m coverage report --show-missing --fail-under=0 --include $CoverageFocusPattern
+        }
     }
 }

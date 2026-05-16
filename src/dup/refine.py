@@ -52,7 +52,7 @@ def _compute_ssim(img_a: Image.Image, img_b: Image.Image) -> float:
 def _compute_orb_ratio(img_a: Image.Image, img_b: Image.Image) -> float:
     gray_a = np.asarray(img_a.convert("L"))
     gray_b = np.asarray(img_b.convert("L"))
-    orb = cv2.ORB_create()
+    orb = cv2.ORB_create()  # type: ignore[attr-defined]
     keypoints_a, descriptors_a = orb.detectAndCompute(gray_a, None)
     keypoints_b, descriptors_b = orb.detectAndCompute(gray_b, None)
     if descriptors_a is None or descriptors_b is None or not keypoints_a or not keypoints_b:

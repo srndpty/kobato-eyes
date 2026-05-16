@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from typing import Protocol
 
 from core.pipeline.types import IndexPhase, IndexProgress, PipelineContext, ProgressEmitter
+from db.fts_offline import rebuild_fts_offline
 from utils.env import safe_int
 
 from ..maintenance import _settle_after_quiesce
@@ -30,6 +31,8 @@ class WriteStageDeps(Protocol):
     def end_quiesce(self) -> None: ...
 
     def connect(self, db_path: str): ...
+
+    def rebuild_fts(self, db_path: str, *, topk: int) -> int: ...
 
 
 class _DefaultWriteStageDeps:
@@ -65,6 +68,9 @@ class _DefaultWriteStageDeps:
             except Exception:
                 pass
 
+    def rebuild_fts(self, db_path: str, *, topk: int) -> int:
+        return rebuild_fts_offline(db_path, topk=topk)
+
 
 @contextmanager
 def _quiesced_with(deps: WriteStageDeps) -> Iterator[None]:
@@ -83,6 +89,9 @@ class WriteStageResult:
 
     written: int
     fts_processed: int
+    success: bool = True
+    cancelled: bool = False
+    error: str | None = None
 
 
 class WriteStage:
@@ -107,6 +116,7 @@ class WriteStage:
         fts_processed = 0
         written = 0
         writer = None
+        cancelled = False
 
         def _dbw_progress(kind: str, done: int, total_count: int) -> None:
             nonlocal fts_processed
@@ -131,6 +141,7 @@ class WriteStage:
 
                 for item in tag_result.db_items:
                     if emitter.cancelled(ctx.is_cancelled):
+                        cancelled = True
                         break
                     writer.put(item)
                     written += 1
@@ -142,11 +153,17 @@ class WriteStage:
             except Exception:
                 logger.warning("settle_after_quiesce failed; continuing")
 
+            fts_processed = self._rebuild_fts(ctx, emitter, written, fts_processed)
             emitter.emit(IndexProgress(phase=IndexPhase.FTS, done=written, total=total), force=True)
-            return WriteStageResult(written=written, fts_processed=max(fts_processed, written))
+            return WriteStageResult(
+                written=written,
+                fts_processed=max(fts_processed, written),
+                success=not cancelled,
+                cancelled=cancelled,
+            )
         except Exception as exc:
             logger.exception("Write stage failed: %s", exc)
-            return WriteStageResult(written=written, fts_processed=fts_processed)
+            return WriteStageResult(written=written, fts_processed=fts_processed, success=False, error=str(exc))
         finally:
             if writer is not None:
                 try:
@@ -157,6 +174,26 @@ class WriteStage:
                 _settle_after_quiesce(str(ctx.db_path))
             except Exception:
                 logger.warning("settle_after_quiesce failed; continuing")
+
+    def _rebuild_fts(
+        self,
+        ctx: PipelineContext,
+        emitter: ProgressEmitter,
+        written: int,
+        previous_processed: int,
+    ) -> int:
+        """Rebuild FTS after the fast writer skipped per-row FTS maintenance."""
+
+        if written <= 0:
+            return previous_processed
+        settings = ctx.settings
+        topk = int(getattr(settings, "fts_topk", 128))
+        if topk <= 0:
+            return previous_processed
+        emitter.emit(IndexProgress(phase=IndexPhase.FTS, done=0, total=written, message="rebuild"), force=True)
+        rebuilt = self._deps.rebuild_fts(str(ctx.db_path), topk=topk)
+        logger.info("finalizing: fts rebuild %d row(s)", rebuilt)
+        return max(previous_processed, rebuilt)
 
 
 __all__ = ["WriteStage", "WriteStageResult", "WriteStageDeps"]

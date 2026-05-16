@@ -219,9 +219,9 @@ class DuplicateScanner:
         buckets: dict[tuple[int, int], list[int]] = {}
         for idx, f in enumerate(candidates):
             ph = f.phash & ((1 << 64) - 1)  # 念のため
-            for b in range(self._config.band_count):
-                shift = b * self._config.band_bits
-                key = (b, (ph >> shift) & self._band_mask)
+            for band in range(self._config.band_count):
+                shift = band * self._config.band_bits
+                key = (band, (ph >> shift) & self._band_mask)
                 buckets.setdefault(key, []).append(idx)
 
         bucket_sizes = [len(v) for v in buckets.values()]

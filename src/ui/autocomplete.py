@@ -9,7 +9,10 @@ def abbreviate_count(value: object) -> str:
     """Return a compact textual representation of a popularity count."""
 
     try:
-        count = int(value) if value is not None else 0
+        if isinstance(value, (str, bytes, bytearray, int, float)) and not isinstance(value, bool):
+            count = int(value)
+        else:
+            count = 0
     except (TypeError, ValueError):
         count = 0
     if count <= 0:

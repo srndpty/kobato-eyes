@@ -80,5 +80,7 @@ def test_run_index_once_reports_progress(tmp_path: Path, temp_db: Path) -> None:
         assert fts_events, "Expected FTS phase events when rows are written"
         assert all(event.total < 0 or event.done <= event.total for event in fts_events)
         assert fts_events[-1].done == stats["signatures"]
+        with get_conn(temp_db) as conn:
+            assert conn.execute("SELECT COUNT(*) FROM fts_files").fetchone()[0] == stats["signatures"]
     else:
         assert not fts_events
