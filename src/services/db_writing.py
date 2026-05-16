@@ -45,6 +45,7 @@ class DBWritingService(DBWriteQueue):
         self._skip_fts = bool(skip_fts)
         self._progress_cb = progress_cb
         self._exc: BaseException | None = None
+        self._exc_lock = threading.Lock()
         self._stop_evt = threading.Event()
         self._thread = threading.Thread(target=self._thread_main, name="DBWritingService", daemon=True)
         self._written = 0
@@ -59,15 +60,20 @@ class DBWritingService(DBWriteQueue):
     # Public API (DBWriteQueue)
     # ------------------------------------------------------------------
     def start(self) -> None:
+        self.raise_if_failed()
         if not self._thread.is_alive():
             self._thread.start()
 
     def raise_if_failed(self) -> None:
-        if self._exc:
-            raise self._exc
+        with self._exc_lock:
+            exc = self._exc
+        if exc:
+            raise exc
 
     def put(self, item: object, block: bool = True, timeout: float | None = None) -> None:
+        self.raise_if_failed()
         self._queue.put(item, block=block, timeout=timeout)
+        self.raise_if_failed()
 
     def qsize(self) -> int:
         try:
@@ -116,9 +122,16 @@ class DBWritingService(DBWriteQueue):
                         self._log.warning("DBWritingService: restore_normal_mode failed: %s", exc)
                 conn.close()
         except BaseException as exc:  # pragma: no cover - defensive catch
-            self._exc = exc
+            self._record_failure(exc)
             self._log.exception("DBWritingService crashed: %s", exc)
             self._stop_evt.set()
+
+    def _record_failure(self, exc: BaseException) -> None:
+        """Store the first worker-side failure for caller-side propagation."""
+
+        with self._exc_lock:
+            if self._exc is None:
+                self._exc = exc
 
     def _open_connection(self) -> sqlite3.Connection:
         return get_conn(self._db_path, allow_when_quiesced=True, timeout=120.0)

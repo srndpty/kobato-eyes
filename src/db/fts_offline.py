@@ -34,6 +34,8 @@ def rebuild_fts_offline(
     file_tags → tags を集計し、files の is_present=1 行について
     FTS を完全に作り直す。戻り値は REPLACE した件数。
     """
+    normalized_topk = max(0, int(topk))
+    normalized_batch = max(1, int(batch))
     total = 0
     with get_conn(db_path, allow_when_quiesced=True) as conn:
         conn.row_factory = sqlite3.Row
@@ -49,6 +51,9 @@ def rebuild_fts_offline(
 
         # いったん FTS を空に
         _truncate_fts(conn)
+        if normalized_topk <= 0:
+            conn.commit()
+            return 0
 
         # 全ファイルを走査（必要なら ids を事前に取ってバッファリング）
         cursor = conn.execute("SELECT id FROM files WHERE is_present = 1")
@@ -63,7 +68,7 @@ def rebuild_fts_offline(
                 ORDER BY ft.score DESC
                 LIMIT ?
                 """,
-                (fid, int(topk)),
+                (fid, normalized_topk),
             ).fetchall()
             if not rows:
                 continue
@@ -71,7 +76,7 @@ def rebuild_fts_offline(
             if not text:
                 continue
             buf.append((int(fid), text))
-            if len(buf) >= batch:
+            if len(buf) >= normalized_batch:
                 fts_replace_rows(conn, buf)  # 既存のユーティリティでまとめて投入
                 total += len(buf)
                 buf.clear()

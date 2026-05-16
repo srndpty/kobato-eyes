@@ -118,6 +118,13 @@ def test_rebuild_fts_offline_populates_index(tmp_path: Path) -> None:
             {"tag_gamma", "tag_zeta"},
         ),
         (
+            1,
+            0,
+            {"present_a", "present_b"},
+            {"tag_alpha": {"present_a"}, "tag_beta": {"present_b"}},
+            {"tag_gamma", "tag_zeta"},
+        ),
+        (
             2,
             2,
             {"present_a", "present_b"},
@@ -170,4 +177,27 @@ def test_truncate_fts_handles_missing_tables(tmp_path: Path) -> None:
 
     tables = conn.execute("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name").fetchall()
     assert [str(row["name"]) for row in tables] == ["example"]
+    conn.close()
+
+
+def test_rebuild_fts_offline_topk_zero_clears_stale_index(tmp_path: Path) -> None:
+    db_path = tmp_path / "fts_topk_zero.db"
+    _prepare_database(db_path)
+
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    with conn:
+        present_a_id = conn.execute("SELECT id FROM files WHERE path = ?", ("present_a",)).fetchone()["id"]
+        conn.execute("INSERT INTO fts_files(rowid, text) VALUES (?, ?)", (present_a_id, "stale_tag"))
+        assert _match_paths(conn, "stale_tag") == {"present_a"}
+    conn.close()
+
+    inserted = rebuild_fts_offline(db_path, topk=0)
+
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    with conn:
+        assert inserted == 0
+        assert conn.execute("SELECT COUNT(*) FROM fts_files").fetchone()[0] == 0
+        assert _match_paths(conn, "stale_tag") == set()
     conn.close()
