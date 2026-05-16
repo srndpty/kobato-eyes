@@ -134,6 +134,25 @@ def test_flush_batch_standard_inserts_tags_and_fts(tmp_path: Path) -> None:
         conn.close()
 
 
+@pytest.mark.parametrize(
+    ("kwargs", "message"),
+    [
+        ({"flush_chunk": 0}, "flush_chunk must be >= 1"),
+        ({"queue_size": 0}, "queue_size must be >= 1"),
+    ],
+)
+def test_constructor_rejects_non_positive_queue_boundaries(kwargs: dict[str, int], message: str) -> None:
+    with pytest.raises(ValueError, match=message):
+        DBWritingService("ignored.db", **kwargs)
+
+
+def test_constructor_normalizes_negative_fts_topk_to_skip_fts() -> None:
+    service = DBWritingService("ignored.db", fts_topk=-1)
+
+    assert service._fts_topk == 0
+    assert service._skip_fts is True
+
+
 def test_flush_batch_standard_rolls_back_on_fts_failure(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -260,6 +279,49 @@ def test_start_spawns_worker_and_processes_queue(monkeypatch: pytest.MonkeyPatch
     assert [type(msg) for msg in removed_items[:3]] == [DBItem, DBFlush, DBStop]
 
 
+def test_start_is_idempotent_while_worker_is_running(monkeypatch: pytest.MonkeyPatch) -> None:
+    service = DBWritingService("ignored.db")
+    start_calls = 0
+    running = False
+
+    class _DummyThread:
+        def start(self) -> None:
+            nonlocal start_calls
+            nonlocal running
+            start_calls += 1
+            running = True
+
+        def is_alive(self) -> bool:
+            return running
+
+    service._thread = _DummyThread()  # type: ignore[assignment]
+
+    service.start()
+    service.start()
+
+    assert start_calls == 1
+
+
+def test_start_after_stop_does_not_restart_used_thread(monkeypatch: pytest.MonkeyPatch) -> None:
+    service = DBWritingService("ignored.db")
+    start_calls = 0
+
+    class _DummyThread:
+        def start(self) -> None:
+            nonlocal start_calls
+            start_calls += 1
+
+        def is_alive(self) -> bool:
+            return False
+
+    service._thread = _DummyThread()  # type: ignore[assignment]
+
+    service.start()
+    service.start()
+
+    assert start_calls == 1
+
+
 def test_stop_wait_forever_false_uses_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
     service = DBWritingService("ignored.db")
 
@@ -384,6 +446,37 @@ def test_worker_failure_is_rejected_by_public_api(monkeypatch: pytest.MonkeyPatc
         service.put(DBItem(1, [("tag", 0.5, 0)], None, None, None, None))
 
 
+def test_stop_surfaces_worker_failure_recorded_before_join(monkeypatch: pytest.MonkeyPatch) -> None:
+    service = DBWritingService("ignored.db")
+    service._record_failure(RuntimeError("worker failed before stop"))
+
+    class _DummyThread:
+        def join(self, timeout: float | None = None) -> None:
+            assert timeout == 10.0
+
+        def is_alive(self) -> bool:
+            return False
+
+    service._thread = _DummyThread()  # type: ignore[assignment]
+
+    with pytest.raises(RuntimeError, match="worker failed before stop"):
+        service.stop(wait_forever=False)
+
+
+def test_put_surfaces_worker_failure_recorded_after_queue_put(monkeypatch: pytest.MonkeyPatch) -> None:
+    service = DBWritingService("ignored.db")
+    original_put = service._queue.put
+
+    def _put_then_fail(item: object, block: bool = True, timeout: float | None = None) -> None:
+        original_put(item, block=block, timeout=timeout)
+        service._record_failure(RuntimeError("worker failed after put"))
+
+    monkeypatch.setattr(service._queue, "put", _put_then_fail)
+
+    with pytest.raises(RuntimeError, match="worker failed after put"):
+        service.put(DBItem(1, [("tag", 0.5, 0)], None, None, None, None))
+
+
 @pytest.mark.db_stress
 def test_flush_batch_unsafe_fast_merges_into_persistent(tmp_path: Path) -> None:
     db_path = tmp_path / "unsafe.db"
@@ -457,6 +550,36 @@ def test_apply_pragmas_falls_back_when_unsafe_fast_lock_unavailable() -> None:
     assert service._unsafe_fast is False
     assert service._stage_tags_in_temp is False
     assert "PRAGMA journal_mode=WAL" in conn.statements
+
+
+@pytest.mark.db_stress
+def test_unsafe_fast_lock_fallback_uses_standard_write_and_fts(tmp_path: Path) -> None:
+    db_path = tmp_path / "unsafe-fallback-standard.db"
+    file_id = _prepare_db(str(db_path), "C:/images/unsafe-fallback-standard.png")
+    service = DBWritingService(str(db_path), flush_chunk=1, unsafe_fast=True, fts_topk=4)
+
+    def _raise_locked(conn: sqlite3.Connection) -> None:
+        raise sqlite3.OperationalError("database is locked")
+
+    service._apply_unsafe_fast_pragmas = _raise_locked  # type: ignore[method-assign]
+    conn = service._open_connection()
+    try:
+        service._apply_pragmas(conn)
+        service._flush_batch(conn, [_make_item(file_id)])
+
+        assert service._unsafe_fast is False
+        assert service._stage_tags_in_temp is False
+        tag_count = conn.execute("SELECT COUNT(*) FROM file_tags WHERE file_id = ?", (file_id,)).fetchone()[0]
+        fts_hit = conn.execute(
+            "SELECT rowid FROM fts_files WHERE fts_files MATCH ?",
+            ('"artist:kobato"',),
+        ).fetchone()
+    finally:
+        conn.close()
+
+    assert tag_count == 2
+    assert fts_hit is not None
+    assert int(fts_hit["rowid"]) == file_id
 
 
 @pytest.mark.db_stress

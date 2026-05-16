@@ -146,42 +146,6 @@ def _resolve_db_target(db_path: str | Path) -> tuple[str, bool, bool, str, Path 
     return resolved_str, False, False, resolved_str, resolved
 
 
-def _apply_runtime_pragmas(conn: sqlite3.Connection, *, is_memory: bool) -> None:
-    """接続ごとに適用する安全寄りの高速化 PRAGMA"""
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA foreign_keys = ON;")
-
-    if is_memory:
-        # テストや一時 DB
-        try:
-            conn.execute("PRAGMA journal_mode = MEMORY;")
-        except sqlite3.DatabaseError:
-            pass
-    else:
-        # 本番 DB：WAL + NORMAL で安全＆高速
-        try:
-            conn.execute("PRAGMA journal_mode = WAL;")
-        except sqlite3.DatabaseError:
-            pass
-        try:
-            conn.execute("PRAGMA synchronous = NORMAL;")
-        except sqlite3.DatabaseError:
-            pass
-
-    # 共有設定
-    for pragma in (
-        "PRAGMA temp_store = MEMORY;",
-        # cache_size: 負数=KB 指定。-65536=64MB
-        "PRAGMA cache_size = -65536;",
-        # 256MB の mmap（対応環境のみ）
-        "PRAGMA mmap_size = 268435456;",
-    ):
-        try:
-            conn.execute(pragma)
-        except sqlite3.DatabaseError:
-            pass
-
-
 def _exec_pragma_retry(cur: sqlite3.Cursor, sql: str, retries: int = 40, sleep_sec: float = 0.1):
     last = None
     for _ in range(retries):
@@ -198,7 +162,9 @@ def _exec_pragma_retry(cur: sqlite3.Cursor, sql: str, retries: int = 40, sleep_s
     raise sqlite3.OperationalError(f"failed to execute pragma after {retries} retries: {sql}")
 
 
-def _apply_pragmas(conn: sqlite3.Connection, *, is_memory: bool) -> None:
+def _apply_pragmas(conn: sqlite3.Connection, *, is_memory: bool, busy_timeout_ms: int) -> None:
+    """Apply the per-connection SQLite safety and performance pragmas."""
+
     cur = conn.cursor()
     try:
         # 既存
@@ -208,6 +174,7 @@ def _apply_pragmas(conn: sqlite3.Connection, *, is_memory: bool) -> None:
             _exec_pragma_retry(cur, "PRAGMA journal_mode=WAL;")
         # ★ここから毎接続で効く高速化系（永続ではない）
         _exec_pragma_retry(cur, "PRAGMA synchronous=NORMAL;")  # COMMIT の fsync を軽く
+        _exec_pragma_retry(cur, f"PRAGMA busy_timeout={max(1, int(busy_timeout_ms))};")
         _exec_pragma_retry(cur, "PRAGMA temp_store=MEMORY;")  # tempをメモリへ
         _exec_pragma_retry(cur, "PRAGMA cache_size=-200000;")  # 約200MBのページキャッシュ
         _exec_pragma_retry(cur, "PRAGMA wal_autocheckpoint=50000;")  # WAL約200MBで自動チェックポイント
@@ -234,9 +201,8 @@ def _connect_to_target(
         timeout=timeout,  # busy_timeout 互換
         uri=uri,
     )
-    # _apply_runtime_pragmas(conn, is_memory=is_memory)
     conn.row_factory = sqlite3.Row
-    _apply_pragmas(conn, is_memory=is_memory)  # ★追加
+    _apply_pragmas(conn, is_memory=is_memory, busy_timeout_ms=max(1, int(timeout * 1000)))  # ★追加
     return conn
 
 
