@@ -130,6 +130,46 @@ def test_flush_batch_standard_inserts_tags_and_fts(tmp_path: Path) -> None:
         conn.close()
 
 
+def test_flush_batch_standard_rolls_back_on_fts_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "standard-rollback.db"
+    file_id = _prepare_db(str(db_path), "C:/images/standard-rollback.png")
+
+    def _fail_fts_replace_rows(conn: sqlite3.Connection, rows: Sequence[tuple[int, str]]) -> None:
+        assert conn.in_transaction
+        assert rows
+        raise RuntimeError("fts write failed")
+
+    monkeypatch.setattr(db_writing_module, "fts_replace_rows", _fail_fts_replace_rows)
+
+    service = DBWritingService(str(db_path), flush_chunk=2, fts_topk=16)
+    conn = service._open_connection()
+    try:
+        service._apply_pragmas(conn)
+
+        with pytest.raises(RuntimeError, match="fts write failed"):
+            service._flush_batch(conn, [_make_item(file_id)])
+
+        assert not conn.in_transaction
+        assert service._tag_cache == {}
+        assert conn.execute("SELECT COUNT(*) FROM tags").fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM file_tags").fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM fts_files").fetchone()[0] == 0
+
+        meta = conn.execute(
+            "SELECT width, height, tagger_sig, last_tagged_at FROM files WHERE id = ?",
+            (file_id,),
+        ).fetchone()
+        assert meta["width"] is None
+        assert meta["height"] is None
+        assert meta["tagger_sig"] is None
+        assert meta["last_tagged_at"] is None
+    finally:
+        conn.close()
+
+
 def test_start_spawns_worker_and_processes_queue(monkeypatch: pytest.MonkeyPatch) -> None:
     removed_items: list[object] = []
 
