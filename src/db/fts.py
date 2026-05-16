@@ -62,11 +62,11 @@ def fts_replace_rows(conn: sqlite3.Connection, rows: Sequence[tuple[int, str]]) 
             conn.execute(f"INSERT INTO fts_files(rowid, text) VALUES {values}", flat)
     else:
         for block in chunk(rows, 400):
-            flat: list[object] = []
+            flat_insert: list[object] = []
             for rid, text in block:
-                flat.extend((int(rid), str(text)))
-            values = ",".join(["(?, ?)"] * (len(flat) // 2))
-            conn.execute(f"INSERT OR REPLACE INTO fts_files(rowid, text) VALUES {values}", flat)
+                flat_insert.extend((int(rid), str(text)))
+            values = ",".join(["(?, ?)"] * (len(flat_insert) // 2))
+            conn.execute(f"INSERT OR REPLACE INTO fts_files(rowid, text) VALUES {values}", flat_insert)
 
 
 def update_fts(conn: sqlite3.Connection, file_id: int, text: str | None) -> None:

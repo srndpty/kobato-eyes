@@ -6,6 +6,8 @@ import logging
 import os
 import sqlite3
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from threading import Lock
 
@@ -16,24 +18,45 @@ logger = logging.getLogger(__name__)
 _BOOTSTRAP_LOCK = Lock()
 _BOOTSTRAPPED: set[str] = set()
 
-_QUIESCE = False
+_QUIESCE_DEPTH = 0
 _QUIESCE_LOCK = Lock()
 
 
 def begin_quiesce() -> None:
     """UNSAFE 区間に入る。通常の新規接続を禁止する。"""
-    global _QUIESCE
+    global _QUIESCE_DEPTH
     with _QUIESCE_LOCK:
-        _QUIESCE = True
-    logger.info("begin_quiesce(): quiesce=%s", _QUIESCE)
+        _QUIESCE_DEPTH += 1
+        depth = _QUIESCE_DEPTH
+    logger.info("begin_quiesce(): depth=%d", depth)
 
 
 def end_quiesce() -> None:
     """UNSAFE 区間を抜ける。通常接続を許可する。"""
-    global _QUIESCE
+    global _QUIESCE_DEPTH
     with _QUIESCE_LOCK:
-        _QUIESCE = False
-    logger.info("end_quiesce(): quiesce=%s", _QUIESCE)
+        if _QUIESCE_DEPTH > 0:
+            _QUIESCE_DEPTH -= 1
+        depth = _QUIESCE_DEPTH
+    logger.info("end_quiesce(): depth=%d", depth)
+
+
+def is_quiesced() -> bool:
+    """Return whether normal DB connections are currently blocked."""
+
+    with _QUIESCE_LOCK:
+        return _QUIESCE_DEPTH > 0
+
+
+@contextmanager
+def quiesced() -> Iterator[None]:
+    """Temporarily block normal DB connections during unsafe write phases."""
+
+    begin_quiesce()
+    try:
+        yield
+    finally:
+        end_quiesce()
 
 
 def _ensure_indexes(conn: sqlite3.Connection) -> None:
@@ -291,7 +314,7 @@ def get_conn(
 ) -> sqlite3.Connection:
     """Create a SQLite connection with WAL and foreign-key support enabled."""
     # quiesce 中は通常の新規接続を拒否（DBWriter など専用だけ allow）
-    if _QUIESCE and not allow_when_quiesced:
+    if is_quiesced() and not allow_when_quiesced:
         raise RuntimeError("DB is quiesced (UNSAFE fast mode active)")
     target, is_memory, uri, _, _ = _resolve_db_target(db_path)
     bootstrap_if_needed(db_path, timeout=timeout)
@@ -303,4 +326,4 @@ def get_conn(
     return conn
 
 
-__all__ = ["bootstrap_if_needed", "get_conn", "begin_quiesce", "end_quiesce"]
+__all__ = ["bootstrap_if_needed", "get_conn", "begin_quiesce", "end_quiesce", "is_quiesced", "quiesced"]
