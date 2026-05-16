@@ -53,6 +53,14 @@ def extract_completion_token(text: str, cursor_position: int | None = None) -> t
     return text[start:end], start, end
 
 
+def completion_search_prefix(token: str) -> str:
+    """Return the tag prefix used to search completion candidates."""
+
+    if token.startswith("-"):
+        return token[1:]
+    return token
+
+
 def replace_completion_token(text: str, start: int, end: int, replacement: str) -> tuple[str, int]:
     """Replace the substring in ``text`` and return the new text and cursor."""
 
@@ -61,14 +69,21 @@ def replace_completion_token(text: str, start: int, end: int, replacement: str) 
 
     suffix = text[end:]
     insertion = replacement
+    if replacement and text[start:end].startswith("-") and not replacement.startswith("-"):
+        insertion = f"-{replacement}"
     if replacement:
         needs_space = (not suffix) or (suffix[0] not in _DELIMITERS)
-        if needs_space and (not replacement.endswith(" ")):
-            insertion = f"{replacement} "
+        if needs_space and (not insertion.endswith(" ")):
+            insertion = f"{insertion} "
 
     new_text = f"{text[:start]}{insertion}{suffix}"
     new_cursor = start + len(insertion)
     return new_text, new_cursor
 
 
-__all__ = ["abbreviate_count", "extract_completion_token", "replace_completion_token"]
+__all__ = [
+    "abbreviate_count",
+    "completion_search_prefix",
+    "extract_completion_token",
+    "replace_completion_token",
+]

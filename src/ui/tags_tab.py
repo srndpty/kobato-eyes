@@ -78,7 +78,12 @@ from tagger import labels_util
 from tagger.base import TagCategory
 from tagger.categories import build_category_lookup
 from tagger.wd14_onnx import ONNXRUNTIME_MISSING_MESSAGE
-from ui.autocomplete import abbreviate_count, extract_completion_token, replace_completion_token
+from ui.autocomplete import (
+    abbreviate_count,
+    completion_search_prefix,
+    extract_completion_token,
+    replace_completion_token,
+)
 from ui.search_worker import SearchWorker
 from ui.tag_stats import TagStatsDialog
 from ui.viewmodels import TagsViewModel
@@ -736,6 +741,7 @@ class TagsTab(QWidget):
         ) -> None:
             super().__init__(parent)
             self._items = list(items or [])
+            self._display_prefix = ""
 
         def rowCount(self, parent: QModelIndex | None = None) -> int:  # type: ignore[override]
             if parent and parent.isValid():
@@ -751,7 +757,8 @@ class TagsTab(QWidget):
                 return None
             if role in {Qt.ItemDataRole.DisplayRole, Qt.ItemDataRole.EditRole}:
                 count_text = abbreviate_count(item.count)
-                return f"{item.name} ({count_text})" if count_text else item.name
+                name = f"{self._display_prefix}{item.name}"
+                return f"{name} ({count_text})" if count_text else name
             if role == int(self.NAME_ROLE):
                 return item.name
             if role == int(self.COUNT_ROLE):
@@ -767,9 +774,10 @@ class TagsTab(QWidget):
             roles[int(self.COUNT_ROLE)] = b"count"
             return roles
 
-        def reset_with(self, items: Sequence[labels_util.TagMeta]) -> None:
+        def reset_with(self, items: Sequence[labels_util.TagMeta], *, display_prefix: str = "") -> None:
             self.beginResetModel()
             self._items = list(items)
+            self._display_prefix = display_prefix
             self.endResetModel()
 
     _PAGE_SIZE = 200
@@ -1356,7 +1364,7 @@ class TagsTab(QWidget):
         cursor_position = self._query_edit.cursorPosition()
         token, start, end = extract_completion_token(text, cursor_position)
         self._current_completion_range = (start, end)
-        prefix = token.lower()
+        prefix = completion_search_prefix(token).lower()
         if not prefix:
             self._tag_model.reset_with([])
             self._hide_completion_popup()
@@ -1369,9 +1377,10 @@ class TagsTab(QWidget):
         if matches:
             ranked = labels_util.sort_by_popularity(matches)
             limited = ranked[:50]
-            self._tag_model.reset_with(limited)
+            display_prefix = "-" if token.startswith("-") else ""
+            self._tag_model.reset_with(limited, display_prefix=display_prefix)
             # ★ ここが肝心：QCompleter にも “このトークン” を prefix として教える
-            self._completer.setCompletionPrefix(token)
+            self._completer.setCompletionPrefix(completion_search_prefix(token))
             self._completer.complete()
         else:
             self._tag_model.reset_with([])

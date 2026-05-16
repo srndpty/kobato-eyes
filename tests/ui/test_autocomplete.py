@@ -4,7 +4,7 @@ import pytest
 
 # 実装と同じデリミタを使う（将来変更してもテストが追従する）
 from ui.autocomplete import _DELIMITERS as DELIMITERS
-from ui.autocomplete import extract_completion_token, replace_completion_token
+from ui.autocomplete import completion_search_prefix, extract_completion_token, replace_completion_token
 
 
 @pytest.mark.parametrize(
@@ -28,6 +28,7 @@ def test_extract_completion_token(text: str, cursor: int | None, expected: tuple
     ("text", "cursor", "replacement", "expected_text"),
     [
         ("tag1 AND ha", None, "hatsune_miku", "tag1 AND hatsune_miku "),
+        ("tag1 -tea", None, "tears", "tag1 -tears "),
         # 新仕様：() は区切りではないので、丸ごと "(ta)" が置換対象になる
         ("(ta)", 3, "hatsune_miku", "hatsune_miku "),
         # 新仕様：":" は区切り。category 補完は "ge" を "general" に置換するだけ
@@ -42,8 +43,24 @@ def test_replace_completion_token(text: str, cursor: int | None, replacement: st
 
     # カーソル位置の期待値計算は実装と同じロジックで
     suffix = text[end:]
-    expected_cursor = start + len(replacement)
+    insertion = replacement
+    if replacement and text[start:end].startswith("-") and not replacement.startswith("-"):
+        insertion = f"-{replacement}"
+    expected_cursor = start + len(insertion)
     needs_space = (not suffix) or (suffix[0] not in DELIMITERS)
-    if replacement and needs_space and not replacement.endswith(" "):
+    if replacement and needs_space and not insertion.endswith(" "):
         expected_cursor += 1
     assert cursor_pos == expected_cursor
+
+
+@pytest.mark.parametrize(
+    ("token", "expected"),
+    [
+        ("tea", "tea"),
+        ("-tea", "tea"),
+        ("-", ""),
+        ("kaguya-sama", "kaguya-sama"),
+    ],
+)
+def test_completion_search_prefix(token: str, expected: str) -> None:
+    assert completion_search_prefix(token) == expected
