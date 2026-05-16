@@ -91,3 +91,28 @@ def test_prefetch_loader_pil_fallback_and_cleanup(tmp_path, monkeypatch) -> None
     assert loader.qsize() == 0
     assert not loader._th.is_alive()
     assert loader._stop.is_set()
+
+
+def test_prefetch_loader_propagates_producer_failures(tmp_path) -> None:
+    png_path = tmp_path / "sample.png"
+    _create_png(png_path)
+
+    class _FailingTagger:
+        def prepare_batch_from_rgb_np(self, arrs: List[np.ndarray]) -> np.ndarray:
+            raise RuntimeError("prepare failed")
+
+    loader = loaders.PrefetchLoaderPrepared(
+        [str(png_path)],
+        tagger=_FailingTagger(),
+        batch_size=1,
+        prefetch_batches=1,
+        io_workers=1,
+    )
+
+    try:
+        with pytest.raises(RuntimeError, match="producer failed"):
+            list(loader)
+    finally:
+        loader.close()
+
+    assert not loader._th.is_alive()

@@ -142,3 +142,29 @@ def test_settle_after_quiesce_logs_warnings(monkeypatch, caplog):
     assert any("wal_checkpoint failed" in message for message in warnings)
     assert any("optimize failed" in message for message in warnings)
     assert sleep_calls == [0.2]
+
+
+def test_settle_after_quiesce_logs_sweep_connection_failure(monkeypatch, caplog):
+    sleep_calls = []
+
+    def fake_sleep(seconds):
+        sleep_calls.append(seconds)
+
+    def fake_wait_for_unlock(db_path, timeout=15.0):
+        return False
+
+    def fake_connect(db_path, timeout):
+        raise sqlite3.OperationalError("disk is busy")
+
+    monkeypatch.setattr(maintenance.time, "sleep", fake_sleep)
+    monkeypatch.setattr(maintenance, "wait_for_unlock", fake_wait_for_unlock)
+    monkeypatch.setattr(maintenance.sqlite3, "connect", fake_connect)
+
+    caplog.set_level(logging.WARNING)
+
+    _settle_after_quiesce("dummy.db")
+
+    warnings = {record.message for record in caplog.records}
+    assert any("DB still locked" in message for message in warnings)
+    assert any("sweep connection failed" in message for message in warnings)
+    assert sleep_calls == [0.2]
