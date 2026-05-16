@@ -12,7 +12,9 @@ from typing import Any, Callable, Sequence
 
 from utils.env import is_headless
 
-if is_headless():
+_HEADLESS_MODE = is_headless()
+
+if _HEADLESS_MODE:
     _sender_local = threading.local()
 
     class QObject:  # type: ignore[too-many-ancestors]
@@ -295,7 +297,7 @@ class JobManager(QObject):
 
     def wait_for_done(self, timeout_ms: int = -1) -> bool:
         """Block until all jobs complete or ``timeout_ms`` elapses."""
-        if is_headless():
+        if _HEADLESS_MODE:
             deadline = None if timeout_ms < 0 else time.monotonic() + (timeout_ms / 1000.0)
             while self.has_pending_jobs():
                 if deadline is None:
@@ -337,7 +339,7 @@ class JobManager(QObject):
         sender = self.sender()
         if not isinstance(sender, JobSignals):
             return
-        if is_headless():
+        if _HEADLESS_MODE:
             sender.finished.defer_after_emit(lambda: self._complete_finished_job(sender))
             return
         self._complete_finished_job(sender)
