@@ -1,9 +1,9 @@
-# src/db/fts_offline.py
+"""Offline FTS rebuild helpers."""
+
 from __future__ import annotations
 
 import sqlite3
 from pathlib import Path
-from typing import List, Tuple
 
 from db.connection import get_conn
 from db.repository import fts_replace_rows
@@ -52,7 +52,7 @@ def rebuild_fts_offline(
 
         # 全ファイルを走査（必要なら ids を事前に取ってバッファリング）
         cursor = conn.execute("SELECT id FROM files WHERE is_present = 1")
-        buf: List[Tuple[int, str]] = []
+        buf: list[tuple[int, str]] = []
         for (fid,) in cursor.fetchall():
             rows = conn.execute(
                 """

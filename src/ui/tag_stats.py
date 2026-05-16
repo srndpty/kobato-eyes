@@ -224,7 +224,9 @@ class TagStatsDialog(QDialog):
         self._table.setSelectionBehavior(QTableView.SelectionBehavior.SelectRows)
         self._table.setSelectionMode(QTableView.SelectionMode.SingleSelection)
         self._table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
-        self._table.verticalHeader().setVisible(False)
+        header = self._table.verticalHeader()
+        if header is not None:
+            header.setVisible(False)
         self._table.doubleClicked.connect(self._apply_selected_tag)
         self._table.activated.connect(self._apply_selected_tag)
 
@@ -238,7 +240,9 @@ class TagStatsDialog(QDialog):
 
         self._reload()
 
-    def keyPressEvent(self, event: QKeyEvent) -> None:  # noqa: D401 - Qt signature
+    def keyPressEvent(self, event: QKeyEvent | None) -> None:  # noqa: D401 - Qt signature
+        if event is None:
+            return
         if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
             self._apply_selected_tag()
             event.accept()

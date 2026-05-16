@@ -64,6 +64,24 @@ def test_search_worker_reports_operational_error(monkeypatch, tmp_path: Path) ->
     assert finished == [(False, False)]
 
 
+def test_search_worker_reports_unexpected_error_without_leaving_busy_state(monkeypatch, tmp_path: Path) -> None:
+    def fake_search_files(*args, **kwargs):
+        raise ValueError("unexpected search failure")
+
+    monkeypatch.setattr(search_worker, "_search_files", fake_search_files)
+    worker = SearchWorker(tmp_path / "db.sqlite", "1=1", [])
+    errors: list[str] = []
+    finished: list[tuple[bool, bool]] = []
+    worker.error.connect(errors.append)
+    worker.finished.connect(lambda ok, cancelled: finished.append((ok, cancelled)))
+
+    worker.run()
+
+    assert errors == ["unexpected search failure"]
+    assert finished == [(False, False)]
+    assert worker._connection is None
+
+
 def test_search_worker_reports_connection_error(monkeypatch, tmp_path: Path) -> None:
     def fail_connect(*args, **kwargs):
         raise search_worker.sqlite3.OperationalError("cannot open database")

@@ -157,6 +157,7 @@ jobs:
   db-stress:
     name: DB stress tests
     runs-on: windows-latest
+    timeout-minutes: 20
     needs: lint
 
     env:

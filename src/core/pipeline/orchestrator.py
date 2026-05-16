@@ -109,6 +109,8 @@ class IndexPipeline:
             "retagged": 0,
             "cancelled": False,
             "tagger_sig": self.ctx.tagger_sig,
+            "write_failed": False,
+            "write_error": None,
         }
 
         self.emitter.emit(IndexProgress(phase=IndexPhase.SCAN, done=0, total=-1, message="start"), force=True)
@@ -131,7 +133,10 @@ class IndexPipeline:
                 if not cancelled:
                     write_result = self._run_write(tag_result)
                     if write_result is not None:
-                        stats["signatures"] = write_result.written
+                        stats["write_failed"] = not write_result.success and not write_result.cancelled
+                        stats["write_error"] = write_result.error
+                        if write_result.success:
+                            stats["signatures"] = write_result.written
 
         stats["elapsed_sec"] = time.perf_counter() - start
         stats["cancelled"] = self.emitter.cancelled(self.ctx.is_cancelled)
