@@ -318,6 +318,8 @@ class JobManager(QObject):
         return self.wait_for_done(timeout_ms)
 
     def _request_schedule(self) -> None:
+        if not self._pending:
+            return
         if self._schedule_pending:
             return
         if self._running >= self._pool.maxThreadCount():
