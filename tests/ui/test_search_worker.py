@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 import ui.search_worker as search_worker
 from db.fts import fts_replace_rows
 from db.schema import apply_schema
@@ -177,6 +179,43 @@ def test_search_worker_deleted_during_chunk_emit_reports_cancelled(monkeypatch, 
 
     assert finished == [(False, True)]
     assert worker._progress_handler() == 1
+
+
+def test_search_worker_non_deleted_runtime_error_propagates_and_closes(monkeypatch, tmp_path: Path) -> None:
+    class _FakeConnection:
+        def __init__(self) -> None:
+            self.row_factory = None
+            self.close_calls = 0
+
+        def set_progress_handler(self, callback, instructions: int) -> None:
+            assert callable(callback)
+            assert instructions == 10_000
+
+        def close(self) -> None:
+            self.close_calls += 1
+
+    fake_conn = _FakeConnection()
+
+    def fake_connect(*args, **kwargs):
+        return fake_conn
+
+    def fake_search_files(*args, **kwargs):
+        return [{"id": 1}]
+
+    def fail_emit_chunk(rows):
+        assert rows == [{"id": 1}]
+        raise RuntimeError("ordinary runtime failure")
+
+    monkeypatch.setattr(search_worker.sqlite3, "connect", fake_connect)
+    monkeypatch.setattr(search_worker, "_search_files", fake_search_files)
+    worker = SearchWorker(tmp_path / "db.sqlite", "1=1", [])
+    monkeypatch.setattr(worker, "_emit_chunk", fail_emit_chunk)
+
+    with pytest.raises(RuntimeError, match="ordinary runtime failure"):
+        worker.run()
+
+    assert fake_conn.close_calls == 1
+    assert worker._connection is None
 
 
 def test_search_worker_deleted_during_chunk_emit_quits_thread_when_finished_cannot_emit(

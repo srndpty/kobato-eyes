@@ -9,13 +9,11 @@ import sqlite3
 import threading
 import time
 from collections.abc import Callable, Sequence
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Mapping, Optional
 
 from core.pipeline.contracts import DBFlush, DBItem, DBStop, DBWriteQueue
 from db.connection import get_conn
-from db.files import bulk_update_files_meta_by_id
 from db.fts import fts_replace_rows
-from db.tags import upsert_tags
 
 logger = logging.getLogger(__name__)
 
@@ -235,90 +233,153 @@ class DBWritingService(DBWriteQueue):
 
     def _flush_into_temp_tables(self, conn: sqlite3.Connection, items: Sequence[DBItem]) -> None:
         conn.execute("BEGIN")
-        now = time.time()
-        defs_set: set[tuple[str, int]] = set()
-        for it in items:
-            for name, _score, category in it.tags:
-                defs_set.add((name, int(category)))
-        if defs_set:
-            conn.executemany(
-                "INSERT OR IGNORE INTO temp.tmp_tag_defs(name, category) VALUES(?, ?)",
-                list(defs_set),
-            )
-        tag_rows: list[tuple[int, str, float, int]] = []
-        for it in items:
-            for name, score, category in it.tags:
-                tag_rows.append((it.file_id, name, float(score), int(category)))
-        if tag_rows:
-            conn.executemany(
-                "INSERT INTO temp.tmp_file_tags(file_id, tag_name, score, category) VALUES(?, ?, ?, ?)",
-                tag_rows,
-            )
-        metas: list[tuple[int, int | None, int | None, str | None, float]] = []
-        for it in items:
-            sig = it.tagger_sig or self._default_tagger_sig
-            ts = it.tagged_at or now
-            metas.append((it.file_id, it.width, it.height, sig, ts))
-        if metas:
-            conn.executemany(
-                """
-                INSERT INTO temp.tmp_files_meta(file_id, width, height, tagger_sig, tagged_at)
-                VALUES(?, ?, ?, ?, ?)
-                ON CONFLICT(file_id) DO UPDATE SET
-                  width      = COALESCE(excluded.width,  width),
-                  height     = COALESCE(excluded.height, height),
-                  tagger_sig = excluded.tagger_sig,
-                  tagged_at  = excluded.tagged_at
-                """,
-                metas,
-            )
-        conn.commit()
+        try:
+            now = time.time()
+            defs_set: set[tuple[str, int]] = set()
+            for it in items:
+                for name, _score, category in it.tags:
+                    defs_set.add((name, int(category)))
+            if defs_set:
+                conn.executemany(
+                    "INSERT OR IGNORE INTO temp.tmp_tag_defs(name, category) VALUES(?, ?)",
+                    list(defs_set),
+                )
+            tag_rows: list[tuple[int, str, float, int]] = []
+            for it in items:
+                for name, score, category in it.tags:
+                    tag_rows.append((it.file_id, name, float(score), int(category)))
+            if tag_rows:
+                conn.executemany(
+                    "INSERT INTO temp.tmp_file_tags(file_id, tag_name, score, category) VALUES(?, ?, ?, ?)",
+                    tag_rows,
+                )
+            metas: list[tuple[int, int | None, int | None, str | None, float]] = []
+            for it in items:
+                sig = it.tagger_sig or self._default_tagger_sig
+                ts = it.tagged_at or now
+                metas.append((it.file_id, it.width, it.height, sig, ts))
+            if metas:
+                conn.executemany(
+                    """
+                    INSERT INTO temp.tmp_files_meta(file_id, width, height, tagger_sig, tagged_at)
+                    VALUES(?, ?, ?, ?, ?)
+                    ON CONFLICT(file_id) DO UPDATE SET
+                      width      = COALESCE(excluded.width,  width),
+                      height     = COALESCE(excluded.height, height),
+                      tagger_sig = excluded.tagger_sig,
+                      tagged_at  = excluded.tagged_at
+                    """,
+                    metas,
+                )
+            conn.commit()
+        except Exception:
+            self._rollback_safely(conn)
+            raise
 
     def _flush_standard(self, conn: sqlite3.Connection, items: Sequence[DBItem]) -> None:
         conn.execute("BEGIN IMMEDIATE")
-        new_defs: list[dict[str, object]] = []
-        for it in items:
-            for name, _score, category in it.tags:
-                if name not in self._tag_cache:
-                    new_defs.append({"name": name, "category": int(category)})
-        if new_defs:
-            created = upsert_tags(conn, new_defs)
-            self._tag_cache.update(created)
-        file_ids = [it.file_id for it in items]
-        for chunk in self._chunked(file_ids, 900):
-            if not chunk:
-                continue
-            placeholders = ",".join(["?"] * len(chunk))
-            conn.execute(f"DELETE FROM file_tags WHERE file_id IN ({placeholders})", chunk)
-        tag_rows: list[tuple[int, int, float]] = []
-        for it in items:
-            for name, score, _category in it.tags:
-                tag_id = self._tag_cache.get(name)
-                if tag_id is not None:
-                    tag_rows.append((it.file_id, int(tag_id), float(score)))
-        if tag_rows:
-            conn.executemany(
-                "INSERT INTO file_tags (file_id, tag_id, score) VALUES (?, ?, ?)",
-                tag_rows,
-            )
-        if not self._skip_fts:
-            fts_rows: list[tuple[int, str]] = []
+        tag_cache = dict(self._tag_cache)
+        try:
+            new_defs: list[dict[str, object]] = []
             for it in items:
-                top = sorted(it.tags, key=lambda t: t[1], reverse=True)[: self._fts_topk]
-                text = " ".join([name for (name, _score, _category) in top])
-                if text:
-                    fts_rows.append((it.file_id, text))
-            if fts_rows:
-                fts_replace_rows(conn, fts_rows)
-        now = time.time()
-        meta_rows: list[tuple[int | None, int | None, str | None, float | None, int]] = []
-        for it in items:
-            sig = it.tagger_sig or self._default_tagger_sig
-            ts = it.tagged_at or now
-            meta_rows.append((it.width, it.height, sig, ts, it.file_id))
-        bulk_update_files_meta_by_id(conn, meta_rows, coalesce_wh=True)
-        conn.commit()
+                for name, _score, category in it.tags:
+                    if name not in tag_cache:
+                        new_defs.append({"name": name, "category": int(category)})
+            if new_defs:
+                tag_cache.update(self._upsert_tags_uncommitted(conn, new_defs))
+            file_ids = [it.file_id for it in items]
+            for chunk in self._chunked(file_ids, 900):
+                if not chunk:
+                    continue
+                placeholders = ",".join(["?"] * len(chunk))
+                conn.execute(f"DELETE FROM file_tags WHERE file_id IN ({placeholders})", chunk)
+            tag_rows: list[tuple[int, int, float]] = []
+            for it in items:
+                for name, score, _category in it.tags:
+                    tag_id = tag_cache.get(name)
+                    if tag_id is not None:
+                        tag_rows.append((it.file_id, int(tag_id), float(score)))
+            if tag_rows:
+                conn.executemany(
+                    "INSERT INTO file_tags (file_id, tag_id, score) VALUES (?, ?, ?)",
+                    tag_rows,
+                )
+            if not self._skip_fts:
+                fts_rows: list[tuple[int, str]] = []
+                for it in items:
+                    top = sorted(it.tags, key=lambda t: t[1], reverse=True)[: self._fts_topk]
+                    text = " ".join([name for (name, _score, _category) in top])
+                    if text:
+                        fts_rows.append((it.file_id, text))
+                if fts_rows:
+                    fts_replace_rows(conn, fts_rows)
+            now = time.time()
+            meta_rows: list[tuple[int | None, int | None, str | None, float | None, int]] = []
+            for it in items:
+                sig = it.tagger_sig or self._default_tagger_sig
+                ts = it.tagged_at or now
+                meta_rows.append((it.width, it.height, sig, ts, it.file_id))
+            self._bulk_update_files_meta_by_id_uncommitted(conn, meta_rows, coalesce_wh=True)
+            conn.commit()
+        except Exception:
+            self._rollback_safely(conn)
+            raise
+        self._tag_cache = tag_cache
         self._maybe_checkpoint(conn)
+
+    def _upsert_tags_uncommitted(
+        self,
+        conn: sqlite3.Connection,
+        tags: Sequence[Mapping[str, Any]],
+    ) -> dict[str, int]:
+        """Upsert tag definitions without committing the caller's transaction."""
+
+        results: dict[str, int] = {}
+        query = (
+            "INSERT INTO tags (name, category) "
+            "VALUES (?, ?) "
+            "ON CONFLICT(name) DO UPDATE SET category = excluded.category "
+            "RETURNING id"
+        )
+        for tag in tags:
+            name = str(tag["name"]).strip()
+            category = int(tag.get("category", 0))
+            cursor = conn.execute(query, (name, category))
+            tag_id = cursor.fetchone()[0]
+            results[name] = int(tag_id)
+        return results
+
+    def _bulk_update_files_meta_by_id_uncommitted(
+        self,
+        conn: sqlite3.Connection,
+        rows: Sequence[tuple[int | None, int | None, str | None, float | None, int]],
+        *,
+        coalesce_wh: bool = True,
+    ) -> None:
+        """Update file metadata without committing the caller's transaction."""
+
+        if not rows:
+            return
+        if coalesce_wh:
+            sql = (
+                "UPDATE files "
+                "SET width = COALESCE(?, width), "
+                "    height = COALESCE(?, height), "
+                "    tagger_sig = COALESCE(?, tagger_sig), "
+                "    last_tagged_at = COALESCE(?, last_tagged_at) "
+                "WHERE id = ?"
+            )
+        else:
+            sql = "UPDATE files SET width = ?, height = ?, tagger_sig = ?, last_tagged_at = ? WHERE id = ?"
+        conn.executemany(sql, rows)
+
+    def _rollback_safely(self, conn: sqlite3.Connection) -> None:
+        """Rollback a failed batch while preserving the original exception."""
+
+        try:
+            conn.rollback()
+        except Exception as exc:  # pragma: no cover - rollback failures depend on SQLite state
+            self._log.warning("DBWritingService: rollback failed after batch error: %s", exc)
 
     def _maybe_checkpoint(self, conn: sqlite3.Connection) -> None:
         wal_size = self._wal_size_mb()
@@ -400,7 +461,7 @@ class DBWritingService(DBWriteQueue):
             rows = conn.execute("SELECT name, MAX(category) FROM temp.tmp_tag_defs GROUP BY name").fetchall()
             if rows:
                 defs = [{"name": r[0], "category": int(r[1] or 0)} for r in rows]
-                upsert_tags(conn, defs)
+                self._upsert_tags_uncommitted(conn, defs)
             conn.execute("DROP TABLE IF EXISTS temp.tmp_file_ids")
             conn.execute("CREATE TABLE temp.tmp_file_ids AS SELECT DISTINCT file_id FROM temp.tmp_file_tags")
             self._emit_progress("merge.delete", 0, total_files)

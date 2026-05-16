@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib
 import importlib.util
 import queue
 import sqlite3
@@ -27,25 +28,28 @@ else:  # pragma: no cover - defensive fallback for unexpected layouts
 
 SRC_ROOT = PROJECT_ROOT / "src"
 
-if "core.pipeline.contracts" not in sys.modules:
-    core_pkg = types.ModuleType("core")
-    core_pkg.__path__ = [str(SRC_ROOT / "core")]
-    sys.modules.setdefault("core", core_pkg)
+try:
+    importlib.import_module("core.pipeline.contracts")
+except ImportError:
+    if "core.pipeline.contracts" not in sys.modules:
+        core_pkg = types.ModuleType("core")
+        core_pkg.__path__ = [str(SRC_ROOT / "core")]
+        sys.modules.setdefault("core", core_pkg)
 
-    pipeline_pkg = types.ModuleType("core.pipeline")
-    pipeline_pkg.__path__ = [str(SRC_ROOT / "core" / "pipeline")]
-    core_pkg.pipeline = pipeline_pkg
-    sys.modules.setdefault("core.pipeline", pipeline_pkg)
+        pipeline_pkg = types.ModuleType("core.pipeline")
+        pipeline_pkg.__path__ = [str(SRC_ROOT / "core" / "pipeline")]
+        core_pkg.pipeline = pipeline_pkg
+        sys.modules.setdefault("core.pipeline", pipeline_pkg)
 
-    spec = importlib.util.spec_from_file_location(
-        "core.pipeline.contracts",
-        SRC_ROOT / "core" / "pipeline" / "contracts.py",
-    )
-    if spec and spec.loader:
-        contracts_mod = importlib.util.module_from_spec(spec)
-        sys.modules["core.pipeline.contracts"] = contracts_mod
-        spec.loader.exec_module(contracts_mod)
-        pipeline_pkg.contracts = contracts_mod
+        spec = importlib.util.spec_from_file_location(
+            "core.pipeline.contracts",
+            SRC_ROOT / "core" / "pipeline" / "contracts.py",
+        )
+        if spec and spec.loader:
+            contracts_mod = importlib.util.module_from_spec(spec)
+            sys.modules["core.pipeline.contracts"] = contracts_mod
+            spec.loader.exec_module(contracts_mod)
+            pipeline_pkg.contracts = contracts_mod
 
 import services.db_writing as db_writing_module
 from core.pipeline.contracts import DBFlush, DBItem, DBStop
@@ -126,6 +130,46 @@ def test_flush_batch_standard_inserts_tags_and_fts(tmp_path: Path) -> None:
         assert meta["height"] == 48
         assert meta["tagger_sig"] == "sig:v1"
         assert meta["last_tagged_at"] == pytest.approx(1234.5)
+    finally:
+        conn.close()
+
+
+def test_flush_batch_standard_rolls_back_on_fts_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "standard-rollback.db"
+    file_id = _prepare_db(str(db_path), "C:/images/standard-rollback.png")
+
+    def _fail_fts_replace_rows(conn: sqlite3.Connection, rows: Sequence[tuple[int, str]]) -> None:
+        assert conn.in_transaction
+        assert rows
+        raise RuntimeError("fts write failed")
+
+    monkeypatch.setattr(db_writing_module, "fts_replace_rows", _fail_fts_replace_rows)
+
+    service = DBWritingService(str(db_path), flush_chunk=2, fts_topk=16)
+    conn = service._open_connection()
+    try:
+        service._apply_pragmas(conn)
+
+        with pytest.raises(RuntimeError, match="fts write failed"):
+            service._flush_batch(conn, [_make_item(file_id)])
+
+        assert not conn.in_transaction
+        assert service._tag_cache == {}
+        assert conn.execute("SELECT COUNT(*) FROM tags").fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM file_tags").fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM fts_files").fetchone()[0] == 0
+
+        meta = conn.execute(
+            "SELECT width, height, tagger_sig, last_tagged_at FROM files WHERE id = ?",
+            (file_id,),
+        ).fetchone()
+        assert meta["width"] is None
+        assert meta["height"] is None
+        assert meta["tagger_sig"] is None
+        assert meta["last_tagged_at"] is None
     finally:
         conn.close()
 

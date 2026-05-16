@@ -154,6 +154,7 @@ class JobSignals(QObject):
 
     progress = pyqtSignal(int, int)
     completed = pyqtSignal(object)
+    cancelled = pyqtSignal()
     error = pyqtSignal(object, str)
     finished = pyqtSignal()
 
@@ -163,6 +164,17 @@ class BatchJob(ABC):
 
     def __init__(self, items: Sequence[Any] | None = None) -> None:
         self.items: list[Any] = list(items or [])
+        self._cancel_event = threading.Event()
+
+    def cancel(self) -> None:
+        """Request cooperative cancellation before the next item is processed."""
+
+        self._cancel_event.set()
+
+    def is_cancelled(self) -> bool:
+        """Return whether cancellation has been requested."""
+
+        return self._cancel_event.is_set()
 
     def prepare(self) -> None:
         """Hook executed before the batch is processed."""
@@ -198,14 +210,26 @@ class _BatchJobRunnable(QRunnable):
         try:
             self.job.prepare()
             total = len(self.job.items)
+            if self.job.is_cancelled():
+                self.signals.cancelled.emit()
+                return
             if total == 0:
                 result = self.job.finalize()
                 self.signals.completed.emit(result)
                 return
 
             for index, item in enumerate(self.job.items, start=1):
+                if self.job.is_cancelled():
+                    self.signals.cancelled.emit()
+                    return
                 loaded = self.job.load_item(item)
+                if self.job.is_cancelled():
+                    self.signals.cancelled.emit()
+                    return
                 processed = self.job.process_item(item, loaded)
+                if self.job.is_cancelled():
+                    self.signals.cancelled.emit()
+                    return
                 self.job.write_item(item, processed)
                 self.signals.progress.emit(index, total)
 
