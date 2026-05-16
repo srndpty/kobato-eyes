@@ -8,13 +8,20 @@ from collections.abc import Sequence
 import pytest
 
 import db.fts as fts_module
-from db.fts import fts_delete_rows, fts_replace_rows, update_fts_bulk
+from db.fts import fts_delete_rows, fts_replace_rows, update_fts, update_fts_bulk
 
 
 class _RecordingConnection:
-    def __init__(self, *, fail_delete_command: bool = False, fail_delete_fallback: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        fail_delete_command: bool = False,
+        fail_delete_fallback: bool = False,
+        fail_insert: bool = False,
+    ) -> None:
         self.fail_delete_command = fail_delete_command
         self.fail_delete_fallback = fail_delete_fallback
+        self.fail_insert = fail_insert
         self.executed: list[tuple[str, list[object]]] = []
         self.executemany_calls: list[tuple[str, list[tuple[int, str]]]] = []
         self.commits = 0
@@ -27,6 +34,8 @@ class _RecordingConnection:
             raise sqlite3.DatabaseError("delete command failed")
         if "DELETE FROM fts_files" in sql and self.fail_delete_fallback:
             raise sqlite3.DatabaseError("delete fallback failed")
+        if "INSERT INTO fts_files" in sql and self.fail_insert:
+            raise sqlite3.DatabaseError("insert failed")
         return None
 
     def executemany(self, sql: str, rows) -> None:
@@ -80,6 +89,64 @@ def test_fts_replace_rows_falls_back_and_still_inserts(monkeypatch: pytest.Monke
         ("DELETE FROM fts_files WHERE rowid IN (?,?)", [1, 2]),
         ("INSERT INTO fts_files(rowid, text) VALUES (?, ?),(?, ?)", [1, "alpha", 2, "beta"]),
     ]
+
+
+def test_fts_helpers_ignore_empty_inputs(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(fts_module, "fts_is_contentless", lambda conn: False)
+    conn = _RecordingConnection()
+
+    fts_delete_rows(conn, [])  # type: ignore[arg-type]
+    fts_replace_rows(conn, [])  # type: ignore[arg-type]
+    update_fts_bulk(conn, [])  # type: ignore[arg-type]
+
+    assert conn.executed == []
+    assert conn.executemany_calls == []
+    assert conn.commits == 1
+
+
+def test_fts_delete_rows_uses_direct_delete_for_regular_table(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(fts_module, "fts_is_contentless", lambda conn: False)
+    conn = _RecordingConnection()
+
+    fts_delete_rows(conn, [1, 2])  # type: ignore[arg-type]
+
+    assert conn.executed == [("DELETE FROM fts_files WHERE rowid IN (?,?)", [1, 2])]
+
+
+def test_fts_replace_rows_uses_insert_or_replace_for_regular_table(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(fts_module, "fts_is_contentless", lambda conn: False)
+    conn = _RecordingConnection()
+
+    fts_replace_rows(conn, [(1, "alpha"), (2, "beta")])  # type: ignore[arg-type]
+
+    assert conn.executed == [
+        ("INSERT OR REPLACE INTO fts_files(rowid, text) VALUES (?, ?),(?, ?)", [1, "alpha", 2, "beta"])
+    ]
+
+
+def test_update_fts_replaces_single_row_in_transaction(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(fts_module, "fts_is_contentless", lambda conn: False)
+    conn = _RecordingConnection()
+
+    update_fts(conn, 10, "alpha")  # type: ignore[arg-type]
+
+    assert conn.executed == [
+        ("DELETE FROM fts_files WHERE rowid IN (?)", [10]),
+        ("INSERT INTO fts_files (rowid, text) VALUES (?, ?)", [10, "alpha"]),
+    ]
+    assert conn.commits == 1
+    assert conn.rollbacks == 0
+
+
+def test_update_fts_rolls_back_when_insert_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(fts_module, "fts_is_contentless", lambda conn: False)
+    conn = _RecordingConnection(fail_insert=True)
+
+    with pytest.raises(sqlite3.DatabaseError, match="insert failed"):
+        update_fts(conn, 10, "alpha")  # type: ignore[arg-type]
+
+    assert conn.commits == 0
+    assert conn.rollbacks == 1
 
 
 def test_update_fts_bulk_deletes_all_ids_and_inserts_non_empty_text(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -12,7 +12,9 @@ from typing import Any, Callable, Sequence
 
 from utils.env import is_headless
 
-if is_headless():
+_HEADLESS_MODE = is_headless()
+
+if _HEADLESS_MODE:
     _sender_local = threading.local()
 
     class QObject:  # type: ignore[too-many-ancestors]
@@ -65,8 +67,8 @@ if is_headless():
 
         def start(self, runnable: QRunnable) -> None:
             thread = threading.Thread(target=runnable.run, daemon=True)
-            self._threads.append(thread)
             thread.start()
+            self._threads.append(thread)
 
         def waitForDone(self, timeout_ms: int = -1) -> bool:
             deadline = None
@@ -87,10 +89,8 @@ if is_headless():
 
         @staticmethod
         def singleShot(interval_ms: int, callback: Callable[[], None]) -> None:
-            if interval_ms <= 0:
-                callback()
-                return
-            timer = threading.Timer(interval_ms / 1000.0, callback)
+            delay = max(0.001, interval_ms / 1000.0)
+            timer = threading.Timer(delay, callback)
             timer.daemon = True
             timer.start()
 
@@ -98,6 +98,8 @@ if is_headless():
         def __init__(self, owner: QObject) -> None:
             self._owner = owner
             self._callbacks: list[Callable[..., None]] = []
+            self._deferred: list[Callable[[], None]] = []
+            self._emitting = 0
 
         def connect(self, callback: Callable[..., None]) -> None:
             self._callbacks.append(callback)
@@ -108,13 +110,30 @@ if is_headless():
             except ValueError:
                 pass
 
+        def defer_after_emit(self, callback: Callable[[], None]) -> None:
+            """Run ``callback`` after the current signal emission completes."""
+
+            if self._emitting <= 0:
+                callback()
+                return
+            self._deferred.append(callback)
+
         def emit(self, *args, **kwargs) -> None:
-            for callback in list(self._callbacks):
-                QObject._push_sender(self._owner)
-                try:
-                    callback(*args, **kwargs)
-                finally:
-                    QObject._pop_sender()
+            self._emitting += 1
+            try:
+                for callback in list(self._callbacks):
+                    QObject._push_sender(self._owner)
+                    try:
+                        callback(*args, **kwargs)
+                    finally:
+                        QObject._pop_sender()
+            finally:
+                self._emitting -= 1
+            if self._emitting == 0 and self._deferred:
+                deferred = list(self._deferred)
+                self._deferred.clear()
+                for callback in deferred:
+                    callback()
 
     class _SignalDescriptor:
         def __init__(self) -> None:
@@ -274,10 +293,24 @@ class JobManager(QObject):
 
     def has_pending_jobs(self) -> bool:
         """Return whether jobs are queued or running."""
-        return bool(self._pending or self._running)
+        return bool(self._pending or self._running or self._schedule_pending)
 
     def wait_for_done(self, timeout_ms: int = -1) -> bool:
         """Block until all jobs complete or ``timeout_ms`` elapses."""
+        if _HEADLESS_MODE:
+            deadline = None if timeout_ms < 0 else time.monotonic() + (timeout_ms / 1000.0)
+            while self.has_pending_jobs():
+                if deadline is None:
+                    slice_ms = 100
+                else:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        return False
+                    slice_ms = max(1, min(100, int(remaining * 1000)))
+                self._pool.waitForDone(slice_ms)
+                if self.has_pending_jobs():
+                    time.sleep(0.001)
+            return self._pool.waitForDone(0)
         return self._pool.waitForDone(timeout_ms)
 
     def shutdown(self, timeout_ms: int = -1) -> bool:
@@ -285,7 +318,11 @@ class JobManager(QObject):
         return self.wait_for_done(timeout_ms)
 
     def _request_schedule(self) -> None:
+        if not self._pending:
+            return
         if self._schedule_pending:
+            return
+        if self._running >= self._pool.maxThreadCount():
             return
         self._schedule_pending = True
         QTimer.singleShot(0, self._drain_pending)
@@ -304,7 +341,12 @@ class JobManager(QObject):
         sender = self.sender()
         if not isinstance(sender, JobSignals):
             return
-        signals = sender
+        if _HEADLESS_MODE:
+            sender.finished.defer_after_emit(lambda: self._complete_finished_job(sender))
+            return
+        self._complete_finished_job(sender)
+
+    def _complete_finished_job(self, signals: JobSignals) -> None:
         self._signal_to_runnable.pop(signals, None)
         try:
             signals.finished.disconnect(self._handle_job_finished)
@@ -313,7 +355,7 @@ class JobManager(QObject):
         self._active_signals.discard(signals)
         signals.deleteLater()
         self._running = max(0, self._running - 1)
-        self._start_available_jobs()
+        self._request_schedule()
 
 
 __all__ = [

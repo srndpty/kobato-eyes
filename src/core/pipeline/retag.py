@@ -1,9 +1,12 @@
+"""Helpers for marking files for re-tagging and scanning explicit selections."""
+
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Iterable, Sequence
+from typing import TypeVar
 
 from core.config import load_settings
 from db.connection import get_conn
@@ -19,13 +22,15 @@ logger = logging.getLogger(__name__)
 # SQLite の SQLITE_MAX_VARIABLE_NUMBER は既定 999。
 # 安全側に振って 900 でチャンクします（必要なら環境に合わせて調整可）。
 _SQL_IN_CHUNK = 900
+_T = TypeVar("_T")
 
 
-def _chunked(seq, n=_SQL_IN_CHUNK):
-    """seq を n 件ずつに分割してジェネレートする軽量ヘルパー。"""
-    seq = list(seq)
-    for i in range(0, len(seq), n):
-        chunk = seq[i : i + n]
+def _chunked(seq: Iterable[_T], n: int = _SQL_IN_CHUNK) -> Iterator[list[_T]]:
+    """Yield non-empty chunks from ``seq``."""
+
+    items = list(seq)
+    for i in range(0, len(items), n):
+        chunk = items[i : i + n]
         if chunk:
             yield chunk
 
@@ -112,6 +117,8 @@ class _RetagScanStage:
 
             # 900件ずつ SELECT ... WHERE id IN (...)
             for id_chunk in _chunked(self._file_ids):
+                if emitter.cancelled(ctx.is_cancelled):
+                    break
                 placeholders = ",".join("?" for _ in id_chunk)
                 sql = (
                     "SELECT id, path, size, mtime, sha256, indexed_at, tagger_sig, last_tagged_at, width, height "
@@ -120,6 +127,8 @@ class _RetagScanStage:
                 rows = conn.execute(sql, tuple(id_chunk)).fetchall()
 
                 for row in rows:
+                    if emitter.cancelled(ctx.is_cancelled):
+                        break
                     file_id = int(row["id"])
                     path = Path(row["path"])
 
@@ -198,7 +207,8 @@ class _RetagScanStage:
                     )
 
             conn.commit()
-            emitter.emit(IndexProgress(phase=IndexPhase.SCAN, done=total, total=total), force=True)
+            done = scanned if emitter.cancelled(ctx.is_cancelled) else total
+            emitter.emit(IndexProgress(phase=IndexPhase.SCAN, done=done, total=total), force=True)
             return ScanStageResult(records=records, scanned=len(records), new_or_changed=new_or_changed)
         finally:
             conn.close()

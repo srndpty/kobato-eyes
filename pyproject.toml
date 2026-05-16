@@ -115,6 +115,7 @@ files = [
     "src/core/pipeline/contracts.py",
     "src/core/pipeline/types.py",
     "src/core/pipeline/loaders.py",
+    "src/core/pipeline/retag.py",
     "src/core/pipeline/resolver.py",
     "src/core/pipeline/utils.py",
     "src/core/pipeline/testhooks.py",
