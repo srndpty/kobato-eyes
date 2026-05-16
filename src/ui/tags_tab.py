@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import html
 import itertools
 import logging
 import os
@@ -11,7 +10,6 @@ import shutil
 import sqlite3
 import subprocess
 import sys
-import threading
 from contextlib import AbstractContextManager, nullcontext
 from datetime import datetime
 from pathlib import Path
@@ -23,8 +21,6 @@ from PyQt6.QtCore import (
     QModelIndex,
     QObject,
     QPoint,
-    QRect,
-    QRectF,
     QRunnable,
     QSize,
     Qt,
@@ -34,19 +30,7 @@ from PyQt6.QtCore import (
     QUrl,
     pyqtSignal,
 )
-from PyQt6.QtGui import (
-    QColor,
-    QDesktopServices,
-    QKeyEvent,
-    QKeySequence,
-    QPalette,
-    QPixmap,
-    QShortcut,
-    QStandardItem,
-    QStandardItemModel,
-    QTextDocument,
-    QTextOption,
-)
+from PyQt6.QtGui import QDesktopServices, QKeyEvent, QKeySequence, QPixmap, QShortcut, QStandardItem, QStandardItemModel
 from PyQt6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -63,9 +47,6 @@ from PyQt6.QtWidgets import (
     QPushButton,
     QSizePolicy,
     QStackedWidget,
-    QStyle,
-    QStyledItemDelegate,
-    QStyleOptionViewItem,
     QTableView,
     QToolButton,
     QVBoxLayout,
@@ -77,7 +58,6 @@ from core.pipeline import IndexProgress, run_index_once
 from db.connection import get_conn
 from tagger import labels_util
 from tagger.base import TagCategory
-from tagger.categories import build_category_lookup
 from tagger.wd14_onnx import ONNXRUNTIME_MISSING_MESSAGE
 from ui.autocomplete import (
     abbreviate_count,
@@ -85,11 +65,19 @@ from ui.autocomplete import (
     extract_completion_token,
     replace_completion_token,
 )
+from ui.index_tasks import IndexRunnable
+from ui.result_delegates import GridThumbDelegate
+from ui.result_delegates import HighlightDelegate as _HighlightDelegate
+from ui.result_delegates import WrappingItemDelegate as _WrappingItemDelegate
 from ui.search_worker import SearchWorker
+from ui.tag_rendering import _SCORE_COLOR, _TAG_LIST_ROLE, TagDisplayEntry
+from ui.tag_rendering import coerce_category as _coerce_category
+from ui.tag_rendering import filter_tags_by_threshold as _filter_tags_by_threshold
 from ui.tag_stats import TagStatsDialog
+from ui.thumbnail_tasks import ThumbnailSignal as _ThumbnailSignal
+from ui.thumbnail_tasks import ThumbnailTask as _ThumbnailTask
 from ui.viewmodels import TagsSearchState, TagsViewModel
 from ui.widgets.spinner_overlay import SpinnerOverlay
-from utils.image_io import get_thumbnail
 
 logger = logging.getLogger(__name__)
 
@@ -106,163 +94,6 @@ _PREFIXES = (
     "meta:",
     "rating:",
 )
-_CATEGORY_KEY_LOOKUP = build_category_lookup()
-_TAG_COLOR_MAP = {
-    TagCategory.GENERAL: "#45C5F7",
-    TagCategory.CHARACTER: "#63CC69",
-    TagCategory.COPYRIGHT: "#C976D8",
-}
-_SCORE_COLOR = "rgba(255, 255, 255, 0.80)"
-_NEUTRAL_TAG_COLOR = "#90A4AE"
-_HIGHLIGHT_SCORE_COLOR = "rgba(0, 0, 0, 0.86)"
-_HIGHLIGHT_SCORE_SHADOW = "0 0 3px rgba(0, 0, 0, 0.6)"
-TagDisplayEntry = tuple[str, float, TagCategory | None]
-
-
-def _coerce_category(value: object) -> TagCategory | None:
-    """Convert *value* to :class:`TagCategory` when possible."""
-
-    if value is None:
-        return None
-    if isinstance(value, TagCategory):
-        try:
-            return TagCategory(int(value))
-        except ValueError:
-            return None
-    if isinstance(value, (int, float)) and not isinstance(value, bool):
-        try:
-            return TagCategory(int(value))
-        except ValueError:
-            return None
-    if isinstance(value, str):
-        key = value.strip().lower()
-        if key:
-            return _CATEGORY_KEY_LOOKUP.get(key)
-    return None
-
-
-def _filter_tags_by_threshold(tag_rows) -> list[TagDisplayEntry]:
-    """tag_rows は (name, score) か (name, score, category) を想定。"""
-
-    out: list[TagDisplayEntry] = []
-    for row in tag_rows:
-        name: object | None = None
-        score_value: object | None = None
-        category_value: object | None = None
-
-        if isinstance(row, dict):
-            name = row.get("name")
-            score_value = row.get("score", 0.0)
-            category_value = row.get("category")
-        else:
-            try:
-                length = len(row)
-            except TypeError:
-                continue
-            if length == 3:
-                name, score_value, category_value = row
-            elif length == 2:
-                name, score_value = row
-            else:
-                continue
-
-        try:
-            score = float(score_value)
-        except (TypeError, ValueError):
-            continue
-
-        if score >= 0.1:  # 0.1以上で固定！ 細かいロングテールタグ問題が鬱陶しいので強制的に解決
-            out.append((str(name), float(score), _coerce_category(category_value)))
-
-    return out
-
-
-def _rel_luma(color: QColor) -> float:
-    """Return the relative luminance of an sRGB color."""
-
-    def _channel(value: int) -> float:
-        normalized = value / 255.0
-        if normalized <= 0.04045:
-            return normalized / 12.92
-        return ((normalized + 0.055) / 1.055) ** 2.4
-
-    return 0.2126 * _channel(color.red()) + 0.7152 * _channel(color.green()) + 0.0722 * _channel(color.blue())
-
-
-def _pick_highlight_colors(palette) -> tuple[str, str]:
-    """Choose highlight background/foreground colors based on the palette."""
-
-    base = palette.window().color()
-    text = palette.text().color()
-    is_dark = (_rel_luma(base) < 0.5) or (_rel_luma(text) > 0.7)
-
-    if is_dark:
-        background = "#FFD54F"
-        foreground = "#000000"
-    else:
-        background = "#FFF59D"
-        foreground = "#000000"
-    return background, foreground
-
-
-_TAG_LIST_ROLE = Qt.ItemDataRole.UserRole + 128
-
-
-def _category_color(category: TagCategory | None) -> str:
-    return _TAG_COLOR_MAP.get(category, _NEUTRAL_TAG_COLOR)
-
-
-def _mix_hex(fg: str, bg: str, w: float) -> str:
-    """hex色を合成。w=1.0でfg、0.0でbg。"""
-    w = max(0.0, min(1.0, w))
-
-    def _c(h):
-        h = h.lstrip("#")
-        return int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
-
-    fr, fg_, fb = _c(fg)
-    br, bg_, bb = _c(bg)
-    r = round(fr * w + br * (1 - w))
-    g = round(fg_ * w + bg_ * (1 - w))
-    b = round(fb * w + bb * (1 - w))
-    return f"#{r:02x}{g:02x}{b:02x}"
-
-
-def _darken_hex(hex_color: str, factor: float = 0.75) -> str:
-    """色を少し暗く。factorは元色の寄与率（0.7〜0.85あたり推奨）。"""
-    return _mix_hex(hex_color, "#000000", factor)
-
-
-def _render_tag_html(
-    name: str,
-    score: float,
-    category: TagCategory | None,
-    *,
-    highlight: bool,
-    highlight_bg: str,
-    highlight_fg: str,
-) -> str:
-    name_html = html.escape(name)
-    score_html = html.escape(f"({score:.2f})")
-
-    if highlight:
-        # タグ名はカテゴリ色を維持、スコアは黒系。外側は背景のみ指定。
-        base = _category_color(category)  # ex. 緑/マゼンタ/青
-        name_col = _darken_hex(base, 0.5)  # 0.72〜0.80で調整可
-        name_style = f"color:{name_col};"
-        # name_style = f"color:{_category_color(category)};"
-        score_style = f"color:{_HIGHLIGHT_SCORE_COLOR};"
-        return (
-            f'<span style="background-color:{highlight_bg}; padding:0 2px; border-radius:2px;">'
-            f'<span style="{name_style}">{name_html}</span> '
-            f'<span style="{score_style}">{score_html}</span>'
-            f"</span>"
-        )
-
-    tag_color = _category_color(category)
-    name_style = f"color:{tag_color};"
-    score_style = f"color:{_SCORE_COLOR};"
-    return f'<span style="{name_style}">{name_html}</span> <span style="{score_style}">{score_html}</span>'
 
 
 class _ElidingLabel(QLabel):
@@ -353,377 +184,6 @@ class _CopyRunnable(QRunnable):
             self.signals.finished.emit(str(self.dest_dir), ok, ng)
         except Exception as e:
             self.signals.error.emit(str(e))
-
-
-class _WrappingItemDelegate(QStyledItemDelegate):
-    """Render text on multiple lines instead of eliding."""
-
-    def __init__(
-        self,
-        parent: QWidget | None = None,
-        *,
-        wrap_mode: QTextOption.WrapMode = QTextOption.WrapMode.WrapAnywhere,
-    ) -> None:  # noqa: D401 - Qt signature
-        super().__init__(parent)
-        self._wrap_mode = wrap_mode
-
-    def _create_document(self, option: QStyleOptionViewItem, text: str) -> QTextDocument:
-        doc = QTextDocument()
-        doc.setDocumentMargin(0)
-        doc.setDefaultFont(option.font)
-        text_option = QTextOption()
-        text_option.setWrapMode(self._wrap_mode)
-        alignment = option.displayAlignment or Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop
-        text_option.setAlignment(alignment)
-        doc.setDefaultTextOption(text_option)
-        doc.setPlainText(text)
-        safe = html.escape(text)
-        doc.setHtml(f'<span style="color:{_SCORE_COLOR};">{safe}</span>')
-        return doc
-
-    def paint(self, painter, option: QStyleOptionViewItem, index: QModelIndex):  # noqa: D401 - Qt signature
-        opt = QStyleOptionViewItem(option)
-        self.initStyleOption(opt, index)
-        text = opt.text
-        opt.text = ""
-        style = opt.widget.style() if opt.widget else QApplication.style()
-        style.drawControl(QStyle.ControlElement.CE_ItemViewItem, opt, painter, opt.widget)
-
-        if not text:
-            return
-
-        doc = self._create_document(opt, text)
-        rect = opt.rect
-        painter.save()
-        painter.translate(rect.topLeft())
-        doc.setTextWidth(rect.width())
-        doc.drawContents(painter, QRectF(0, 0, rect.width(), rect.height()))
-        painter.restore()
-
-    def sizeHint(self, option: QStyleOptionViewItem, index: QModelIndex):  # noqa: D401 - Qt signature
-        opt = QStyleOptionViewItem(option)
-        self.initStyleOption(opt, index)
-        text = opt.text
-        if not text:
-            return super().sizeHint(option, index)
-        doc = self._create_document(opt, text)
-        available_width = option.rect.width()
-        if available_width <= 0 and option.widget is not None:
-            available_width = option.widget.width()
-        if available_width > 0:
-            doc.setTextWidth(available_width)
-        size = doc.size().toSize()
-        size.setHeight(size.height() + 4)
-        return size
-
-
-class _HighlightDelegate(QStyledItemDelegate):
-    """Render text with highlighted substrings supplied by a provider."""
-
-    def __init__(
-        self,
-        terms_provider: Callable[[], Iterable[str]],
-        parent: QWidget | None = None,
-    ) -> None:  # noqa: D401 - Qt signature
-        super().__init__(parent)
-        self._terms_provider = terms_provider
-
-    @staticmethod
-    def _to_html_with_highlight(
-        text: str,
-        terms: list[str],
-        tags: Iterable[TagDisplayEntry] | None,
-        *,
-        bg: str,
-        fg: str,
-    ) -> str:
-        term_set = {term.lower() for term in terms if term}
-        if tags:
-            parts: list[str] = []
-            for entry in tags:
-                if not entry:
-                    continue
-                if isinstance(entry, (list, tuple)):
-                    name = str(entry[0])
-                    score_value = entry[1] if len(entry) > 1 else None
-                    category_value = entry[2] if len(entry) > 2 else None
-                else:
-                    # 想定外の形式は素通り
-                    continue
-                try:
-                    score = float(score_value)
-                except (TypeError, ValueError):
-                    continue
-                category_obj = _coerce_category(category_value)
-                highlighted = term_set and name.lower() in term_set
-                parts.append(
-                    _render_tag_html(
-                        name,
-                        score,
-                        category_obj,
-                        highlight=bool(highlighted),
-                        highlight_bg=bg,
-                        highlight_fg=fg,
-                    )
-                )
-            if parts:
-                return ", ".join(parts)
-        return html.escape(text or "")
-
-    def paint(self, painter, option: QStyleOptionViewItem, index):  # noqa: D401 - Qt signature
-        opt = QStyleOptionViewItem(option)
-        self.initStyleOption(opt, index)
-        opt.text = ""
-        style = opt.widget.style() if opt.widget else QApplication.style()
-        style.drawControl(QStyle.ControlElement.CE_ItemViewItem, opt, painter, opt.widget)
-
-        text = str(index.data() or "")
-        raw_tags = index.data(int(_TAG_LIST_ROLE))
-        tags = list(raw_tags) if raw_tags else []
-        terms = list(self._terms_provider() or [])
-        background, foreground = _pick_highlight_colors(option.palette)
-        doc = QTextDocument()
-        doc.setDocumentMargin(0)
-        doc.setDefaultFont(opt.font)
-        doc.setHtml(
-            self._to_html_with_highlight(
-                text,
-                terms,
-                tags,
-                bg=background,
-                fg=foreground,
-            )
-        )
-        rect = option.rect
-        painter.save()
-        painter.translate(rect.topLeft())
-        doc.setTextWidth(rect.width())
-        doc.drawContents(painter, QRectF(0, 0, rect.width(), rect.height()))
-        painter.restore()
-
-    def sizeHint(self, option: QStyleOptionViewItem, index):  # noqa: D401 - Qt signature
-        text = str(index.data() or "")
-        raw_tags = index.data(int(_TAG_LIST_ROLE))
-        tags = list(raw_tags) if raw_tags else []
-        terms = list(self._terms_provider() or [])
-        background, foreground = _pick_highlight_colors(option.palette)
-        doc = QTextDocument()
-        doc.setDocumentMargin(0)
-        doc.setDefaultFont(option.font)
-        doc.setHtml(
-            self._to_html_with_highlight(
-                text,
-                terms,
-                tags,
-                bg=background,
-                fg=foreground,
-            )
-        )
-        available_width = option.rect.width()
-        if available_width <= 0 and option.widget is not None:
-            available_width = option.widget.width()
-        if available_width > 0:
-            doc.setTextWidth(available_width)
-        size = doc.size().toSize()
-        size.setHeight(size.height() + 4)
-        return size
-
-
-class GridThumbDelegate(QStyledItemDelegate):
-    """Render thumbnails with captions in the grid view."""
-
-    def __init__(self, thumb_size: int, parent: QWidget | None = None) -> None:  # noqa: D401 - Qt signature
-        super().__init__(parent)
-        self._thumb = thumb_size
-
-    def sizeHint(self, option: QStyleOptionViewItem, index: QModelIndex) -> QSize:  # noqa: D401 - Qt signature
-        fm = option.fontMetrics
-        text_height = fm.lineSpacing() * 2 + 10
-        return QSize(self._thumb + 48, self._thumb + text_height)
-
-    def paint(
-        self,
-        painter,
-        option: QStyleOptionViewItem,
-        index: QModelIndex,
-    ) -> None:  # noqa: D401 - Qt signature
-        opt = QStyleOptionViewItem(option)
-        self.initStyleOption(opt, index)
-
-        style = opt.widget.style() if opt.widget else QApplication.style()
-        painter.save()
-        style.drawPrimitive(
-            QStyle.PrimitiveElement.PE_PanelItemViewItem,
-            opt,
-            painter,
-            opt.widget,
-        )
-        painter.restore()
-
-        rect = opt.rect
-        pix = index.data(Qt.ItemDataRole.DecorationRole)
-        icon_bottom = rect.y() + self._thumb
-        if isinstance(pix, QPixmap) and not pix.isNull():
-            thumb = pix.scaled(
-                self._thumb,
-                self._thumb,
-                Qt.AspectRatioMode.KeepAspectRatio,
-                Qt.TransformationMode.SmoothTransformation,
-            )
-            x = rect.x() + (rect.width() - thumb.width()) // 2
-            y = rect.y()
-            painter.drawPixmap(x, y, thumb)
-            icon_bottom = y + thumb.height()
-
-        available_height = max(0, rect.y() + rect.height() - icon_bottom - 4)
-        text_rect = QRect(
-            rect.x() + 6,
-            icon_bottom + 2,
-            max(0, rect.width() - 12),
-            available_height,
-        )
-        if text_rect.width() <= 0 or text_rect.height() <= 0:
-            return
-
-        palette = opt.palette
-        color_group = palette.currentColorGroup()
-        is_selected = bool(opt.state & QStyle.StateFlag.State_Selected)
-        text_role = QPalette.ColorRole.HighlightedText if is_selected else QPalette.ColorRole.Text
-        text_color = palette.color(color_group, text_role)
-
-        base_role = QPalette.ColorRole.Highlight if is_selected else QPalette.ColorRole.Base
-        base_color = palette.color(color_group, base_role)
-        luminance = 0.299 * base_color.red() + 0.587 * base_color.green() + 0.114 * base_color.blue()
-        is_dark_theme = luminance < 128
-
-        if is_dark_theme:
-            painter.save()
-            painter.setPen(Qt.PenStyle.NoPen)
-            painter.setBrush(base_color)
-            painter.drawRoundedRect(text_rect, 4, 4)
-            painter.restore()
-
-        fm = opt.fontMetrics
-        raw_lines = str(index.data(Qt.ItemDataRole.DisplayRole) or "").splitlines()
-        if not raw_lines:
-            raw_lines = [""]
-        if len(raw_lines) >= 2:
-            lines = [raw_lines[0], " ".join(raw_lines[1:])]
-        else:
-            lines = [raw_lines[0]]
-        lines = [fm.elidedText(line, Qt.TextElideMode.ElideRight, text_rect.width()) for line in lines]
-        lines = [line for line in lines if line] or [""]
-
-        total_height = fm.lineSpacing() * len(lines)
-        y_start = text_rect.y() + max(0, text_rect.height() - total_height)
-
-        painter.save()
-        painter.setPen(text_color)
-        for i, line in enumerate(lines):
-            line_rect = QRect(
-                text_rect.x(),
-                y_start + i * fm.lineSpacing(),
-                text_rect.width(),
-                fm.lineSpacing(),
-            )
-            painter.drawText(
-                line_rect,
-                Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter,
-                line,
-            )
-        painter.restore()
-
-
-class _ThumbnailSignal(QObject):
-    finished = pyqtSignal(int, QPixmap)
-
-
-class _ThumbnailTask(QRunnable):
-    def __init__(
-        self,
-        row: int,
-        path: Path,
-        width: int,
-        height: int,
-        signal: _ThumbnailSignal,
-    ) -> None:
-        super().__init__()
-        self._row = row
-        self._path = path
-        self._width = width
-        self._height = height
-        self._signal = signal
-
-    def run(self) -> None:  # noqa: D401
-        pixmap = get_thumbnail(self._path, self._width, self._height)
-        self._signal.finished.emit(self._row, pixmap)
-
-
-class IndexRunnable(QRunnable):
-    """Execute ``run_index_once`` on a worker thread with progress reporting."""
-
-    class IndexSignals(QObject):
-        progress = pyqtSignal(int, int, str)
-        finished = pyqtSignal(dict)
-        error = pyqtSignal(str)
-
-    def __init__(
-        self,
-        view_model: TagsViewModel,
-        db_path: Path,
-        *,
-        settings: PipelineSettings | None = None,
-        pre_run: Callable[[], dict[str, object]] | None = None,
-        runner: Callable[[Callable[[IndexProgress], None], Callable[[], bool]], dict[str, object]] | None = None,
-    ) -> None:
-        super().__init__()
-        self._view_model = view_model
-        self._db_path = Path(db_path)
-        self._settings = settings
-        self._pre_run = pre_run
-        self._runner = runner
-        self.signals = self.IndexSignals()
-        self._cancel_event = threading.Event()
-
-    def cancel(self) -> None:
-        """Request cancellation of the current indexing run."""
-
-        self._cancel_event.set()
-
-    def _emit_progress(self, progress: IndexProgress) -> None:
-        label = progress.phase.name.title()
-        if progress.total < 0 and progress.message:
-            label = progress.message
-
-        try:
-            self.signals.progress.emit(progress.done, progress.total, label)
-        except RuntimeError:
-            # ウィジェット/Signalsが破棄済み。静かに無視。
-            return
-
-    def _execute(self) -> dict[str, object]:
-        if self._runner is not None:
-            return self._runner(self._emit_progress, self._cancel_event.is_set)
-        return self._view_model.run_index_once(
-            self._db_path,
-            settings=self._settings,
-            progress_cb=self._emit_progress,
-            is_cancelled=self._cancel_event.is_set,
-        )
-
-    def run(self) -> None:  # noqa: D401
-        try:
-            extra: dict[str, object] = {}
-            if self._pre_run is not None:
-                extra = self._pre_run()
-            stats = self._execute()
-            if extra:
-                stats.update(extra)
-        except Exception as exc:  # pragma: no cover - defensive logging
-            logger.exception("Indexing failed for database %s", self._db_path)
-            self.signals.error.emit(str(exc))
-        else:
-            self.signals.finished.emit(stats)
 
 
 class TagsTab(QWidget):

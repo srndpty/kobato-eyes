@@ -2,41 +2,20 @@
 
 from __future__ import annotations
 
-import csv
 import logging
 import os
-import platform
-import subprocess
 import time
 from collections import deque
 from contextlib import closing
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterator, Sequence
 
-from PIL import Image
-from PIL.ImageQt import ImageQt
-from PyQt6.QtCore import (
-    QEvent,
-    QObject,
-    QPoint,
-    QRect,
-    QRunnable,
-    QSize,
-    Qt,
-    QThreadPool,
-    QTimer,
-    QtMsgType,
-    pyqtSignal,
-    qInstallMessageHandler,
-)
-from PyQt6.QtGui import QAction, QColor, QFontMetrics, QIcon, QImage, QPainter, QPixmap
+from PyQt6.QtCore import QEvent, QPoint, QSize, Qt, QThreadPool, QTimer, QtMsgType, qInstallMessageHandler
+from PyQt6.QtGui import QAction, QColor, QIcon, QImage, QPainter, QPixmap
 from PyQt6.QtWidgets import (
     QAbstractItemView,
-    QCheckBox,
     QDoubleSpinBox,
     QFileDialog,
-    QFrame,
     QHBoxLayout,
     QHeaderView,
     QLabel,
@@ -45,18 +24,17 @@ from PyQt6.QtWidgets import (
     QProgressBar,
     QProgressDialog,
     QPushButton,
-    QSizePolicy,
     QSpinBox,
     QTreeWidget,
     QTreeWidgetItem,
     QVBoxLayout,
     QWidget,
 )
-from send2trash import send2trash
 
-from core.fastsig import fast_fill_missing_signatures
-from dup.scanner import DuplicateCluster, DuplicateClusterEntry, DuplicateFile, DuplicateScanConfig
-from ui.dup_refine_parallel import refine_by_pixels_parallel, refine_by_tilehash_parallel
+from dup.scanner import DuplicateCluster, DuplicateClusterEntry
+from ui.dup_widgets import ThumbPanel, ThumbTile, format_duplicate_resolution, format_duplicate_size
+from ui.dup_workers import DuplicateScanRequest, DuplicateScanRunnable, RefinePipelineRunnable, ThumbJob, ThumbSignals
+from ui.file_actions import export_duplicate_clusters_csv, open_path, reveal_in_file_manager, trash_duplicate_entries
 from ui.viewmodels import DupViewModel
 
 logger = logging.getLogger(__name__)
@@ -78,390 +56,6 @@ def _qt_msg(mode, ctx, msg):
 
 
 qInstallMessageHandler(_qt_msg)
-
-
-class RefinePipelineSignals(QObject):
-    progress = pyqtSignal(int, int, str)  # cur, total, stage label
-    finished = pyqtSignal(object)  # refined clusters
-    canceled = pyqtSignal()
-    error = pyqtSignal(str)
-
-
-class RefinePipelineRunnable(QRunnable):
-    def __init__(self, clusters, tile_params, pixel_params):
-        super().__init__()
-        self.signals = RefinePipelineSignals()
-        self._clusters = clusters
-        self._tile_params = tile_params or {}
-        self._pixel_params = pixel_params or {}
-        self._cancelled = False
-
-    def cancel(self):
-        self._cancelled = True
-
-    def _is_cancelled(self):
-        return self._cancelled
-
-    def run(self):
-        try:
-            # ---- TileHash (1/2, 2/2) ----
-            def tick_tile(done, total, phase):
-                stage = "TileHash 1/2" if phase == 1 else "TileHash 2/2"
-                self.signals.progress.emit(done, total, stage)
-
-            refined = refine_by_tilehash_parallel(
-                self._clusters, tick=tick_tile, is_cancelled=self._is_cancelled, **self._tile_params
-            )
-            if self._cancelled:
-                self.signals.canceled.emit()
-                return
-
-            # ---- Pixel MAE ----
-            if self._pixel_params:
-
-                def tick_px(done, total):
-                    self.signals.progress.emit(done, total, "Pixel MAE")
-
-                refined = refine_by_pixels_parallel(
-                    refined, tick=tick_px, is_cancelled=self._is_cancelled, **self._pixel_params
-                )
-                if self._cancelled:
-                    self.signals.canceled.emit()
-                    return
-
-            self.signals.finished.emit(refined)
-        except Exception as e:
-            self.signals.error.emit(str(e))
-
-
-@dataclass(frozen=True)
-class DuplicateScanRequest:
-    """Parameters supplied to the duplicate scanning worker."""
-
-    path_like: str | None
-    hamming_threshold: int
-    size_ratio: float | None
-
-
-class ThumbTile(QFrame):
-    """256x256 サムネ + 2行テキスト + チェックの小さなタイル."""
-
-    toggled = pyqtSignal(bool)  # 必要なら使う
-
-    def __init__(self, entry: DuplicateClusterEntry, icon_size: QSize, parent=None):
-        super().__init__(parent)
-        self.setObjectName("ThumbTile")
-        self.entry = entry
-        self.icon_size = icon_size
-        self.path = entry.file.path
-        self.setFrameShape(QFrame.Shape.NoFrame)
-        self.setStyleSheet("""
-        #ThumbTile { background: transparent; }
-        #ThumbTile:hover { background: rgba(255,255,255,0.04); border-radius: 6px; }
-        """)
-
-        self.thumb = QLabel(self)
-        self.thumb.setFixedSize(icon_size)
-        self.thumb.setScaledContents(False)
-        self.thumb.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.check = QCheckBox(self)
-        # 既定状態（keeper は Unchecked, それ以外 Checked）
-        st = Qt.CheckState.Unchecked if entry.file.file_id == parent.property("keeper_id") else Qt.CheckState.Checked
-        self.check.setCheckState(st)
-
-        self.meta1 = QLabel(self)  # 1行目: size,res,ham
-        self.meta2 = QLabel(self)  # 2行目: dir (middle elide)
-        for lab in (self.meta1, self.meta2):
-            lab.setWordWrap(False)
-            lab.setTextInteractionFlags(Qt.TextInteractionFlag.NoTextInteraction)
-
-        lay = QVBoxLayout(self)
-        lay.setContentsMargins(4, 4, 4, 4)
-        lay.setSpacing(4)
-        lay.addWidget(self.thumb, alignment=Qt.AlignmentFlag.AlignHCenter)
-        lay.addWidget(self.meta1)
-        lay.addWidget(self.meta2)
-
-        # メタ設定
-        size_t = DupTab._format_size(entry.file.size)
-        res_t = DupTab._format_resolution(entry.file.width, entry.file.height)
-        ham_t = "-" if entry.best_hamming is None else f"H:{entry.best_hamming}"
-        self.meta1.setText(f"{size_t}   {res_t}   {ham_t}")
-
-        fm = QFontMetrics(self.font())
-        folder = str(entry.file.path.parent)
-        self.meta2.setText(fm.elidedText(folder, Qt.TextElideMode.ElideMiddle, icon_size.width()))
-
-        # チェックは左上にオーバレイ
-        self.check.raise_()
-        self.check.move(6, 6)
-
-        self.check.stateChanged.connect(lambda _s: self.toggled.emit(self.is_checked()))
-
-    # サムネ適用
-    def set_pixmap(self, pix: QPixmap | None, placeholder: QIcon) -> None:
-        target = self.icon_size
-        if pix is None or pix.isNull():
-            self.thumb.setPixmap(placeholder.pixmap(target))
-            return
-
-        # アス比維持でフィット
-        scaled = pix.scaled(target, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
-
-        # レターボックスに中央配置
-        canvas = QPixmap(target)
-        canvas.fill(Qt.GlobalColor.transparent)  # 透過。灰背景にしたいなら fill(QColor(50,50,50))
-        p = QPainter(canvas)
-        x = (target.width() - scaled.width()) // 2
-        y = (target.height() - scaled.height()) // 2
-        p.drawPixmap(x, y, scaled)
-        p.end()
-        self.thumb.setPixmap(canvas)
-
-    def is_checked(self) -> bool:
-        return self.check.checkState() == Qt.CheckState.Checked
-
-    def set_checked(self, checked: bool) -> None:
-        self.check.setCheckState(Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked)
-
-
-class ThumbPanel(QWidget):
-    """
-    グループ内のタイルをグリッドで敷き詰めるパネル。
-    QGridLayout でも良いが、パフォーマンスのため手動レイアウトにする。
-    """
-
-    sizeHintChanged = pyqtSignal()
-
-    def __init__(
-        self,
-        entries: list[DuplicateClusterEntry],
-        keeper_id: int,
-        icon_size: QSize,
-        col_gap=10,
-        row_gap=12,
-        parent=None,
-    ):
-        super().__init__(parent)
-        self._icon_size = icon_size
-        self._col_gap = col_gap
-        self._row_gap = row_gap
-        self.tiles: list[ThumbTile] = []
-        self.setProperty("keeper_id", keeper_id)
-        for e in entries:
-            t = ThumbTile(e, icon_size, parent=self)
-            self.tiles.append(t)
-            t.setParent(self)
-            t.show()
-        self._cols = 1
-        self._tile_size = QSize(icon_size.width() + 8, icon_size.height() + 8 + 2 * self.fontMetrics().height() + 12)
-        self._content_h = self._tile_size.height() + 8  # ← パネル全体の高さを保持
-        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)  # ← 重要（縦は sizeHint に従う）
-        self.setMinimumHeight(self._tile_size.height() + 8)
-
-    def _compute_cols(self) -> int:
-        w = max(1, self.width())
-        cell_w = self._tile_size.width() + self._col_gap
-        return max(1, w // cell_w)
-
-    def resizeEvent(self, ev):
-        super().resizeEvent(ev)
-        self._relayout()
-
-    def _relayout(self):
-        cols = self._compute_cols()
-        if cols != self._cols:
-            self._cols = cols
-        cell_w = self._tile_size.width() + self._col_gap
-        cell_h = self._tile_size.height() + self._row_gap
-        for i, t in enumerate(self.tiles):
-            r = i // self._cols
-            c = i % self._cols
-            x = c * cell_w
-            y = r * cell_h
-            t.setGeometry(x, y, self._tile_size.width(), self._tile_size.height())
-
-        rows = (len(self.tiles) + self._cols - 1) // self._cols
-        self._content_h = rows * cell_h
-        self.setMinimumHeight(rows * cell_h)
-        self.updateGeometry()
-        self.sizeHintChanged.emit()
-
-    def sizeHint(self):
-        # 幅はツリー側では使われないのでダミーでOK。高さだけ正確に返す
-        return QSize(self._tile_size.width(), self._content_h)
-        # self._relayout()
-        # return super().sizeHint()
-
-    def visible_tiles_in(self, viewport: QWidget, tree_viewport_rect: QRect) -> list[ThumbTile]:
-        """ツリーの viewport 座標系で見えているタイルを返す。"""
-        vis: list[ThumbTile] = []
-        # パネルの (0,0) をツリー viewport 座標へ
-        panel_top_left = self.mapTo(viewport, QPoint(0, 0))
-        for t in self.tiles:
-            r = t.geometry().translated(panel_top_left)
-            if r.intersects(tree_viewport_rect):
-                vis.append(t)
-        return vis
-
-
-class DuplicateScanSignals(QObject):
-    """Signals emitted by the scanning worker."""
-
-    progress = pyqtSignal(int, int)
-    finished = pyqtSignal(object)
-    error = pyqtSignal(str)
-
-
-class DuplicateScanRunnable(QRunnable):
-    """Background runnable that loads file metadata and clusters duplicates."""
-
-    def __init__(
-        self,
-        view_model: DupViewModel,
-        db_path: Path,
-        request: DuplicateScanRequest,
-    ) -> None:
-        super().__init__()
-        self._view_model = view_model
-        self._db_path = db_path
-        self._request = request
-        self.signals = DuplicateScanSignals()
-
-    def run(self) -> None:
-        try:
-            logger.info("scan: start")
-            # settings = load_settings()
-
-            # conn はこの with（closing）ブロック内でだけ使う
-            with closing(self._view_model.open_connection(self._db_path)) as conn:
-                rows = self._view_model.iter_files_for_dup(conn, self._request.path_like)
-                logger.info("scan: rows loaded = %d", len(rows))
-
-            # ---- 署名が足りないぶんを超速で埋める（DupタブScan時のみ） ----
-            missing: list[tuple[int, str]] = []
-            for r in rows:
-                fid = int(r["file_id"])
-                p = str(r["path"])
-                if r.get("phash_u64") is None:
-                    missing.append((fid, p))
-            if missing:
-                logger.info("sig: missing=%d → computing in parallel ...", len(missing))
-
-                def _tick(done, total):
-                    self.signals.progress.emit(done, total)  # プログレスバーで共有
-
-                computed = fast_fill_missing_signatures(
-                    str(self._db_path),
-                    missing,
-                    max_workers=int(os.environ.get("KE_SIG_WORKERS", "8")),  # SSD: 8〜16 / HDD: 4〜8
-                    chunksize=int(os.environ.get("KE_SIG_CHUNK", "64")),
-                    progress=_tick,
-                    apply_to_db=True,
-                    unsafe_fast=True,
-                )
-                # 行データにも即時反映（再クエリ不要）
-                m = {fid: (ph, dh) for (fid, ph, dh) in computed}
-                patched = 0
-                for r in rows:
-                    t = m.get(int(r["file_id"]))
-                    if t is not None:
-                        r["phash_u64"] = int(t[0])
-                        patched += 1
-                logger.info("sig: computed=%d, patched_rows=%d", len(computed), patched)
-
-            total = len(rows)
-            self.signals.progress.emit(0, total)
-
-            files: list[DuplicateFile] = []
-            bad_rows = 0
-            for index, row in enumerate(rows, start=1):
-                try:
-                    files.append(DuplicateFile.from_row(row))
-                except ValueError:
-                    bad_rows += 1
-                    continue
-                if index % 500 == 0:
-                    self.signals.progress.emit(index, total)
-            self.signals.progress.emit(total, total)
-
-            logger.setLevel(logging.DEBUG)
-            logger.info("scan: files built = %d (skipped rows=%d)", len(files), bad_rows)
-            if files:
-                logger.info("scan: sample phash head = %s", [hex(f.phash & ((1 << 64) - 1)) for f in files[:5]])
-            config = DuplicateScanConfig(
-                hamming_threshold=self._request.hamming_threshold,
-                size_ratio=self._request.size_ratio,
-            )
-
-            logger.info("cluster: building ...")
-            t0 = time.perf_counter()
-            clusters = self._view_model.build_clusters(config, files)
-            logger.info("cluster: done; n=%d, %.2fs", len(clusters), time.perf_counter() - t0)
-
-            self.signals.finished.emit(clusters)
-
-        except Exception as exc:
-            logger.exception("scan worker crashed: %s", exc)
-            try:
-                self.signals.error.emit(str(exc))
-            except RuntimeError:
-                pass
-
-
-class _ThumbSignals(QObject):
-    done = pyqtSignal(str, object)  # path(str) 単位で完了通知
-
-
-class _ThumbJob(QRunnable):
-    """
-    1ファイル分のサムネをディスクキャッシュに生成するだけ（Pillow使用）。
-    QPixmapはGUIスレッドで作るので、ここでは使わない。
-    """
-
-    def __init__(
-        self,
-        view_model: DupViewModel,
-        path: Path,
-        size: tuple[int, int],
-        cache_dir: Path,
-        signals: _ThumbSignals,
-    ) -> None:
-        super().__init__()
-        self._view_model = view_model
-        self._path = path
-        self._size = size
-        self._cache_dir = cache_dir
-        self._signals = signals
-
-    def run(self) -> None:
-        qimg = None
-        try:
-            # 将来の再利用用にディスクサムネは作っておく（失敗してもOK）
-            try:
-                self._view_model.generate_thumbnail(self._path, self._cache_dir, size=self._size, format="WEBP")
-            except Exception as e:
-                if DEBUG_THUMBS:
-                    logger.info("thumb gen failed:", self._path, e)
-
-            # 直接 QImage を作る（GUIスレッドでの再デコードを避ける）
-            with Image.open(self._path) as im:
-                im.load()
-                im = im.convert("RGB")
-                im.thumbnail(self._size, Image.Resampling.LANCZOS)
-                qimg = ImageQt(im).copy()  # .copy() でバッファを独立させる
-        except Exception as e:
-            if DEBUG_THUMBS:
-                logger.info("thumb worker error:", self._path, e)
-            qimg = None
-        finally:
-            try:
-                self._signals.done.emit(str(self._path), qimg)
-                if DEBUG_THUMBS:
-                    logger.info("thumb emitted:", self._path, bool(qimg))
-            except Exception as e:
-                # ここに来ることはほぼ無いが保険
-                logger.info("thumb emit failed:", e)
 
 
 class DupTab(QWidget):
@@ -636,7 +230,7 @@ class DupTab(QWidget):
         self._thumb_inflight: set[str] = set()
 
         # ★ サムネワーカー通信用シグナル
-        self._thumb_signals = _ThumbSignals()
+        self._thumb_signals = ThumbSignals()
         self._thumb_signals.done.connect(self._on_thumb_done, Qt.ConnectionType.QueuedConnection)
 
         # ★ QThreadPool は既存の self._pool を使い回す（QRunnableをstartでOK）
@@ -845,7 +439,7 @@ class DupTab(QWidget):
             if key in self._thumb_inflight or key in self._thumb_done:
                 continue
             path = Path(key)
-            job = _ThumbJob(self._view_model, path, size, cache_dir, self._thumb_signals)
+            job = ThumbJob(self._view_model, path, size, cache_dir, self._thumb_signals)
             self._thumb_inflight.add(key)
             self._thumb_pool.start(job)
             slots -= 1
@@ -985,7 +579,7 @@ class DupTab(QWidget):
         cache_dir = self._view_model.thumbnail_cache_dir()
         if DEBUG_THUMBS:
             logger.info(f"thumb enqueue: {key}")  # ← デバッグ
-        job = _ThumbJob(
+        job = ThumbJob(
             self._view_model,
             path,
             (self._icon_size.width(), self._icon_size.height()),
@@ -1442,14 +1036,7 @@ class DupTab(QWidget):
         if not checked_entries:
             QMessageBox.information(self, "Trash duplicates", "No files are checked for deletion.")
             return
-        successes: list[DuplicateClusterEntry] = []
-        failures: list[tuple[DuplicateClusterEntry, str]] = []
-        for entry in checked_entries:
-            try:
-                send2trash(str(entry.file.path))
-                successes.append(entry)
-            except Exception as exc:  # pragma: no cover - send2trash failures are platform dependent
-                failures.append((entry, str(exc)))
+        successes, failures = trash_duplicate_entries(checked_entries)
         if successes:
             try:
                 with closing(self._view_model.open_connection(self._db_path)) as conn:
@@ -1523,34 +1110,7 @@ class DupTab(QWidget):
         if not file_path:
             return
         try:
-            with open(file_path, "w", encoding="utf-8", newline="") as handle:
-                writer = csv.writer(handle)
-                writer.writerow(
-                    [
-                        "group",
-                        "file_id",
-                        "path",
-                        "size",
-                        "width",
-                        "height",
-                        "keeper",
-                        "hamming",
-                    ]
-                )
-                for group_index, cluster in enumerate(self._clusters, start=1):
-                    for entry in cluster.files:
-                        writer.writerow(
-                            [
-                                group_index,
-                                entry.file.file_id,
-                                entry.file.path.as_posix(),
-                                entry.file.size or 0,
-                                entry.file.width or 0,
-                                entry.file.height or 0,
-                                1 if entry.file.file_id == cluster.keeper_id else 0,
-                                entry.best_hamming if entry.best_hamming is not None else "",
-                            ]
-                        )
+            export_duplicate_clusters_csv(self._clusters, file_path)
         except OSError as exc:  # pragma: no cover - filesystem errors depend on environment
             QMessageBox.warning(self, "Export duplicates", str(exc))
             return
@@ -1584,23 +1144,13 @@ class DupTab(QWidget):
 
     def _open_path(self, path: Path) -> None:
         try:
-            if os.name == "nt":
-                os.startfile(path)  # type: ignore[attr-defined]
-            elif platform.system() == "Darwin":
-                subprocess.Popen(["open", str(path)])
-            else:
-                subprocess.Popen(["xdg-open", str(path)])
+            open_path(path)
         except Exception as exc:  # pragma: no cover - platform dependent
             QMessageBox.warning(self, "Open file", str(exc))
 
     def _reveal_in_file_manager(self, path: Path) -> None:
         try:
-            if os.name == "nt":
-                subprocess.Popen(["explorer", "/select,", str(path)])
-            elif platform.system() == "Darwin":
-                subprocess.Popen(["open", "-R", str(path)])
-            else:
-                subprocess.Popen(["xdg-open", str(path.parent)])
+            reveal_in_file_manager(path)
         except Exception as exc:  # pragma: no cover - platform dependent
             QMessageBox.warning(self, "Reveal in folder", str(exc))
 
@@ -1617,21 +1167,11 @@ class DupTab(QWidget):
 
     @staticmethod
     def _format_size(value: int | None) -> str:
-        if value is None or value <= 0:
-            return "-"
-        units = ["B", "KB", "MB", "GB", "TB"]
-        size = float(value)
-        index = 0
-        while size >= 1024 and index < len(units) - 1:
-            size /= 1024
-            index += 1
-        return f"{size:.1f} {units[index]}"
+        return format_duplicate_size(value)
 
     @staticmethod
     def _format_resolution(width: int | None, height: int | None) -> str:
-        if not width or not height:
-            return "-"
-        return f"{width}×{height}"
+        return format_duplicate_resolution(width, height)
 
 
 __all__ = ["DupTab"]
