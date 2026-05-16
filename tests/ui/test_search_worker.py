@@ -159,6 +159,59 @@ def test_search_worker_deleted_during_chunk_emit_reports_cancelled(monkeypatch, 
     assert worker._progress_handler() == 1
 
 
+def test_search_worker_deleted_during_chunk_emit_quits_thread_when_finished_cannot_emit(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    def fake_search_files(*args, **kwargs):
+        return [{"id": 1}]
+
+    def fail_emit_chunk(rows):
+        assert rows == [{"id": 1}]
+        raise RuntimeError("wrapped C/C++ object of type SearchWorker has been deleted")
+
+    class _FakeThread:
+        def __init__(self) -> None:
+            self.quit_calls = 0
+
+        def quit(self) -> None:
+            self.quit_calls += 1
+
+    class _FakeApp:
+        def __init__(self, main_thread: _FakeThread) -> None:
+            self._main_thread = main_thread
+
+        def thread(self) -> _FakeThread:
+            return self._main_thread
+
+    class _FakeQCoreApplication:
+        @staticmethod
+        def instance() -> _FakeApp:
+            return fake_app
+
+    class _FakeQThread:
+        @staticmethod
+        def currentThread() -> _FakeThread:
+            return worker_thread
+
+    main_thread = _FakeThread()
+    worker_thread = _FakeThread()
+    fake_app = _FakeApp(main_thread)
+
+    monkeypatch.setattr(search_worker, "_search_files", fake_search_files)
+    monkeypatch.setattr(search_worker, "QCoreApplication", _FakeQCoreApplication)
+    monkeypatch.setattr(search_worker, "QThread", _FakeQThread)
+    worker = SearchWorker(tmp_path / "db.sqlite", "1=1", [])
+    monkeypatch.setattr(worker, "_emit_chunk", fail_emit_chunk)
+    monkeypatch.setattr(worker, "_emit_finished", lambda ok, cancelled: False)
+
+    worker.run()
+
+    assert worker_thread.quit_calls == 1
+    assert main_thread.quit_calls == 0
+    assert worker._progress_handler() == 1
+
+
 def test_search_worker_cancelled_operational_error_reports_cancelled(monkeypatch, tmp_path: Path) -> None:
     def fake_search_files(*args, **kwargs):
         worker.cancel()

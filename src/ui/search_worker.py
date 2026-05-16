@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Mapping, Sequence
 
-from PyQt6.QtCore import QObject, pyqtSignal, pyqtSlot
+from PyQt6.QtCore import QCoreApplication, QObject, QThread, pyqtSignal, pyqtSlot
 
 from db.repository import search_files as _search_files
 
@@ -81,7 +81,7 @@ class SearchWorker(QObject):
         """Execute the configured search, emitting results progressively."""
 
         if self._cancel.is_set():
-            self._emit_finished(False, True)
+            self._finish(False, True)
             return
 
         try:
@@ -89,10 +89,10 @@ class SearchWorker(QObject):
         except sqlite3.Error as exc:  # pragma: no cover - connection errors are surfaced to UI
             logger.warning("SearchWorker failed to open database %s: %s", self._db_path, exc)
             if self._cancel.is_set():
-                self._emit_finished(False, True)
+                self._finish(False, True)
             else:
                 self.error.emit(str(exc))
-                self._emit_finished(False, False)
+                self._finish(False, False)
             return
 
         self._connection = conn
@@ -131,7 +131,7 @@ class SearchWorker(QObject):
                     if _is_deleted_qobject_error(exc):
                         logger.debug("SearchWorker stopped because the QObject was deleted")
                         self._cancel.set()
-                        self._emit_finished(False, True)
+                        self._finish(False, True, ensure_thread_quit=True)
                         return
                     raise
                 emitted += len(rows)
@@ -144,25 +144,25 @@ class SearchWorker(QObject):
                     break
         except sqlite3.OperationalError as exc:
             if self._cancel.is_set() or "interrupted" in str(exc).lower() and self._cancel.is_set():
-                self._emit_finished(False, True)
+                self._finish(False, True)
             else:
                 logger.warning("SearchWorker query failed: %s", exc)
                 self.error.emit(str(exc))
-                self._emit_finished(False, False)
+                self._finish(False, False)
         except RuntimeError as exc:
             if _is_deleted_qobject_error(exc):
                 logger.debug("SearchWorker stopped because the QObject was deleted")
                 self._cancel.set()
-                self._emit_finished(False, True)
+                self._finish(False, True, ensure_thread_quit=True)
             else:
                 raise
         except Exception as exc:  # pragma: no cover - defensive logging
             logger.exception("SearchWorker crashed")
             self.error.emit(str(exc))
-            self._emit_finished(False, False)
+            self._finish(False, False)
         else:
             is_cancelled = self._cancel.is_set()
-            self._emit_finished(not is_cancelled, is_cancelled)
+            self._finish(not is_cancelled, is_cancelled)
         finally:
             try:
                 conn.close()
@@ -181,7 +181,14 @@ class SearchWorker(QObject):
     def _progress_handler(self) -> int:
         return 1 if self._cancel.is_set() else 0
 
-    def _emit_finished(self, ok: bool, cancelled: bool) -> None:
+    def _finish(self, ok: bool, cancelled: bool, *, ensure_thread_quit: bool = False) -> None:
+        """Notify listeners and directly stop the worker thread when signals cannot."""
+
+        emitted = self._emit_finished(ok, cancelled)
+        if ensure_thread_quit or not emitted:
+            self._quit_current_worker_thread()
+
+    def _emit_finished(self, ok: bool, cancelled: bool) -> bool:
         """Emit completion unless the underlying QObject has already been deleted."""
 
         try:
@@ -189,8 +196,20 @@ class SearchWorker(QObject):
         except RuntimeError as exc:
             if _is_deleted_qobject_error(exc):
                 logger.debug("SearchWorker could not emit finished because the QObject was deleted")
-                return
+                return False
             raise
+        return True
+
+    def _quit_current_worker_thread(self) -> None:
+        """Quit the current QThread without touching the GUI main thread."""
+
+        app = QCoreApplication.instance()
+        if app is None:
+            return
+        current = QThread.currentThread()
+        if current is app.thread():
+            return
+        current.quit()
 
     def _emit_chunk(self, rows: list[object]) -> None:
         """Emit a result chunk."""
