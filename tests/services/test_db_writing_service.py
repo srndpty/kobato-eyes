@@ -251,6 +251,23 @@ def test_flush_batch_skips_fts_when_env(monkeypatch: pytest.MonkeyPatch, tmp_pat
         conn.close()
 
 
+def test_flush_batch_skips_fts_when_topk_is_zero(tmp_path: Path) -> None:
+    db_path = tmp_path / "skipfts-topk.db"
+    file_id = _prepare_db(str(db_path), "C:/images/skipfts-topk.png")
+
+    service = DBWritingService(str(db_path), flush_chunk=2, fts_topk=0)
+    conn = service._open_connection()
+    try:
+        service._apply_pragmas(conn)
+        service._flush_batch(conn, [_make_item(file_id)])
+
+        count = conn.execute("SELECT COUNT(*) FROM fts_files").fetchone()[0]
+        assert count == 0
+    finally:
+        conn.close()
+
+
+@pytest.mark.db_stress
 def test_flush_batch_unsafe_fast_merges_into_persistent(tmp_path: Path) -> None:
     db_path = tmp_path / "unsafe.db"
     file_id = _prepare_db(str(db_path), "C:/images/unsafe.png")
@@ -301,6 +318,7 @@ def test_flush_batch_unsafe_fast_merges_into_persistent(tmp_path: Path) -> None:
         conn.close()
 
 
+@pytest.mark.db_stress
 def test_apply_pragmas_falls_back_when_unsafe_fast_lock_unavailable() -> None:
     class _FakeConn:
         def __init__(self) -> None:
@@ -322,6 +340,67 @@ def test_apply_pragmas_falls_back_when_unsafe_fast_lock_unavailable() -> None:
     assert service._unsafe_fast is False
     assert service._stage_tags_in_temp is False
     assert "PRAGMA journal_mode=WAL" in conn.statements
+
+
+@pytest.mark.db_stress
+def test_thread_main_restores_normal_mode_after_processing_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    class _FakeConn:
+        def __init__(self) -> None:
+            self.closed = False
+
+        def close(self) -> None:
+            self.closed = True
+
+    conn = _FakeConn()
+    restored: list[_FakeConn] = []
+
+    def fail_process_queue(db_conn: _FakeConn) -> None:
+        assert db_conn is conn
+        raise RuntimeError("writer failed")
+
+    def record_restore(db_conn: _FakeConn) -> None:
+        restored.append(db_conn)
+
+    service = DBWritingService("ignored.db", unsafe_fast=True)
+    monkeypatch.setattr(service, "_open_connection", lambda: conn)
+    monkeypatch.setattr(service, "_apply_pragmas", lambda db_conn: None)
+    monkeypatch.setattr(service, "_create_temp_staging", lambda db_conn: None)
+    monkeypatch.setattr(service, "_process_queue", fail_process_queue)
+    monkeypatch.setattr(service, "_restore_normal_mode", record_restore)
+
+    service._thread_main()
+
+    assert isinstance(service._exc, RuntimeError)
+    assert str(service._exc) == "writer failed"
+    assert service._stop_evt.is_set()
+    assert restored == [conn]
+    assert conn.closed is True
+
+
+@pytest.mark.db_stress
+def test_restore_normal_mode_attempts_wal_recovery_statements() -> None:
+    class _FakeConn:
+        def __init__(self) -> None:
+            self.statements: list[str] = []
+
+        def execute(self, sql: str) -> None:
+            self.statements.append(sql)
+            if sql == "END":
+                raise db_writing_module.sqlite3.OperationalError("no transaction")
+
+    conn = _FakeConn()
+    service = DBWritingService("ignored.db", unsafe_fast=True)
+
+    service._restore_normal_mode(conn)  # type: ignore[arg-type]
+
+    assert conn.statements == [
+        "END",
+        "PRAGMA locking_mode=NORMAL",
+        "PRAGMA journal_mode=DELETE",
+        "PRAGMA journal_mode=WAL",
+        "PRAGMA wal_checkpoint(TRUNCATE)",
+        "PRAGMA synchronous=NORMAL",
+    ]
 
 
 def test_maybe_checkpoint_ignores_checkpoint_failure(monkeypatch: pytest.MonkeyPatch) -> None:

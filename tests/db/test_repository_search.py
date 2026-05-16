@@ -111,11 +111,67 @@ def test_search_files_order_limit_offset(conn) -> None:
     assert second[0]["id"] == file_d
 
 
+@pytest.mark.parametrize(
+    ("order_by", "expected_paths"),
+    [
+        ("f.mtime DESC", ["B.png", "A.png"]),
+        ("f.mtime ASC", ["A.png", "B.png"]),
+        ("f.path ASC", ["A.png", "B.png"]),
+        ("f.path DESC", ["B.png", "A.png"]),
+        ("f.id ASC", ["A.png", "B.png"]),
+        ("f.id DESC", ["B.png", "A.png"]),
+    ],
+)
+def test_search_files_accepts_only_known_order_by_clauses(conn, order_by: str, expected_paths: list[str]) -> None:
+    _insert_file(conn, path="A.png", size=100, mtime=10.0, sha="a-order")
+    _insert_file(conn, path="B.png", size=100, mtime=20.0, sha="b-order")
+
+    results = search_files(conn, "1=1", [], order_by=order_by)
+
+    assert [row["path"] for row in results] == expected_paths
+
+
 def test_search_files_rejects_unsupported_order_by(conn) -> None:
     _insert_file(conn, path="unsafe.png", size=100, mtime=50.0, sha="unsafe")
 
     with pytest.raises(ValueError, match="Unsupported search order_by"):
         search_files(conn, "1=1", [], order_by="f.mtime ASC; DROP TABLE files")
+
+
+def test_search_files_relevance_order_requires_tag_terms(conn) -> None:
+    file_old = _insert_file(conn, path="old.png", size=100, mtime=10.0, sha="old")
+    file_new = _insert_file(conn, path="new.png", size=100, mtime=20.0, sha="new")
+    _insert_tag(conn, "1girl", 0.99, file_old)
+    _insert_tag(conn, "1girl", 0.10, file_new)
+
+    without_terms = search_files(conn, "1=1", [], order="relevance", tags_for_relevance=[])
+    with_terms = search_files(conn, "1=1", [], order="relevance", tags_for_relevance=["1girl"])
+
+    assert [row["id"] for row in without_terms] == [file_new, file_old]
+    assert [row["id"] for row in with_terms] == [file_old, file_new]
+    assert with_terms[0]["relevance"] == pytest.approx(0.99)
+
+
+def test_translate_query_treats_leading_dash_as_negation_not_literal_tag(conn) -> None:
+    safe_id = _insert_file(conn, path="safe.png", size=100, mtime=20.0, sha="safe")
+    other_id = _insert_file(conn, path="other.png", size=100, mtime=10.0, sha="other")
+    _insert_tag(conn, "rating:safe", 0.99, safe_id)
+    _insert_tag(conn, "-rating:safe", 0.99, other_id)
+
+    fragment = translate_query("-rating:safe", file_alias="f")
+    results = search_files(conn, fragment.where, fragment.params)
+
+    assert [row["id"] for row in results] == [other_id]
+
+
+def test_translate_query_treats_whitespace_as_term_separator_not_literal_tag(conn) -> None:
+    literal_id = _insert_file(conn, path="literal-space.png", size=100, mtime=10.0, sha="literal-space")
+    _insert_tag(conn, "white hair", 0.99, literal_id)
+
+    fragment = translate_query("white hair", file_alias="f")
+    results = search_files(conn, fragment.where, fragment.params)
+
+    assert results == []
 
 
 def test_translate_query_integrates_with_search(conn) -> None:

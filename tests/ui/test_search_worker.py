@@ -230,6 +230,114 @@ def test_search_worker_cancelled_operational_error_reports_cancelled(monkeypatch
     assert finished == [(False, True)]
 
 
+def test_search_worker_cancel_interrupts_open_connection(monkeypatch, tmp_path: Path) -> None:
+    class _FakeConnection:
+        def __init__(self) -> None:
+            self.row_factory = None
+            self.interrupt_calls = 0
+            self.close_calls = 0
+            self.progress_handler = None
+
+        def set_progress_handler(self, callback, instructions: int) -> None:
+            self.progress_handler = (callback, instructions)
+
+        def interrupt(self) -> None:
+            self.interrupt_calls += 1
+
+        def close(self) -> None:
+            self.close_calls += 1
+
+    fake_conn = _FakeConnection()
+
+    def fake_connect(*args, **kwargs):
+        return fake_conn
+
+    def fake_search_files(*args, **kwargs):
+        worker.cancel()
+        raise search_worker.sqlite3.OperationalError("interrupted")
+
+    monkeypatch.setattr(search_worker.sqlite3, "connect", fake_connect)
+    monkeypatch.setattr(search_worker, "_search_files", fake_search_files)
+    worker = SearchWorker(tmp_path / "db.sqlite", "1=1", [])
+    errors: list[str] = []
+    finished: list[tuple[bool, bool]] = []
+    worker.error.connect(errors.append)
+    worker.finished.connect(lambda ok, cancelled: finished.append((ok, cancelled)))
+
+    worker.run()
+
+    assert errors == []
+    assert finished == [(False, True)]
+    assert fake_conn.interrupt_calls == 1
+    assert fake_conn.close_calls == 1
+    assert fake_conn.progress_handler is not None
+
+
+def test_search_worker_max_rows_zero_finishes_without_query(monkeypatch, tmp_path: Path) -> None:
+    def fail_search_files(*args, **kwargs):
+        raise AssertionError("search should not run when max_rows is zero")
+
+    monkeypatch.setattr(search_worker, "_search_files", fail_search_files)
+    worker = SearchWorker(tmp_path / "db.sqlite", "1=1", [], max_rows=0)
+    chunks: list[list[object]] = []
+    finished: list[tuple[bool, bool]] = []
+    worker.chunkReady.connect(chunks.append)
+    worker.finished.connect(lambda ok, cancelled: finished.append((ok, cancelled)))
+
+    worker.run()
+
+    assert chunks == []
+    assert finished == [(True, False)]
+
+
+def test_search_worker_deleted_during_finished_emit_quits_thread(monkeypatch, tmp_path: Path) -> None:
+    class _FakeThread:
+        def __init__(self) -> None:
+            self.quit_calls = 0
+
+        def quit(self) -> None:
+            self.quit_calls += 1
+
+    class _FakeApp:
+        def __init__(self, main_thread: _FakeThread) -> None:
+            self._main_thread = main_thread
+
+        def thread(self) -> _FakeThread:
+            return self._main_thread
+
+    class _FakeQCoreApplication:
+        @staticmethod
+        def instance() -> _FakeApp:
+            return fake_app
+
+    class _FakeQThread:
+        @staticmethod
+        def currentThread() -> _FakeThread:
+            return worker_thread
+
+    def fake_search_files(*args, **kwargs):
+        return []
+
+    def fail_emit_finished(ok: bool, cancelled: bool) -> bool:
+        assert (ok, cancelled) == (True, False)
+        return False
+
+    main_thread = _FakeThread()
+    worker_thread = _FakeThread()
+    fake_app = _FakeApp(main_thread)
+
+    monkeypatch.setattr(search_worker, "_search_files", fake_search_files)
+    monkeypatch.setattr(search_worker, "QCoreApplication", _FakeQCoreApplication)
+    monkeypatch.setattr(search_worker, "QThread", _FakeQThread)
+    worker = SearchWorker(tmp_path / "db.sqlite", "1=1", [])
+    monkeypatch.setattr(worker, "_emit_finished", fail_emit_finished)
+
+    worker.run()
+
+    assert worker_thread.quit_calls == 1
+    assert main_thread.quit_calls == 0
+
+
 def test_search_worker_cancel_sets_progress_handler() -> None:
     worker = SearchWorker(":memory:", "1=1", [])
 

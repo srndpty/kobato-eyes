@@ -207,11 +207,13 @@ class SearchWorker(QObject):
         if app is None:
             return
         current = QThread.currentThread()
+        if current is None:
+            return
         if current is app.thread():
             return
         current.quit()
 
-    def _emit_chunk(self, rows: list[object]) -> None:
+    def _emit_chunk(self, rows: list[dict[str, object]]) -> None:
         """Emit a result chunk."""
 
         self.chunkReady.emit(rows)
