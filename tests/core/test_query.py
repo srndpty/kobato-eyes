@@ -61,6 +61,14 @@ def test_hyphen_prefix_negates_group() -> None:
     assert fragment.params == ["kobato", "azusa"]
 
 
+def test_hyphen_prefix_negates_single_token_group() -> None:
+    tag_clause = expected_tag_exists()
+    expected = f"NOT ({tag_clause})"
+    fragment = translate_query("-(kobato)", file_alias=ALIAS)
+    assert fragment.where == expected
+    assert fragment.params == ["kobato"]
+
+
 def test_category_and_score_filters() -> None:
     category_clause = (
         "EXISTS (SELECT 1 FROM file_tags ft JOIN tags t ON t.id = ft.tag_id "

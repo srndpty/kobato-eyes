@@ -18,6 +18,7 @@ from core.query import extract_positive_tag_terms
         ("NOT haruhi", []),
         ("miku -rin", ["miku"]),
         ("miku AND -(rin OR len)", ["miku"]),
+        ("miku -(rin)", ["miku"]),
         ("character: AND miku", ["miku"]),
         ("miku AND NOT (rin OR NOT luka)", ["miku", "luka"]),
     ],

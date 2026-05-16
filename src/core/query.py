@@ -111,7 +111,7 @@ def _split_parens_safely(
 ) -> tuple[list[str], int]:
     """Split parentheses tokens while keeping tag-like strings intact."""
 
-    if "(" in raw and ")" in raw and not any(char.isspace() for char in raw):
+    if "(" in raw and ")" in raw and not raw.startswith("-(") and not any(char.isspace() for char in raw):
         return [raw], group_depth
 
     tokens: list[str] = []
