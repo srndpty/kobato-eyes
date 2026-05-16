@@ -94,7 +94,7 @@ logger = logging.getLogger(__name__)
 
 
 _CATEGORY_PREFIXES = [f"{category.name.lower()}:" for category in TagCategory]
-_RESERVED_COMPLETIONS = ["AND", "OR", "NOT", "category:", *_CATEGORY_PREFIXES]
+_RESERVED_COMPLETIONS = ["category:", *_CATEGORY_PREFIXES]
 _RESERVED = {"and", "or", "not"}
 _PREFIXES = (
     "category:",

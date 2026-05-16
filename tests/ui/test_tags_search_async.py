@@ -155,3 +155,15 @@ def test_negative_autocomplete_displays_hyphen(tags_tab: TagsTab, qapp: QApplica
     index = tags_tab._tag_model.index(0, 0)  # type: ignore[attr-defined]
     assert index.data(Qt.ItemDataRole.DisplayRole) == "-tag0 (1.23k)"
     assert index.data(int(tags_tab._tag_model.NAME_ROLE)) == "tag0"  # type: ignore[attr-defined]
+
+
+def test_logical_operators_are_not_autocomplete_candidates(tags_tab: TagsTab, qapp: QApplication) -> None:
+    _await_idle(tags_tab, qapp)
+    names = {tag.name for tag in tags_tab._completion_candidates}  # type: ignore[attr-defined]
+    assert {"AND", "OR", "NOT"}.isdisjoint(names)
+
+    tags_tab._query_edit.setText("-an")  # type: ignore[attr-defined]
+    tags_tab._query_edit.setCursorPosition(3)  # type: ignore[attr-defined]
+    tags_tab._refresh_completions()  # type: ignore[attr-defined]
+
+    assert tags_tab._tag_model.rowCount() == 0  # type: ignore[attr-defined]
