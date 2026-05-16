@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import logging
 import re
-import shlex
 from dataclasses import dataclass
 from typing import Mapping, Sequence
 
@@ -90,11 +89,30 @@ _CATEGORY_ALIASES = {
 _SCORE_RE = re.compile(r"score\s*(>=|<=|=|>|<)\s*([0-9]*\.?[0-9]+)", re.IGNORECASE)
 
 
-def _split_parens_safely(raw: str) -> list[str]:
+def _has_unescaped_rparen(text: str, start: int = 0) -> bool:
+    """Return whether ``text`` contains a non-escaped right parenthesis."""
+
+    i = max(0, start)
+    while i < len(text):
+        if text[i] == "\\" and i + 1 < len(text) and text[i + 1] in "()":
+            i += 2
+            continue
+        if text[i] == ")":
+            return True
+        i += 1
+    return False
+
+
+def _split_parens_safely(
+    raw: str,
+    group_depth: int,
+    *,
+    has_future_rparen: bool,
+) -> tuple[list[str], int]:
     """Split parentheses tokens while keeping tag-like strings intact."""
 
     if "(" in raw and ")" in raw and not any(char.isspace() for char in raw):
-        return [raw]
+        return [raw], group_depth
 
     tokens: list[str] = []
     buffer: list[str] = []
@@ -106,39 +124,50 @@ def _split_parens_safely(raw: str) -> list[str]:
             buffer.append(raw[i + 1])
             i += 2
             continue
-        if char in "()":
+        opens_group = char == "(" and (raw == "(" or _has_unescaped_rparen(raw, i + 1) or has_future_rparen)
+        if opens_group:
             if buffer:
                 tokens.append("".join(buffer))
                 buffer = []
             tokens.append(char)
+            group_depth += 1
+            i += 1
+            continue
+        if char == ")" and group_depth > 0:
+            if buffer:
+                tokens.append("".join(buffer))
+                buffer = []
+            tokens.append(char)
+            group_depth -= 1
             i += 1
             continue
         buffer.append(char)
         i += 1
     if buffer:
         tokens.append("".join(buffer))
-    return [token for token in tokens if token]
+    return [token for token in tokens if token], group_depth
 
 
 def _split_words(query: str) -> list[str]:
+    """Split a query on whitespace while preserving tag punctuation."""
+
     if not query:
         return []
-    lex = shlex.shlex(query, posix=True)
-    lex.whitespace_split = True  # 空白で区切る
-    lex.commenters = ""  # コメント無効
-    lex.quotes = '"'  # " だけをクォートとして扱う（' は通常文字）
-    try:
-        return list(lex)
-    except ValueError:
-        # 予期せぬ入力でも落ちないようフォールバック
-        return query.split()
+    return query.split()
 
 
 def _tokenize(query: str) -> list[_Token]:
     raw_tokens = _split_words(query)
     tokens: list[_Token] = []
-    for raw_token in raw_tokens:
-        for raw in _split_parens_safely(raw_token):
+    group_depth = 0
+    for index, raw_token in enumerate(raw_tokens):
+        has_future_rparen = any(_has_unescaped_rparen(token) for token in raw_tokens[index + 1 :])
+        split_tokens, group_depth = _split_parens_safely(
+            raw_token,
+            group_depth,
+            has_future_rparen=has_future_rparen,
+        )
+        for raw in split_tokens:
             upper = raw.upper()
             if raw == "(":
                 tokens.append(_Token(_TokenKind.LPAREN, raw))
