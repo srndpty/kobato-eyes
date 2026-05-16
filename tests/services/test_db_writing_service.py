@@ -403,6 +403,47 @@ def test_restore_normal_mode_attempts_wal_recovery_statements() -> None:
     ]
 
 
+@pytest.mark.db_stress
+def test_stop_after_unsafe_fast_allows_normal_connection(tmp_path: Path) -> None:
+    db_path = tmp_path / "unsafe-stop-recovery.db"
+    file_id = _prepare_db(str(db_path), "C:/images/unsafe-stop-recovery.png")
+
+    service = DBWritingService(str(db_path), flush_chunk=1, unsafe_fast=True)
+    service.start()
+    service.put(
+        DBItem(
+            file_id,
+            [("artist:kobato", 0.9, 1), ("rating:safe", 0.8, 0)],
+            64,
+            48,
+            "sig:v1",
+            1234.5,
+        )
+    )
+    service.stop(wait_forever=True)
+
+    conn = get_conn(str(db_path), timeout=1.0)
+    try:
+        row = conn.execute(
+            """
+            SELECT f.width, f.height, f.tagger_sig, COUNT(ft.tag_id) AS tag_count
+            FROM files AS f
+            LEFT JOIN file_tags AS ft ON ft.file_id = f.id
+            WHERE f.id = ?
+            GROUP BY f.id
+            """,
+            (file_id,),
+        ).fetchone()
+    finally:
+        conn.close()
+
+    assert row is not None
+    assert row["width"] == 64
+    assert row["height"] == 48
+    assert row["tagger_sig"] == "sig:v1"
+    assert row["tag_count"] == 2
+
+
 def test_maybe_checkpoint_ignores_checkpoint_failure(monkeypatch: pytest.MonkeyPatch) -> None:
     class _FakeConn:
         def execute(self, sql: str):
