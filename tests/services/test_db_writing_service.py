@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib
 import importlib.util
 import queue
 import sqlite3
@@ -27,25 +28,28 @@ else:  # pragma: no cover - defensive fallback for unexpected layouts
 
 SRC_ROOT = PROJECT_ROOT / "src"
 
-if "core.pipeline.contracts" not in sys.modules:
-    core_pkg = types.ModuleType("core")
-    core_pkg.__path__ = [str(SRC_ROOT / "core")]
-    sys.modules.setdefault("core", core_pkg)
+try:
+    importlib.import_module("core.pipeline.contracts")
+except ImportError:
+    if "core.pipeline.contracts" not in sys.modules:
+        core_pkg = types.ModuleType("core")
+        core_pkg.__path__ = [str(SRC_ROOT / "core")]
+        sys.modules.setdefault("core", core_pkg)
 
-    pipeline_pkg = types.ModuleType("core.pipeline")
-    pipeline_pkg.__path__ = [str(SRC_ROOT / "core" / "pipeline")]
-    core_pkg.pipeline = pipeline_pkg
-    sys.modules.setdefault("core.pipeline", pipeline_pkg)
+        pipeline_pkg = types.ModuleType("core.pipeline")
+        pipeline_pkg.__path__ = [str(SRC_ROOT / "core" / "pipeline")]
+        core_pkg.pipeline = pipeline_pkg
+        sys.modules.setdefault("core.pipeline", pipeline_pkg)
 
-    spec = importlib.util.spec_from_file_location(
-        "core.pipeline.contracts",
-        SRC_ROOT / "core" / "pipeline" / "contracts.py",
-    )
-    if spec and spec.loader:
-        contracts_mod = importlib.util.module_from_spec(spec)
-        sys.modules["core.pipeline.contracts"] = contracts_mod
-        spec.loader.exec_module(contracts_mod)
-        pipeline_pkg.contracts = contracts_mod
+        spec = importlib.util.spec_from_file_location(
+            "core.pipeline.contracts",
+            SRC_ROOT / "core" / "pipeline" / "contracts.py",
+        )
+        if spec and spec.loader:
+            contracts_mod = importlib.util.module_from_spec(spec)
+            sys.modules["core.pipeline.contracts"] = contracts_mod
+            spec.loader.exec_module(contracts_mod)
+            pipeline_pkg.contracts = contracts_mod
 
 import services.db_writing as db_writing_module
 from core.pipeline.contracts import DBFlush, DBItem, DBStop

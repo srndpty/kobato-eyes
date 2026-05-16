@@ -13,7 +13,7 @@ import ui.viewmodels.main_view_model as main_view_model_module
 from core.config import PipelineSettings, TaggerSettings
 from core.pipeline import RetagResult
 from dup.scanner import DuplicateScanConfig
-from ui.viewmodels import DupViewModel, MainViewModel, SettingsViewModel, TagsViewModel
+from ui.viewmodels import DupViewModel, MainViewModel, SettingsViewModel, TagsSearchState, TagsViewModel
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -92,6 +92,38 @@ def test_tags_view_model_wraps_dependencies(tmp_path: Path) -> None:
 
     view_model.ensure_directories()
     assert calls["ensured"] is True
+
+
+def test_tags_search_state_tracks_paging_and_generations() -> None:
+    state = TagsSearchState(offset=12, busy=True, can_load_more=True, last_cancelled=True)
+
+    state.begin_query()
+
+    assert state.offset == 0
+    assert state.reset_pending is True
+    assert state.received_any is False
+    assert state.last_cancelled is False
+    assert state.can_load_more is False
+
+    first_generation = state.begin_worker(reset=True)
+    second_generation = state.begin_worker(reset=False)
+
+    assert first_generation == 1
+    assert second_generation == 2
+    assert state.generations_reset == {1: True, 2: False}
+
+    state.consume_rows(3, chunk_size=3)
+    assert state.offset == 3
+    assert state.received_any is True
+    assert state.can_load_more is True
+
+    state.consume_rows(1, chunk_size=3)
+    assert state.offset == 4
+    assert state.can_load_more is False
+
+    assert state.finish_generation(first_generation) is True
+    state.discard_generation(second_generation)
+    assert state.generations_reset == {}
 
 
 def test_tags_view_model_retag_all_keyword_arguments(tmp_path: Path) -> None:

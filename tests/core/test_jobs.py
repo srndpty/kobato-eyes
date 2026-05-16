@@ -38,6 +38,35 @@ class DummyJob(BatchJob):
         return list(self.outputs)
 
 
+class FailingJob(BatchJob):
+    def __init__(self) -> None:
+        super().__init__([1])
+        self.cleaned = False
+
+    def process_item(self, item: int, loaded: int) -> int:
+        raise RuntimeError("job failed")
+
+    def cleanup(self) -> None:
+        self.cleaned = True
+
+
+class CancelledJob(BatchJob):
+    def __init__(self) -> None:
+        super().__init__([1])
+        self.processed = False
+        self.cleaned = False
+
+    def prepare(self) -> None:
+        self.cancel()
+
+    def process_item(self, item: int, loaded: int) -> int:
+        self.processed = True
+        return loaded
+
+    def cleanup(self) -> None:
+        self.cleaned = True
+
+
 def _wait_for(condition, app: QCoreApplication, timeout: float = 2.0) -> None:
     deadline = time.time() + timeout
     while not condition():
@@ -98,4 +127,57 @@ def test_job_manager_priority(qapp: QCoreApplication) -> None:
 
     assert record[0].startswith("load:foreground")
     assert completions[0] == "foreground"
+    manager.shutdown()
+
+
+def test_job_manager_emits_error_and_finished_on_job_failure(qapp: QCoreApplication) -> None:
+    manager = JobManager(max_workers=1)
+    job = FailingJob()
+    signals = manager.submit(job, priority=JobPriority.FOREGROUND)
+
+    completions: list[object] = []
+    errors: list[tuple[Exception, str]] = []
+    finished: list[None] = []
+
+    signals.completed.connect(completions.append)
+    signals.error.connect(lambda exc, tb: errors.append((exc, tb)))
+    signals.finished.connect(lambda: finished.append(None))
+
+    _wait_for(lambda: bool(finished), qapp)
+
+    assert completions == []
+    assert len(errors) == 1
+    assert isinstance(errors[0][0], RuntimeError)
+    assert str(errors[0][0]) == "job failed"
+    assert "RuntimeError: job failed" in errors[0][1]
+    assert finished == [None]
+    assert job.cleaned is True
+    assert not manager.has_pending_jobs()
+    manager.shutdown()
+
+
+def test_job_manager_emits_cancelled_and_finished_on_cooperative_cancel(qapp: QCoreApplication) -> None:
+    manager = JobManager(max_workers=1)
+    job = CancelledJob()
+    signals = manager.submit(job, priority=JobPriority.FOREGROUND)
+
+    completions: list[object] = []
+    cancellations: list[None] = []
+    errors: list[tuple[Exception, str]] = []
+    finished: list[None] = []
+
+    signals.completed.connect(completions.append)
+    signals.cancelled.connect(lambda: cancellations.append(None))
+    signals.error.connect(lambda exc, tb: errors.append((exc, tb)))
+    signals.finished.connect(lambda: finished.append(None))
+
+    _wait_for(lambda: bool(finished), qapp)
+
+    assert completions == []
+    assert cancellations == [None]
+    assert errors == []
+    assert finished == [None]
+    assert job.processed is False
+    assert job.cleaned is True
+    assert not manager.has_pending_jobs()
     manager.shutdown()
