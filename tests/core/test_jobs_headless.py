@@ -306,6 +306,44 @@ def test_headless_job_manager_drains_pending_jobs_by_priority(headless_jobs) -> 
     assert not manager.has_pending_jobs()
 
 
+def test_headless_job_manager_starts_next_job_after_finished_callbacks_return(headless_jobs) -> None:
+    class _OrderedJob(headless_jobs.BatchJob):
+        def __init__(self, name: str, events: list[str], gate: threading.Event | None = None) -> None:
+            super().__init__([name])
+            self._name = name
+            self._events = events
+            self._gate = gate
+
+        def prepare(self) -> None:
+            if self._gate is not None:
+                assert self._gate.wait(2.0)
+
+        def process_item(self, item: str, loaded: str) -> str:
+            self._events.append(f"{self._name}:process")
+            return loaded
+
+    manager = headless_jobs.JobManager(max_workers=1)
+    events: list[str] = []
+    gate = threading.Event()
+
+    first = manager.submit(_OrderedJob("first", events, gate), priority=headless_jobs.JobPriority.FOREGROUND)
+    second = manager.submit(_OrderedJob("second", events), priority=headless_jobs.JobPriority.BACKGROUND)
+
+    def record_first_finished() -> None:
+        events.append("first:finished:start")
+        time.sleep(0.05)
+        events.append("first:finished:end")
+
+    first.finished.connect(record_first_finished)
+    second.finished.connect(lambda: events.append("second:finished"))
+
+    gate.set()
+    assert manager.wait_for_done(2000)
+    _wait_until(lambda: "second:finished" in events)
+
+    assert events.index("first:finished:end") < events.index("second:process")
+
+
 def test_headless_job_signal_sender_and_cleanup_state(headless_jobs) -> None:
     class _OneItemJob(headless_jobs.BatchJob):
         def __init__(self, start_event: threading.Event) -> None:

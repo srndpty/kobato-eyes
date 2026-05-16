@@ -96,6 +96,8 @@ if is_headless():
         def __init__(self, owner: QObject) -> None:
             self._owner = owner
             self._callbacks: list[Callable[..., None]] = []
+            self._deferred: list[Callable[[], None]] = []
+            self._emitting = 0
 
         def connect(self, callback: Callable[..., None]) -> None:
             self._callbacks.append(callback)
@@ -106,13 +108,30 @@ if is_headless():
             except ValueError:
                 pass
 
+        def defer_after_emit(self, callback: Callable[[], None]) -> None:
+            """Run ``callback`` after the current signal emission completes."""
+
+            if self._emitting <= 0:
+                callback()
+                return
+            self._deferred.append(callback)
+
         def emit(self, *args, **kwargs) -> None:
-            for callback in list(self._callbacks):
-                QObject._push_sender(self._owner)
-                try:
-                    callback(*args, **kwargs)
-                finally:
-                    QObject._pop_sender()
+            self._emitting += 1
+            try:
+                for callback in list(self._callbacks):
+                    QObject._push_sender(self._owner)
+                    try:
+                        callback(*args, **kwargs)
+                    finally:
+                        QObject._pop_sender()
+            finally:
+                self._emitting -= 1
+            if self._emitting == 0 and self._deferred:
+                deferred = list(self._deferred)
+                self._deferred.clear()
+                for callback in deferred:
+                    callback()
 
     class _SignalDescriptor:
         def __init__(self) -> None:
@@ -272,7 +291,7 @@ class JobManager(QObject):
 
     def has_pending_jobs(self) -> bool:
         """Return whether jobs are queued or running."""
-        return bool(self._pending or self._running)
+        return bool(self._pending or self._running or self._schedule_pending)
 
     def wait_for_done(self, timeout_ms: int = -1) -> bool:
         """Block until all jobs complete or ``timeout_ms`` elapses."""
@@ -299,6 +318,8 @@ class JobManager(QObject):
     def _request_schedule(self) -> None:
         if self._schedule_pending:
             return
+        if self._running >= self._pool.maxThreadCount():
+            return
         self._schedule_pending = True
         QTimer.singleShot(0, self._drain_pending)
 
@@ -316,7 +337,12 @@ class JobManager(QObject):
         sender = self.sender()
         if not isinstance(sender, JobSignals):
             return
-        signals = sender
+        if is_headless():
+            sender.finished.defer_after_emit(lambda: self._complete_finished_job(sender))
+            return
+        self._complete_finished_job(sender)
+
+    def _complete_finished_job(self, signals: JobSignals) -> None:
         self._signal_to_runnable.pop(signals, None)
         try:
             signals.finished.disconnect(self._handle_job_finished)
