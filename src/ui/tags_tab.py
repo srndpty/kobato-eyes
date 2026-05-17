@@ -65,7 +65,13 @@ from ui.autocomplete import (
     extract_completion_token,
     replace_completion_token,
 )
-from ui.index_feedback import format_index_failure, format_index_success_toast, format_refresh_feedback
+from ui.index_lifecycle import (
+    connection_retry_action,
+    index_cancel_status,
+    index_started_status,
+    plan_index_failed,
+    plan_index_finished,
+)
 from ui.index_tasks import IndexRunnable
 from ui.result_delegates import GridThumbDelegate
 from ui.result_delegates import HighlightDelegate as _HighlightDelegate
@@ -1214,13 +1220,9 @@ class TagsTab(QWidget):
     def _cancel_indexing(self) -> None:
         if self._current_index_task is not None:
             self._current_index_task.cancel()
-        if self._refresh_active:
-            prefix = "Refreshing"
-        elif self._retag_active:
-            prefix = "Retagging"
-        else:
-            prefix = "Indexing"
-        self._status_label.setText(f"{prefix} cancelling…")
+        self._status_label.setText(
+            index_cancel_status(refresh_active=self._refresh_active, retag_active=self._retag_active)
+        )
         if self._progress_dialog is not None:
             if self._progress_label is not None:
                 self._progress_label.set_full_text("Cancelling…")
@@ -1794,12 +1796,9 @@ class TagsTab(QWidget):
 
     def _handle_index_started(self) -> None:
         self._indexing_active = True
-        if self._refresh_active:
-            self._status_label.setText("Refreshing…")
-        elif self._retag_active:
-            self._status_label.setText("Retagging…")
-        else:
-            self._status_label.setText("Indexing…")
+        self._status_label.setText(
+            index_started_status(refresh_active=self._refresh_active, retag_active=self._retag_active)
+        )
         self._update_control_states()
 
     def _handle_index_finished(self, stats: dict[str, object]) -> None:
@@ -1817,50 +1816,21 @@ class TagsTab(QWidget):
             pass
 
         self._indexing_active = False
-        elapsed = float(stats.get("elapsed_sec", 0.0) or 0.0)
-        cancelled = bool(stats.get("cancelled", False))
-        refresh_active = self._refresh_active
-        folders = list(self._active_refresh_folder or [])
-        self._active_refresh_folder = None
-
-        if refresh_active:
-            self._refresh_active = False
-            if cancelled:
-                self._status_label.setText(f"Refresh cancelled after {elapsed:.2f}s.")
-                self._show_toast("Refresh cancelled.")
-            else:
-                if not folders:
-                    roots_meta = stats.get("roots", [])
-                    folders = [Path(entry.get("folder", "")) for entry in roots_meta if entry.get("folder")]
-                feedback = format_refresh_feedback(stats, folders)
-                self._status_label.setText(feedback.status)
-                self._show_toast(feedback.toast)
-                if self._current_where:
-                    QTimer.singleShot(0, self._on_search_clicked)
-            self._update_control_states()
-            self._release_quiesce()
-            self.restore_connection()
-            return
-
-        prefix = "Retagging" if self._retag_active else "Indexing"
-        if cancelled:
-            self._status_label.setText(f"{prefix} cancelled after {elapsed:.2f}s.")
-            self._show_toast(f"{prefix} cancelled.")
-            self._retag_active = False
-            self._update_control_states()
-            self._release_quiesce()
-            self.restore_connection()
-            return
-
-        if self._retag_active:
-            self._status_label.setText(f"Retagging complete in {elapsed:.2f}s.")
-        else:
-            self._status_label.setText(f"Indexing complete in {elapsed:.2f}s.")
-
-        self._show_toast(format_index_success_toast(stats, retag_active=self._retag_active))
-        self._retag_active = False
+        plan = plan_index_finished(
+            stats,
+            refresh_active=self._refresh_active,
+            retag_active=self._retag_active,
+            active_refresh_folder=self._active_refresh_folder,
+            has_current_query=bool(self._current_where),
+        )
+        self._refresh_active = plan.refresh_active
+        self._retag_active = plan.retag_active
+        self._active_refresh_folder = plan.active_refresh_folder
+        self._status_label.setText(plan.status)
+        self._show_toast(plan.toast)
         self._update_control_states()
-        QTimer.singleShot(0, self._on_search_clicked)
+        if plan.run_search:
+            QTimer.singleShot(0, self._on_search_clicked)
         self._release_quiesce()
         self.restore_connection()
 
@@ -1875,22 +1845,17 @@ class TagsTab(QWidget):
         self._close_progress_dialog()
 
         self._indexing_active = False
-        if self._refresh_active:
-            prefix = "Refreshing"
-        elif self._retag_active:
-            prefix = "Retagging"
-        else:
-            prefix = "Indexing"
-        error_text = format_index_failure(
+        plan = plan_index_failed(
             message,
-            prefix=prefix,
+            refresh_active=self._refresh_active,
+            retag_active=self._retag_active,
             db_display=self._db_display,
             passthrough_message=ONNXRUNTIME_MISSING_MESSAGE,
         )
-        self._status_label.setText(error_text)
-        self._show_toast(error_text)
-        self._refresh_active = False
-        self._retag_active = False
+        self._status_label.setText(plan.status)
+        self._show_toast(plan.toast)
+        self._refresh_active = plan.refresh_active
+        self._retag_active = plan.retag_active
         self._update_control_states()
         self._release_quiesce()
 
@@ -1902,16 +1867,13 @@ class TagsTab(QWidget):
             self.restore_connection()
             return
         except Exception as e:
-            s = str(e).lower()
-            if "locked" not in s and "busy" not in s:
-                # 別原因ならそのまま再送出
+            action = connection_retry_action(e, attempts)
+            if action == "raise":
                 raise
-            if attempts <= 1:
-                # 諦める（ユーザに手動再試行させる）
+            if action == "give_up":
                 self._show_toast("DB reopen failed (locked). Please try again.")
                 return
 
-            # 次のタイマーで再試行
             QTimer.singleShot(delay_ms, lambda: self._restore_connection_with_retry(attempts - 1, delay_ms))
 
     def _resolve_db_path(self) -> Path:

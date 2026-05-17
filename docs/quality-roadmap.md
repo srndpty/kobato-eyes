@@ -4,11 +4,11 @@
 
 - 更新日: 2026-05-17
 - 基準チェック: `.\scripts\check.ps1`
-- 直近の基準値: `410 passed, 40 deselected`
+- 直近の基準値: `422 passed, 40 deselected`
 - 総カバレッジ: `80%`
 - 重点カバレッジ: `core.jobs`, `core.pipeline.retag`, `db.fts`, `ui.search_worker` 合計 `91%`
-- mypy対象: `59 source files`
-- GUI smoke: `27 passed, 423 deselected`
+- mypy対象: `61 source files`
+- GUI smoke: `27 passed, 435 deselected`
 - db_stress: `8 passed, 441 deselected`
 - GPU check: GPU test 未定義時は skip 扱い
 - integration: `7 passed, 414 deselected` を直近の既知基準とする
@@ -22,6 +22,7 @@
 - 画像 IO: 壊れた画像、巨大画像、pixel cap 復元、thumbnail cache hit / copy / eviction はテスト済み。
 - tagger backend: ONNX provider selection、model / labels file error、label count mismatch は `tagger.onnx_backend` で共通化済み。
 - 型チェック: 主要 helper / worker / viewmodel / tagger utility を mypy 対象化済み。
+- UI orchestration: index / refresh / retag lifecycle と duplicate scan / refine / trash / export の状態判定を pure helper へ切り出し済み。
 
 ## 現在の主要リスク
 
@@ -31,7 +32,7 @@
 - tagger 実 backend、GPU / CUDA provider、open_clip 依存の実行確認は通常チェックでは保証されない。
 - 標準チェックは GUI / integration / db_stress を除外するため、変更内容に応じた追加確認が必要である。
 
-## 次フェーズ 6: UI orchestration をさらに薄くする
+## フェーズ 6: UI orchestration をさらに薄くする（実装済み）
 
 - 目的: `tags_tab.py` / `dup_tab.py` を widget orchestration に寄せ、状態判定と worker lifecycle を小さくテストできる単位へ移す。
 - 対象:
@@ -39,16 +40,14 @@
   - `src/ui/dup_tab.py`
   - `src/ui/dup_workers.py`
   - `src/ui/viewmodels/*`
-- 作業:
-  - `tags_tab.py` から index / refresh task lifecycle と connection restore retry を helper または controller へ切り出す。
-  - `dup_tab.py` から scan lifecycle、refine dialog lifecycle、trash / export 後の表示更新を段階的に切り出す。
-  - 切り出し先は pure unit test を先に追加し、PyQt 実 widget 依存は smoke test に閉じ込める。
-- 完了条件:
-  - UI worker 例外後の button / status / active task / connection state の復帰条件が単体テストで読める。
-  - `tags_tab.py` / `dup_tab.py` に新しい集計ロジックや文言生成を追加しない。
-- 検証:
+- 実装:
+  - `src/ui/index_lifecycle.py` に index / refresh / retag の開始、キャンセル、完了、失敗、connection restore retry 判定を切り出した。
+  - `src/ui/dup_lifecycle.py` に duplicate scan / refine / trash / export の状態判定と表示テキストを切り出した。
+  - `tests/ui/test_index_lifecycle.py` と `tests/ui/test_dup_lifecycle.py` で worker 例外後の button / status / active task / connection state の復帰条件を pure unit test 化した。
+- 検証済み:
   - `.\scripts\check.ps1`
   - `.\scripts\check-gui-smoke.ps1`
+  - `.\scripts\check-package-smoke.ps1`
 
 ## 次フェーズ 7: 例外境界を監査して failure policy を明文化する
 
