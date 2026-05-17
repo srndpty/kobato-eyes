@@ -33,7 +33,16 @@ from PyQt6.QtWidgets import (
 
 from dup.scanner import DuplicateCluster, DuplicateClusterEntry
 from ui.dup_cluster_update import rebuild_clusters_after_removal, sort_entries_for_display
-from ui.dup_status import format_duplicate_scan_complete, format_duplicate_summary
+from ui.dup_lifecycle import (
+    duplicate_action_availability,
+    duplicate_export_status,
+    duplicate_refine_complete_status,
+    duplicate_refine_progress,
+    duplicate_scan_finished_plan,
+    duplicate_scan_progress,
+    duplicate_trash_summary,
+)
+from ui.dup_status import format_duplicate_summary
 from ui.dup_widgets import ThumbPanel, ThumbTile, format_duplicate_resolution, format_duplicate_size
 from ui.dup_workers import DuplicateScanRequest, DuplicateScanRunnable, RefinePipelineRunnable, ThumbJob, ThumbSignals
 from ui.file_actions import export_duplicate_clusters_csv, open_path, reveal_in_file_manager, trash_duplicate_entries
@@ -280,12 +289,11 @@ class DupTab(QWidget):
 
         # シグナル接続
         def on_progress(cur, total, stage):
-            if total <= 0:
-                total = 1
-            dlg.setLabelText(f"{stage}  {cur} / {total}")
-            if dlg.maximum() != total:
-                dlg.setMaximum(total)
-            dlg.setValue(cur)
+            state = duplicate_refine_progress(cur, total, stage)
+            dlg.setLabelText(state.label)
+            if dlg.maximum() != state.maximum:
+                dlg.setMaximum(state.maximum)
+            dlg.setValue(state.value)
 
         def on_finished(refined):
             dlg.close()
@@ -295,11 +303,8 @@ class DupTab(QWidget):
             self._clusters = refined
             self._clusters.sort(key=lambda c: (self._cluster_hamming_score(c), len(c.files)), reverse=True)
             self._populate_tree()
-            groups = len(self._clusters)
-            files = sum(len(c.files) for c in self._clusters)
-            self._status_label.setText(f"Refine complete: {groups} group(s), {files} file(s).")
+            self._status_label.setText(duplicate_refine_complete_status(self._clusters))
             self._update_action_states()
-            self._update_status_summary()
 
         def on_canceled():
             dlg.close()
@@ -728,11 +733,14 @@ class DupTab(QWidget):
             logger.info(f"thumb applied: {path_str}")  # ← デバッグ
 
     def _update_action_states(self) -> None:
-        has_clusters = bool(self._clusters)
-        self._mark_button.setEnabled(has_clusters)
-        self._uncheck_button.setEnabled(has_clusters)
-        self._export_button.setEnabled(has_clusters)
-        self._trash_button.setEnabled(self._count_checked() > 0)
+        availability = duplicate_action_availability(
+            has_clusters=bool(self._clusters),
+            checked_count=self._count_checked(),
+        )
+        self._mark_button.setEnabled(availability.mark)
+        self._uncheck_button.setEnabled(availability.uncheck)
+        self._export_button.setEnabled(availability.export)
+        self._trash_button.setEnabled(availability.trash)
 
     def _on_scan_clicked(self) -> None:
         if self._active_scan is not None:
@@ -753,34 +761,26 @@ class DupTab(QWidget):
         self._pool.start(runnable)
 
     def _on_scan_progress(self, current: int, total: int) -> None:
-        if total <= 0:
-            self._progress.setMaximum(1)
-            self._progress.setValue(0)
-            return
-        self._progress.setMaximum(total)
-        self._progress.setValue(current)
+        state = duplicate_scan_progress(current, total)
+        self._progress.setMaximum(state.maximum)
+        self._progress.setValue(state.value)
 
     def _on_scan_finished(self, payload: object) -> None:
         logger.info("ui: _on_scan_finished begin")
         self._active_scan = None
         self._scan_button.setEnabled(True)
-        if not isinstance(payload, list):
-            self._status_label.setText("Scan completed with unexpected payload")
+        plan = duplicate_scan_finished_plan(payload, DuplicateCluster)
+        self._status_label.setText(plan.status)
+        if not plan.valid_payload:
             return
-        # ★ ここでクラスターをハミング距離の大きい順に並べ替える
-        self._clusters = [c for c in payload if isinstance(c, DuplicateCluster)]
-
-        if not self._clusters:
-            self._status_label.setText("No duplicate groups detected.")
+        self._clusters = [cluster for cluster in plan.clusters if isinstance(cluster, DuplicateCluster)]
+        if plan.clear_tree:
             self._tree.clear()
             self._update_action_states()
             return
         logger.info("ui: clusters=%d", len(self._clusters))
-        # ← ここで直接 populate せず、まずリファインへ
-        self._start_refine_pipeline(self._clusters)
-        # リファイン完了後に populate されるので、ここで_populate_tree()は呼ばない
-
-        self._status_label.setText(format_duplicate_scan_complete(self._clusters))
+        if plan.refine:
+            self._start_refine_pipeline(self._clusters)
         self._update_action_states()
         logger.info("ui: _on_scan_finished end")
 
@@ -1047,10 +1047,7 @@ class DupTab(QWidget):
             self._clusters = rebuild_clusters_after_removal(self._clusters, removed_ids)
             self._populate_tree()
             self._update_status_summary()
-        summary = f"Moved {len(successes)} file(s) to trash."
-        if failures:
-            summary += f" Failed: {len(failures)}."
-        self._status_label.setText(summary)
+        self._status_label.setText(duplicate_trash_summary(len(successes), len(failures)))
         if failures:
             message = "\n".join(f"{entry.file.path}: {reason}" for entry, reason in failures)
             QMessageBox.warning(self, "Trash duplicates", f"Some files could not be moved:\n{message}")
@@ -1070,7 +1067,7 @@ class DupTab(QWidget):
         except OSError as exc:  # pragma: no cover - filesystem errors depend on environment
             QMessageBox.warning(self, "Export duplicates", str(exc))
             return
-        self._status_label.setText(f"Exported duplicate groups to {file_path}.")
+        self._status_label.setText(duplicate_export_status(file_path))
 
     def _on_item_changed(self, item: QTreeWidgetItem, column: int) -> None:
         if self._block_item_changed or item.parent() is None or column != 0:

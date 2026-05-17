@@ -2,9 +2,25 @@
 
 from __future__ import annotations
 
-from PyQt6.QtCore import QEvent, Qt
+from PyQt6.QtCore import QEvent, QRect, Qt
 from PyQt6.QtGui import QColor, QPainter
 from PyQt6.QtWidgets import QFrame, QGraphicsDropShadowEffect, QLabel, QProgressBar, QVBoxLayout, QWidget
+
+DEFAULT_OVERLAY_MESSAGE = "Searching… (Esc to cancel)"
+
+
+def overlay_message(message: str | None) -> str:
+    """Return the visible overlay message."""
+
+    return message if message is not None else DEFAULT_OVERLAY_MESSAGE
+
+
+def overlay_geometry(parent: QWidget | None) -> QRect:
+    """Return the geometry the overlay should occupy."""
+
+    if parent is None:
+        return QRect()
+    return parent.rect()
 
 
 class SpinnerOverlay(QWidget):
@@ -16,7 +32,7 @@ class SpinnerOverlay(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, False)
         self.setAutoFillBackground(False)
 
-        self._message_label = QLabel("Searching… (Esc to cancel)", self)
+        self._message_label = QLabel(DEFAULT_OVERLAY_MESSAGE, self)
         self._message_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._message_label.setStyleSheet("color: white; font-size: 14px; font-weight: 600;")
         self._progress = QProgressBar(self)
@@ -62,12 +78,11 @@ class SpinnerOverlay(QWidget):
 
     def eventFilter(self, obj, event):  # type: ignore[override]
         if obj is self.parentWidget() and event.type() == QEvent.Type.Resize:
-            self.setGeometry(self.parentWidget().rect())
+            self.setGeometry(overlay_geometry(self.parentWidget()))
         return super().eventFilter(obj, event)
 
     def show(self, message: str | None = None) -> None:  # type: ignore[override]
-        if message is not None:
-            self._message_label.setText(message)
+        self._message_label.setText(overlay_message(message))
         self._progress.setRange(0, 0)
         self._progress.setValue(0)
         self._reposition()
@@ -82,9 +97,7 @@ class SpinnerOverlay(QWidget):
 
     def _reposition(self) -> None:
         parent = self.parentWidget()
-        if parent is None:
-            return
-        self.setGeometry(parent.rect())
+        self.setGeometry(overlay_geometry(parent))
 
 
-__all__ = ["SpinnerOverlay"]
+__all__ = ["DEFAULT_OVERLAY_MESSAGE", "SpinnerOverlay", "overlay_geometry", "overlay_message"]

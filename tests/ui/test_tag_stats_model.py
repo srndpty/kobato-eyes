@@ -6,7 +6,7 @@ import sqlite3
 
 from PyQt6.QtCore import QModelIndex, Qt
 
-from ui.tag_stats import _load_thresholds, _TagStatsModel
+from ui.tag_stats import _load_thresholds, _TagStatsModel, category_name, format_score, merge_thresholds
 
 
 def _make_stats_conn() -> sqlite3.Connection:
@@ -39,6 +39,17 @@ def test_load_thresholds_merges_fallbacks_and_database_values() -> None:
     assert thresholds[0] == 0.40
     assert thresholds[4] == 0.25
     assert thresholds[1] == 0.0
+
+
+def test_tag_stats_pure_helpers_format_and_skip_bad_thresholds() -> None:
+    thresholds = merge_thresholds([(0, "0.8"), ("bad", "0.5"), (5, object())])
+
+    assert thresholds[0] == 0.8
+    assert thresholds[4] == 0.25
+    assert thresholds[5] == 0.0
+    assert category_name(4) == "character"
+    assert category_name(99) == "99"
+    assert format_score(0.12345) == "0.123"
 
 
 def test_tag_stats_model_loads_and_formats_rows() -> None:

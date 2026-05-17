@@ -9,7 +9,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from time import perf_counter
-from typing import Iterable, List, Sequence
+from typing import Any, Iterable, List, Mapping, Sequence
 
 import cv2
 import numpy as np
@@ -32,13 +32,15 @@ try:
     if torch_lib.exists():
         os.add_dll_directory(str(torch_lib))  # Windows 3.8+
 except Exception:
+    # Failure policy: Torch DLL discovery is an optional environment aid. ONNX
+    # Runtime initialisation below remains the authoritative failure boundary.
     pass
 
 try:  # pragma: no cover - import is environment dependent
     import onnxruntime as ort
 except ImportError as exc:  # pragma: no cover - graceful degradation
     ort = None
-    _IMPORT_ERROR = exc
+    _IMPORT_ERROR: ImportError | None = exc
 else:
     _IMPORT_ERROR = None
 
@@ -85,6 +87,8 @@ def get_available_providers() -> list[str]:
     try:
         providers = list(ort.get_available_providers())  # type: ignore[call-arg]
     except Exception as exc:  # pragma: no cover - defensive logging
+        # Failure policy: provider introspection is diagnostic; session
+        # construction still performs the fatal provider check.
         logger.warning("WD14: failed to query ONNX providers: %s", exc)
         return []
     return providers
@@ -123,7 +127,7 @@ class WD14Tagger(ITagger):
         else:
             logger.warning("WD14: no ONNX providers reported by runtime")
 
-        requested_providers: Sequence[str] | None = providers
+        requested_providers = list(providers) if providers is not None else None
         provider_plan = plan_provider_attempts(requested_providers, available_providers)
         for message in provider_plan.infos:
             logger.info("WD14: %s", message)
@@ -141,6 +145,8 @@ class WD14Tagger(ITagger):
                     providers=provider_list,
                 )
             except Exception as exc:  # pragma: no cover - handled in tests via mocks
+                # Failure policy: automatic CUDA attempt may fall back to CPU;
+                # explicit provider/session failures propagate to the caller.
                 last_error = exc
                 if requested_providers is None and provider_list == [_CUDA_PROVIDER]:
                     logger.warning(
@@ -187,15 +193,13 @@ class WD14Tagger(ITagger):
         _ACTIVE_TAGGERS.add(self)
 
         # ==== 並列前処理の設定 ====
-        try:
-            _cpu = os.cpu_count() or 4
-        except Exception:
-            _cpu = 4
+        _cpu = os.cpu_count() or 4
         self._pre_workers = int(os.getenv("KE_PREPROC_WORKERS", str(min(8, _cpu))))
         # OpenCV の内部スレッドが暴れないように抑制（必要なら環境変数で上書き）
         try:
             cv2.setNumThreads(int(os.getenv("KE_CV2_THREADS", "1")))
-        except Exception:
+        except (cv2.error, TypeError, ValueError):
+            # Failure policy: OpenCV thread tuning is best effort only.
             pass
         self._pre_exec: ThreadPoolExecutor | None = None
         if self._pre_workers > 1:
@@ -205,7 +209,7 @@ class WD14Tagger(ITagger):
         self._topk_cap = 128  # 上限256個まで
         self._score_floor = float(os.getenv("KE_TAG_SCORE_FLOOR", "0.1"))
         self._batch_seq = 0
-        self._last_batch_end = None
+        self._last_batch_end: float | None = None
 
         if not self._output_names:
             raise RuntimeError("WD14: no output tensors were selected for inference")
@@ -613,7 +617,7 @@ class WD14Tagger(ITagger):
         return bgr.astype(np.float32, copy=False)
 
     # ==== 追加: しきい値ベクトルを作る ====
-    def _build_threshold_vector(self, thresholds: dict[TagCategory | int, float]) -> np.ndarray:
+    def _build_threshold_vector(self, thresholds: Mapping[Any, float]) -> np.ndarray:
         # 未指定カテゴリは 0.0（=無制限）
         vec = np.zeros((len(self._labels),), dtype=np.float32)
         for k, v in thresholds.items():
@@ -702,20 +706,20 @@ class WD14Tagger(ITagger):
         height = int(self._input_height)
 
         # alpha to white
-        image = image.convert("RGBA")
-        new_image = Image.new("RGBA", image.size, "WHITE")
-        new_image.paste(image, mask=image)
-        image = new_image.convert("RGB")
-        image = np.asarray(image)
+        rgba_image = image.convert("RGBA")
+        new_image = Image.new("RGBA", rgba_image.size, "WHITE")
+        new_image.paste(rgba_image, mask=rgba_image)
+        rgb_image = new_image.convert("RGB")
+        arr = np.asarray(rgb_image)
 
         # PIL RGB to OpenCV BGR
-        image = image[:, :, ::-1]
+        arr = arr[:, :, ::-1]
 
-        image = self.make_square(image, height)
-        image = self.smart_resize(image, height)
-        image = image.astype(np.float32)
-        image = np.expand_dims(image, 0)
-        return image
+        arr = self.make_square(arr, height)
+        arr = self.smart_resize(arr, height)
+        arr = arr.astype(np.float32)
+        arr = np.expand_dims(arr, 0)
+        return arr
 
     @staticmethod
     def _resolve_thresholds(
@@ -874,6 +878,8 @@ class WD14Tagger(ITagger):
         try:
             profile_path = session.end_profiling()
         except Exception as exc:  # pragma: no cover - defensive logging
+            # Failure policy: profiling output is diagnostic and must not fail
+            # a completed tagging run.
             logger.warning("WD14: failed to finalise profiling: %s", exc)
             return None
         if profile_path:
@@ -888,6 +894,8 @@ def end_all_profiles() -> None:
         try:
             tagger.end_profile()
         except Exception:  # pragma: no cover - defensive logging
+            # Failure policy: one profiling cleanup failure must not prevent
+            # other live taggers from ending their profiles.
             logger.exception("WD14: failed to end profiling for %s", tagger)
 
 
@@ -912,11 +920,13 @@ def _log_provider_details(session: "ort.InferenceSession", chosen: Sequence[str]
     try:
         session_providers = list(session.get_providers())
     except Exception as exc:  # pragma: no cover - defensive logging
+        # Failure policy: provider detail logging is diagnostic-only.
         logger.warning("WD14: failed to query session providers: %s", exc)
         session_providers = []
     try:
         provider_options = session.get_provider_options()
     except Exception as exc:  # pragma: no cover - defensive logging
+        # Failure policy: provider option logging is diagnostic-only.
         logger.warning("WD14: failed to query provider options: %s", exc)
         provider_options = {}
     logger.info(

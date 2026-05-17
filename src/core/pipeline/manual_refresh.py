@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import sqlite3
 import time
 from pathlib import Path
 from typing import Callable, Iterable, Iterator, Sequence
@@ -78,6 +79,7 @@ def scan_and_tag(
     db_path = get_db_path()
     bootstrap_if_needed(db_path)
     conn = get_conn(db_path, allow_when_quiesced=True)
+    conn_closed = False
     tagger: ITagger | None = None
 
     def _like_pattern_for_input(path: Path) -> str:
@@ -121,16 +123,26 @@ def scan_and_tag(
         try:
             cancelled = bool(is_cancelled())
         except Exception:
+            # Failure policy: a cancellation callback failure is treated as a
+            # requested cancellation so the UI can unwind safely.
             logger.exception("Refresh cancellation callback failed")
             cancelled = True
         return cancelled
 
+    progress_disabled = False
+
     def _emit(progress: IndexProgress, *, force: bool = False) -> None:
+        nonlocal progress_disabled
         if progress_cb is None:
+            return
+        if progress_disabled:
             return
         try:
             progress_cb(progress)
         except Exception:
+            # Failure policy: progress callbacks are UI-extension boundaries.
+            # They are logged and disabled, but refresh work continues.
+            progress_disabled = True
             logger.exception("Refresh progress callback failed; disabling further updates")
 
     _emit(IndexProgress(phase=IndexPhase.SCAN, done=0, total=-1, message=str(resolved_root)), force=True)
@@ -196,18 +208,18 @@ def scan_and_tag(
                 yield list(items[index : index + size])
 
         missing_ids: list[int] = []
-        cursor = None
+        missing_cursor: sqlite3.Cursor | None = None
         try:
             if root_exists and resolved_root.is_file():
-                cursor = conn.execute(
+                missing_cursor = conn.execute(
                     "SELECT id, path FROM files WHERE is_present = 1 AND path = ?", (str(resolved_root),)
                 )
             else:
-                cursor = conn.execute(
+                missing_cursor = conn.execute(
                     "SELECT id, path FROM files WHERE is_present = 1 AND path LIKE ?",
                     (_like_pattern_for_input(resolved_root),),
                 )
-            for row in cursor.fetchall():
+            for row in missing_cursor.fetchall():
                 if _cancelled():
                     break
                 path_text = str(row["path"])
@@ -217,8 +229,8 @@ def scan_and_tag(
                 if path_text not in fs_paths:
                     missing_ids.append(int(row["id"]))
         finally:
-            if cursor is not None:
-                cursor.close()
+            if missing_cursor is not None:
+                missing_cursor.close()
 
         missing_count = len(missing_ids)
         stats_out["missing"] = missing_count
@@ -304,8 +316,8 @@ def scan_and_tag(
             max_tags=None,
         )
         tagger = tagger_obj
-        effective_thresholds = th_fallback or None
-        effective_max_tags = max_tags_fallback or None
+        effective_thresholds = dict(th_fallback or {})
+        effective_max_tags = dict(max_tags_fallback or {})
         tagger_sig = current_tagger_sig(
             settings,
             thresholds=effective_thresholds,
@@ -411,15 +423,17 @@ def scan_and_tag(
         finally:
             try:
                 conn.close()
+                conn_closed = True
             except Exception:
+                # Failure policy: connection close after a successful commit is
+                # best-effort cleanup and must not mask the tagging result.
                 pass
-        conn = None  # finally節で二重closeしないように
 
         ctx = PipelineContext(
             db_path=str(db_path),
             settings=settings,
-            thresholds=effective_thresholds or {},
-            max_tags_map=effective_max_tags or {},
+            thresholds=effective_thresholds,
+            max_tags_map=effective_max_tags,
             tagger_sig=tagger_sig,
             tagger_override=tagger_obj,
             progress_cb=progress_cb,
@@ -432,6 +446,8 @@ def scan_and_tag(
         try:
             tag_result = tag_stage.run(ctx, emitter, records)
         except Exception:
+            # Failure policy: tagging-stage execution failures are fatal and
+            # must be surfaced to the UI worker.
             logger.exception("Manual tag refresh: tagging stage failed")
             raise
 
@@ -441,6 +457,8 @@ def scan_and_tag(
             try:
                 write_result = write_stage.run(ctx, emitter, tag_result)
             except Exception:
+                # Failure policy: DB write failures are fatal because counts and
+                # persisted state would otherwise diverge.
                 logger.exception("Manual tag refresh: write stage failed")
                 raise
             if getattr(write_result, "cancelled", False):
@@ -467,10 +485,13 @@ def scan_and_tag(
         _emit(IndexProgress(phase=IndexPhase.DONE, done=1, total=1, message=str(resolved_root)), force=True)
         return stats_out
     finally:
-        if conn is not None:
+        if not conn_closed:
             try:
                 conn.close()
+                conn_closed = True
             except Exception:
+                # Failure policy: final close is best-effort cleanup; the main
+                # refresh result has already been decided.
                 logger.exception("Failed to close database connection after manual refresh")
         if tagger is not None:
             closer = getattr(tagger, "close", None)
@@ -478,6 +499,8 @@ def scan_and_tag(
                 try:
                     closer()
                 except Exception:
+                    # Failure policy: tagger close releases external resources
+                    # and should not mask the primary refresh error.
                     logger.exception("Failed to close tagger after manual refresh")
         # --- ここから追加：積極的に GPU メモリを解放 ---
         try:
@@ -485,6 +508,7 @@ def scan_and_tag(
 
             gc.collect()
         except Exception:
+            # Failure policy: GC is opportunistic memory cleanup only.
             logger.debug("gc.collect() failed after manual refresh", exc_info=True)
 
 

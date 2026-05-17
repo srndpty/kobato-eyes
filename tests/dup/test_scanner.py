@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from dup.scanner import DuplicateFile, DuplicateScanConfig, DuplicateScanner
 
 
@@ -141,6 +143,11 @@ def test_duplicate_file_from_row_accepts_blob_and_hex_hashes() -> None:
     assert blob_file.phash == 123
     assert hex_file.file_id == 11
     assert hex_file.phash == 255
+
+
+def test_duplicate_file_from_row_skips_malformed_phash_as_input_error() -> None:
+    with pytest.raises(ValueError, match="missing perceptual hash"):
+        DuplicateFile.from_row({"file_id": 1, "path": "broken.jpg", "phash_hex": "not-a-hex-value"})
 
 
 def test_scanner_treats_missing_or_mismatched_embeddings_as_pass_through() -> None:

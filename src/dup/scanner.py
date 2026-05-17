@@ -34,7 +34,9 @@ def _row_get(row, key, default=None):
         if hasattr(row, "keys") and key in row.keys():
             return row[key]  # sqlite3.Row
         return getattr(row, key, default)
-    except Exception:
+    except (AttributeError, KeyError, TypeError):
+        # Failure policy: skip malformed row access and let from_row report
+        # missing required fields through its normal validation path.
         return default
 
 
@@ -47,7 +49,9 @@ def _parse_phash_any(raw) -> int | None:
         try:
             v = int.from_bytes(bytes(raw), "big", signed=False)
             return v & ((1 << 64) - 1)
-        except Exception:
+        except (OverflowError, TypeError, ValueError):
+            # Failure policy: malformed per-row phash values are invalid input,
+            # so this row is skipped by returning None.
             return None
 
     # 文字列 (10進/0x16進/16進っぽい)
@@ -58,17 +62,20 @@ def _parse_phash_any(raw) -> int | None:
         try:
             # base=0 なら "0x…" も 10進も自動判定
             v = int(s, 0)
-        except Exception:
+        except ValueError:
             try:
                 v = int(s, 16)  # 最後の手段として16進解釈
-            except Exception:
+            except ValueError:
+                # Failure policy: malformed per-row phash values are invalid
+                # input, not a scanner-wide failure.
                 return None
         return v & ((1 << 64) - 1)
 
     # それ以外（np.int64 / Decimal などもここで拾う）
     try:
         v = int(raw)
-    except Exception:
+    except (OverflowError, TypeError, ValueError):
+        # Failure policy: unparseable phash-like values skip the row.
         return None
     return v & ((1 << 64) - 1)
 

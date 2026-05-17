@@ -1,0 +1,26 @@
+# Shared pip constraints for local development and GitHub Actions.
+# Use with: python -m pip install -c requirements-dev.lock -e ".[dev,tagging-cpu]"
+black==25.9.0
+coverage==7.6.12
+hypothesis==6.140.3
+isort==6.1.0
+mypy==1.18.2
+numpy==2.2.6
+onnxruntime==1.20.1
+opencv-python-headless==4.12.0.88
+pillow==11.3.0
+platformdirs==4.4.0
+pydantic==2.12.0
+pydantic-core==2.41.1
+PyQt6==6.9.1
+PyQt6-Qt6==6.9.2
+PyQt6-sip==13.10.2
+pytest==8.4.2
+pytest-cov==6.2.1
+pytest-qt==4.5.0
+PyYAML==6.0.3
+ruff==0.14.0
+scikit-image==0.25.2
+scipy==1.15.3
+Send2Trash==1.8.3
+types-PyYAML==6.0.12.20260510

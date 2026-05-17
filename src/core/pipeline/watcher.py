@@ -1,3 +1,5 @@
+"""Watcher-side orchestration for queued tagging and indexing work."""
+
 from __future__ import annotations
 
 import logging
@@ -100,6 +102,34 @@ class _FileProcessJob(BatchJob):
         logger.debug("Processing job finished")
 
 
+def resolve_watch_paths(
+    paths: Iterable[Path],
+    *,
+    allow_exts: Iterable[str],
+    already_scheduled: Iterable[Path] = (),
+) -> tuple[list[Path], set[Path]]:
+    """Return resolved paths that should be newly scheduled."""
+
+    allowed = {ext.lower() for ext in allow_exts}
+    scheduled = set(already_scheduled)
+    scheduled_now: set[Path] = set()
+    resolved_paths: list[Path] = []
+    for path in paths:
+        candidate = Path(path)
+        suffix = candidate.suffix.lower()
+        if not suffix or suffix not in allowed:
+            continue
+        try:
+            resolved = candidate.expanduser().resolve()
+        except OSError:
+            resolved = candidate.expanduser().absolute()
+        if resolved in scheduled or resolved in scheduled_now:
+            continue
+        scheduled_now.add(resolved)
+        resolved_paths.append(resolved)
+    return resolved_paths, scheduled_now
+
+
 class ProcessingPipeline(QObject):
     """Drive watcher events through tagging and duplicate indexing."""
 
@@ -165,22 +195,11 @@ class ProcessingPipeline(QObject):
         indexer: _Indexer | None = None,
     ) -> None:
         bootstrap_if_needed(self._db_path)
-        allow_exts = {ext.lower() for ext in (self._settings.allow_exts or DEFAULT_EXTENSIONS)}
-        scheduled_now: set[Path] = set()
-        resolved_paths: list[Path] = []
-        for path in paths:
-            candidate = Path(path)
-            suffix = candidate.suffix.lower()
-            if not suffix or suffix not in allow_exts:
-                continue
-            try:
-                resolved = candidate.expanduser().resolve()
-            except OSError:
-                resolved = candidate.expanduser().absolute()
-            if resolved in self._scheduled or resolved in scheduled_now:
-                continue
-            scheduled_now.add(resolved)
-            resolved_paths.append(resolved)
+        resolved_paths, scheduled_now = resolve_watch_paths(
+            paths,
+            allow_exts=self._settings.allow_exts or DEFAULT_EXTENSIONS,
+            already_scheduled=self._scheduled,
+        )
         if not resolved_paths:
             return
         self._scheduled.update(scheduled_now)

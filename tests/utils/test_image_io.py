@@ -72,6 +72,31 @@ def test_safe_load_image_can_skip_large_headers_and_convert_rgb(tmp_path: Path) 
     assert loaded.size == (4, 3)
 
 
+def test_safe_load_image_composites_rgba_over_white(tmp_path: Path) -> None:
+    source = tmp_path / "alpha.png"
+    image = Image.new("RGBA", (1, 1), (255, 0, 0, 0))
+    image.save(source)
+
+    loaded = safe_load_image(source, rgb=True)
+
+    assert loaded is not None
+    assert loaded.mode == "RGB"
+    assert loaded.getpixel((0, 0)) == (255, 255, 255)
+
+
+def test_safe_load_image_applies_exif_transpose(tmp_path: Path) -> None:
+    source = tmp_path / "oriented.jpg"
+    image = Image.new("RGB", (2, 4), (1, 2, 3))
+    exif = image.getexif()
+    exif[274] = 6
+    image.save(source, exif=exif)
+
+    loaded = safe_load_image(source, rgb=True)
+
+    assert loaded is not None
+    assert loaded.size == (4, 2)
+
+
 def test_safe_load_image_restores_pixel_cap_after_large_skip(tmp_path: Path) -> None:
     source = tmp_path / "large-header.png"
     _create_sample_image(source, size=(8, 8))

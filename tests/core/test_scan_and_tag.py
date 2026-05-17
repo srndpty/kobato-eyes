@@ -187,6 +187,31 @@ def test_scan_and_tag_treats_write_stage_cancel_as_cancelled_stats(
     assert stats["tagged"] == 0
 
 
+def test_scan_and_tag_progress_callback_failure_is_best_effort(
+    temp_env: Path,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    root = tmp_path / "library"
+    root.mkdir()
+    image_path = root / "progress.png"
+    _write_png(image_path)
+    calls = 0
+
+    def progress_cb(progress: manual_refresh.IndexProgress) -> None:
+        nonlocal calls
+        calls += 1
+        raise RuntimeError(f"progress failed at {progress.phase.name}")
+
+    with caplog.at_level("ERROR", logger="core.pipeline.manual_refresh"):
+        stats = scan_and_tag(root, progress_cb=progress_cb)
+
+    assert stats["queued"] == 1
+    assert stats["tagged"] == 1
+    assert calls == 1
+    assert "Refresh progress callback failed; disabling further updates" in caplog.text
+
+
 def test_scan_and_tag_soft_deletes_missing(temp_env: Path, tmp_path: Path) -> None:
     root = tmp_path / "library"
     root.mkdir()

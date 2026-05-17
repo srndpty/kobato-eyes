@@ -19,6 +19,22 @@ from ui.tag_rendering import (
 )
 
 
+def grid_caption_lines(text: str) -> list[str]:
+    """Return at most two caption lines for a grid thumbnail."""
+
+    raw_lines = str(text or "").splitlines() or [""]
+    if len(raw_lines) >= 2:
+        return [raw_lines[0], " ".join(line for line in raw_lines[1:] if line)]
+    return [raw_lines[0]]
+
+
+def should_paint_text_background(red: int, green: int, blue: int, *, threshold: float = 128.0) -> bool:
+    """Return whether text should receive a backing fill over a dark base."""
+
+    luminance = 0.299 * red + 0.587 * green + 0.114 * blue
+    return luminance < threshold
+
+
 class WrappingItemDelegate(QStyledItemDelegate):
     """Render text on multiple lines instead of eliding."""
 
@@ -223,8 +239,7 @@ class GridThumbDelegate(QStyledItemDelegate):
 
         base_role = QPalette.ColorRole.Highlight if is_selected else QPalette.ColorRole.Base
         base_color = palette.color(color_group, base_role)
-        luminance = 0.299 * base_color.red() + 0.587 * base_color.green() + 0.114 * base_color.blue()
-        if luminance < 128:
+        if should_paint_text_background(base_color.red(), base_color.green(), base_color.blue()):
             painter.save()
             painter.setPen(Qt.PenStyle.NoPen)
             painter.setBrush(base_color)
@@ -232,8 +247,7 @@ class GridThumbDelegate(QStyledItemDelegate):
             painter.restore()
 
         fm = opt.fontMetrics
-        raw_lines = str(index.data(Qt.ItemDataRole.DisplayRole) or "").splitlines() or [""]
-        lines = [raw_lines[0], " ".join(raw_lines[1:])] if len(raw_lines) >= 2 else [raw_lines[0]]
+        lines = grid_caption_lines(str(index.data(Qt.ItemDataRole.DisplayRole) or ""))
         lines = [fm.elidedText(line, Qt.TextElideMode.ElideRight, text_rect.width()) for line in lines]
         lines = [line for line in lines if line] or [""]
 
@@ -248,4 +262,10 @@ class GridThumbDelegate(QStyledItemDelegate):
         painter.restore()
 
 
-__all__ = ["GridThumbDelegate", "HighlightDelegate", "WrappingItemDelegate"]
+__all__ = [
+    "GridThumbDelegate",
+    "HighlightDelegate",
+    "WrappingItemDelegate",
+    "grid_caption_lines",
+    "should_paint_text_background",
+]
