@@ -61,6 +61,84 @@ def test_duplicate_scan_worker_emits_error(tmp_path: Path) -> None:
     assert errors == ["db closed"]
 
 
+def test_duplicate_scan_worker_skips_bad_rows_and_finishes(tmp_path: Path) -> None:
+    emitted: list[object] = []
+    errors: list[str] = []
+    captured_files: list[object] = []
+    rows = [
+        {
+            "file_id": 1,
+            "path": str(tmp_path / "a.png"),
+            "size": 10,
+            "width": 10,
+            "height": 10,
+            "phash_u64": 1,
+        },
+        {
+            "file_id": 2,
+            "path": str(tmp_path / "broken.png"),
+            "size": 10,
+            "width": 10,
+            "height": 10,
+            "phash_u64": "not-a-hash",
+        },
+        {
+            "file_id": 3,
+            "path": str(tmp_path / "c.png"),
+            "size": 10,
+            "width": 10,
+            "height": 10,
+            "phash_u64": 1,
+        },
+    ]
+
+    class Scanner:
+        def build_clusters(self, files):
+            captured_files.extend(files)
+            return ["cluster"]
+
+    view_model = DupViewModel(
+        db_path=tmp_path / "library.db",
+        connection_factory=lambda path: _Connection(),
+        iter_files_for_dup=lambda conn, path_like: rows,
+        scanner_factory=lambda config: Scanner(),
+    )
+    worker = DuplicateScanRunnable(view_model, view_model.db_path, DuplicateScanRequest(None, 4, None))
+    worker.signals.finished.connect(emitted.append)
+    worker.signals.error.connect(errors.append)
+
+    worker.run()
+
+    assert errors == []
+    assert emitted == [["cluster"]]
+    assert [file.file_id for file in captured_files] == [1, 3]
+
+
+def test_duplicate_scan_worker_reports_non_int_file_id(tmp_path: Path) -> None:
+    errors: list[str] = []
+    rows = [
+        {
+            "file_id": object(),
+            "path": str(tmp_path / "a.png"),
+            "size": 10,
+            "width": 10,
+            "height": 10,
+            "phash_u64": 1,
+        }
+    ]
+    view_model = DupViewModel(
+        db_path=tmp_path / "library.db",
+        connection_factory=lambda path: _Connection(),
+        iter_files_for_dup=lambda conn, path_like: rows,
+    )
+    worker = DuplicateScanRunnable(view_model, view_model.db_path, DuplicateScanRequest(None, 4, None))
+    worker.signals.error.connect(errors.append)
+
+    worker.run()
+
+    assert errors == ["expected int-compatible value, got object"]
+
+
 def test_refine_worker_cancel_emits_canceled(monkeypatch) -> None:
     canceled: list[bool] = []
 

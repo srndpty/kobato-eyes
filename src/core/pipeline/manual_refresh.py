@@ -248,7 +248,7 @@ def scan_and_tag(
                                 message="Hard delete missing",
                             )
                         )
-                hard_deleted_count = missing_count
+                hard_deleted_count = removed
             else:
                 with conn:
                     for chunk in _chunked(missing_ids):
@@ -271,7 +271,7 @@ def scan_and_tag(
                                 message="Mark missing",
                             )
                         )
-                soft_deleted = missing_count
+                soft_deleted = removed
         stats_out["soft_deleted"] = soft_deleted
         stats_out["hard_deleted"] = hard_deleted_count
 

@@ -51,8 +51,10 @@ def test_generate_thumbnail_recovers_corrupt_cache_file(tmp_path: Path) -> None:
 def test_safe_load_image_handles_corrupted_file(tmp_path: Path) -> None:
     broken = tmp_path / "broken.jpg"
     broken.write_bytes(b"not-an-image")
+    original_cap = Image.MAX_IMAGE_PIXELS
 
     assert safe_load_image(broken) is None
+    assert Image.MAX_IMAGE_PIXELS == original_cap
     cache_dir = tmp_path / "cache2"
     assert generate_thumbnail(broken, cache_dir) is None
 
@@ -68,6 +70,47 @@ def test_safe_load_image_can_skip_large_headers_and_convert_rgb(tmp_path: Path) 
     assert loaded is not None
     assert loaded.mode == "RGB"
     assert loaded.size == (4, 3)
+
+
+def test_safe_load_image_restores_pixel_cap_after_large_skip(tmp_path: Path) -> None:
+    source = tmp_path / "large-header.png"
+    _create_sample_image(source, size=(8, 8))
+    original_cap = Image.MAX_IMAGE_PIXELS
+
+    skipped = safe_load_image(source, bomb_pixel_cap=123, hard_skip_pixels=1)
+
+    assert skipped is None
+    assert Image.MAX_IMAGE_PIXELS == original_cap
+
+
+def test_safe_load_image_closes_source_after_rgb_conversion(monkeypatch) -> None:
+    closed: list[str] = []
+    converted = object()
+
+    class FakeImage:
+        size = (4, 4)
+        mode = "L"
+
+        def draft(self, mode, size) -> None:
+            assert mode == "RGB"
+            assert size == (4096, 4096)
+
+        def load(self) -> None:
+            return None
+
+        def convert(self, mode):
+            assert mode == "RGB"
+            return converted
+
+        def close(self) -> None:
+            closed.append("source")
+
+    monkeypatch.setattr(image_io.Image, "open", lambda path: FakeImage())
+
+    loaded = safe_load_image("fake.png")
+
+    assert loaded is converted
+    assert closed == ["source"]
 
 
 def test_resize_image_preserves_aspect_ratio() -> None:

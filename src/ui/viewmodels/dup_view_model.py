@@ -3,14 +3,14 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Callable, Iterable, Sequence
+from typing import Any, Callable, Iterable, Sequence
 
 from PyQt6.QtCore import QObject
 
 from db.connection import get_conn as _get_conn
 from db.repository import iter_files_for_dup as _iter_files_for_dup
 from db.repository import mark_files_absent as _mark_files_absent
-from dup.scanner import DuplicateScanConfig, DuplicateScanner
+from dup.scanner import DuplicateCluster, DuplicateFile, DuplicateScanConfig, DuplicateScanner
 from utils.image_io import generate_thumbnail as _generate_thumbnail
 from utils.image_io import get_thumbnail as _get_thumbnail
 from utils.paths import get_cache_dir as _get_cache_dir
@@ -26,10 +26,10 @@ class DupViewModel(QObject):
         *,
         db_path: Path | None = None,
         connection_factory: Callable[[Path], object] = _get_conn,
-        iter_files_for_dup: Callable[[object, str | None], Iterable[Sequence[object]]] = _iter_files_for_dup,
-        mark_files_absent: Callable[[object, Sequence[int]], None] = _mark_files_absent,
+        iter_files_for_dup: Callable[[Any, str | None], Iterable[dict[str, object]]] = _iter_files_for_dup,
+        mark_files_absent: Callable[[Any, Sequence[int]], object] = _mark_files_absent,
         scanner_factory: Callable[[DuplicateScanConfig], DuplicateScanner] | None = None,
-        generate_thumbnail: Callable[..., None] = _generate_thumbnail,
+        generate_thumbnail: Callable[..., object] = _generate_thumbnail,
         get_thumbnail: Callable[[Path, int, int], object] = _get_thumbnail,
         cache_dir_factory: Callable[[], Path] = _get_cache_dir,
     ) -> None:
@@ -55,7 +55,7 @@ class DupViewModel(QObject):
         target = Path(db_path) if db_path is not None else self._db_path
         return self._connection_factory(target)
 
-    def iter_files_for_dup(self, connection: object, path_like: str | None):
+    def iter_files_for_dup(self, connection: object, path_like: str | None) -> list[dict[str, object]]:
         """Yield file metadata for duplicate scanning."""
 
         return list(self._iter_files_for_dup(connection, path_like))
@@ -65,7 +65,7 @@ class DupViewModel(QObject):
 
         self._mark_files_absent(connection, list(file_ids))
 
-    def build_clusters(self, config: DuplicateScanConfig, files: Iterable[Sequence[object]]):
+    def build_clusters(self, config: DuplicateScanConfig, files: Iterable[DuplicateFile]) -> list[DuplicateCluster]:
         """Create duplicate clusters using the configured scanner factory."""
 
         scanner = self._scanner_factory(config)

@@ -65,6 +65,7 @@ from ui.autocomplete import (
     extract_completion_token,
     replace_completion_token,
 )
+from ui.index_feedback import format_index_failure, format_index_success_toast, format_refresh_feedback
 from ui.index_tasks import IndexRunnable
 from ui.result_delegates import GridThumbDelegate
 from ui.result_delegates import HighlightDelegate as _HighlightDelegate
@@ -1826,33 +1827,12 @@ class TagsTab(QWidget):
                 self._status_label.setText(f"Refresh cancelled after {elapsed:.2f}s.")
                 self._show_toast("Refresh cancelled.")
             else:
-                queued = int(stats.get("queued", 0) or 0)
-                tagged = int(stats.get("tagged", 0) or 0)
-                missing = int(stats.get("missing", 0) or 0)
-                soft_deleted = int(stats.get("soft_deleted", 0) or 0)
-                hard_deleted = int(stats.get("hard_deleted", 0) or 0)
-                removed_total = soft_deleted + hard_deleted
-                if missing <= 0 and removed_total > 0:
-                    missing = removed_total
-                hard_delete = bool(stats.get("hard_delete", False) or hard_deleted)
-                removal_label = "hard delete" if hard_delete else "soft delete"
                 if not folders:
                     roots_meta = stats.get("roots", [])
                     folders = [Path(entry.get("folder", "")) for entry in roots_meta if entry.get("folder")]
-                folder_text = ", ".join(str(item) for item in folders) if folders else ""
-                status = (
-                    f"Refresh complete: {tagged} tagged, {removed_total} missing removed "
-                    f"({removal_label}, {elapsed:.2f}s; queued {queued})."
-                )
-                if folder_text:
-                    status += f" [{folder_text}]"
-                self._status_label.setText(status)
-                toast = f"{tagged} tagged; {removed_total} missing removed"
-                if hard_delete:
-                    toast += " (hard delete)"
-                if folder_text:
-                    toast = f"{toast} {folder_text}"
-                self._show_toast(toast)
+                feedback = format_refresh_feedback(stats, folders)
+                self._status_label.setText(feedback.status)
+                self._show_toast(feedback.toast)
                 if self._current_where:
                     QTimer.singleShot(0, self._on_search_clicked)
             self._update_control_states()
@@ -1875,19 +1855,7 @@ class TagsTab(QWidget):
         else:
             self._status_label.setText(f"Indexing complete in {elapsed:.2f}s.")
 
-        tagger_name = str(stats.get("tagger_name") or "unknown")
-        message = f"Indexed: {int(stats.get('scanned', 0))} files / Tagged: {int(stats.get('tagged', 0))}"
-        retagged = int(stats.get("retagged", 0) or 0)
-        requested = int(stats.get("retagged_marked", retagged) or 0)
-        if self._retag_active:
-            if requested and requested != retagged:
-                message += f" / Retagged: {retagged}/{requested}"
-            else:
-                message += f" / Retagged: {retagged}"
-        elif retagged:
-            message += f" / Retagged: {retagged}"
-        message += f" (tagger: {tagger_name})"
-        self._show_toast(message)
+        self._show_toast(format_index_success_toast(stats, retag_active=self._retag_active))
         self._retag_active = False
         self._update_control_states()
         QTimer.singleShot(0, self._on_search_clicked)
@@ -1905,16 +1873,18 @@ class TagsTab(QWidget):
         self._close_progress_dialog()
 
         self._indexing_active = False
-        if message == ONNXRUNTIME_MISSING_MESSAGE:
-            error_text = message
+        if self._refresh_active:
+            prefix = "Refreshing"
+        elif self._retag_active:
+            prefix = "Retagging"
         else:
-            if self._refresh_active:
-                prefix = "Refreshing"
-            elif self._retag_active:
-                prefix = "Retagging"
-            else:
-                prefix = "Indexing"
-            error_text = f"{prefix} failed (DB: {self._db_display}): {message}"
+            prefix = "Indexing"
+        error_text = format_index_failure(
+            message,
+            prefix=prefix,
+            db_display=self._db_display,
+            passthrough_message=ONNXRUNTIME_MISSING_MESSAGE,
+        )
         self._status_label.setText(error_text)
         self._show_toast(error_text)
         self._refresh_active = False

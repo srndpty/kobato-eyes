@@ -285,3 +285,67 @@ def test_scan_and_tag_hard_deletes_missing(temp_env: Path, tmp_path: Path) -> No
         assert conn2.execute("SELECT 1 FROM fts_files WHERE rowid = ?", (file_id,)).fetchone() is None
     finally:
         conn2.close()
+
+
+@pytest.mark.parametrize("hard_delete_missing", [False, True])
+def test_scan_and_tag_cancelled_missing_cleanup_reports_processed_count(
+    temp_env: Path,
+    tmp_path: Path,
+    hard_delete_missing: bool,
+) -> None:
+    root = tmp_path / "library"
+    root.mkdir()
+    db_path = paths.get_db_path()
+    total_missing = 901
+
+    conn = get_conn(db_path)
+    try:
+        for index in range(total_missing):
+            upsert_file(
+                conn,
+                path=str((root / f"missing-{index:04d}.png").resolve()),
+                size=100 + index,
+                mtime=200.0 + index,
+                sha256=f"deadbeef-{index}",
+            )
+    finally:
+        conn.close()
+
+    cancel_after_first_chunk = False
+
+    def progress_cb(progress: manual_refresh.IndexProgress) -> None:
+        nonlocal cancel_after_first_chunk
+        if progress.phase is manual_refresh.IndexPhase.FTS and progress.done >= 900:
+            cancel_after_first_chunk = True
+
+    stats = scan_and_tag(
+        root,
+        hard_delete_missing=hard_delete_missing,
+        progress_cb=progress_cb,
+        is_cancelled=lambda: cancel_after_first_chunk,
+    )
+
+    assert stats["queued"] == 0
+    assert stats["tagged"] == 0
+    assert stats["missing"] == total_missing
+    assert stats["cancelled"] is True
+    if hard_delete_missing:
+        assert stats["hard_deleted"] == 900
+        assert stats["soft_deleted"] == 0
+    else:
+        assert stats["soft_deleted"] == 900
+        assert stats["hard_deleted"] == 0
+
+    conn2 = get_conn(db_path)
+    try:
+        remaining = conn2.execute("SELECT COUNT(*) FROM files").fetchone()[0]
+        absent = conn2.execute("SELECT COUNT(*) FROM files WHERE is_present = 0").fetchone()[0]
+    finally:
+        conn2.close()
+
+    if hard_delete_missing:
+        assert remaining == 1
+        assert absent == 0
+    else:
+        assert remaining == total_missing
+        assert absent == 900

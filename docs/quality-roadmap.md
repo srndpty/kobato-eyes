@@ -2,64 +2,154 @@
 
 ## 現状
 
+- 更新日: 2026-05-17
 - 基準チェック: `.\scripts\check.ps1`
-- 直近の基準値: `357 passed, 39 deselected`
-- 総カバレッジ: `78%`
-- mypy対象: `45 source files`
-- CI構成: unit, integration, gui-smoke, db-stress, package-smoke を分離済み
-- 最大リスク:
-  - `ui.tags_tab` と `ui.dup_tab` が巨大で、UI状態・worker・DB操作の境界が読みづらい。
-  - `services.db_writing` と `core.pipeline` 周辺に broad `except Exception` が残っている。
-  - 標準チェックは GUI / integration / db_stress を除外するため、変更内容に応じた追加確認が必要。
+- 直近の基準値: `375 passed, 39 deselected`
+- 総カバレッジ: `79%`
+- mypy対象: `50 source files`
+- GUI smoke: `26 passed, 388 deselected`
+- package smoke: compile package smoke OK
+- 重点カバレッジ: `core.jobs`, `core.pipeline.retag`, `db.fts`, `ui.search_worker` は合計 `91%`
 
-## 短期: DB / pipeline の失敗境界を固定する
+## ここまでで改善済み
 
-- 目的: DB書き込み、FTS再構築、quiesce、checkpoint の失敗時に成功扱いへ流れないようにする。
-- 対象: `core.pipeline.manual_refresh`, `core.pipeline.loaders`, `core.pipeline.stages.write_stage`, `services.db_writing`
+- `manual_refresh` の missing cleanup は、キャンセル後に実際に処理した soft/hard delete 件数を stats に返す。
+- `IndexRunnable` は pre-run / runner 例外を `signals.error` に流し、失敗時に `signals.finished` を出さないことをテストで固定済み。
+- `tags_tab.py` から index / refresh の feedback 生成を `ui.index_feedback` へ切り出し済み。
+- `dup_tab.py` から duplicate status 生成を `ui.dup_status` へ切り出し済み。
+- `utils.image_io` は巨大画像 skip、壊れた画像、pixel cap 復元、RGB変換時 close をテスト済み。
+- `dup.scanner` は BLOB / hex pHash、embedding 不一致時の fallback をテスト済み。
+- `DuplicateScanRunnable` は不正 row skip と file_id 型不正時の error signal をテスト済み。
+- mypy 対象を `45 source files` から `50 source files` に拡張済み。
+
+## 現在の主要リスク
+
+- `ui.tags_tab` は約1950行、`ui.dup_tab` は約1170行で、まだ UI 状態、worker 制御、DB 接続復旧、表示更新が密である。
+- `services.db_writing`, `core.pipeline.loaders`, `core.pipeline.manual_refresh`, `dup.scanner`, `ui.dup_refine_parallel`, tagger backend 周辺に broad `except Exception` が残っている。
+- `ui.result_delegates`, `ui.widgets.spinner_overlay`, `ui.dup_widgets`, `ui.tag_stats`, `core.pipeline.watcher`, `utils.image_io` はカバレッジが低く、UI描画・非同期・IO境界の回帰を見落としやすい。
+- `tagger.wd14_onnx` と `tagger.pixai_onnx` は大きく、環境依存 fallback と推論 backend の品質確認が通常チェックから外れやすい。
+- 標準チェックは GUI / integration / db_stress を除外するため、変更内容に応じた追加確認が必須である。
+
+## 次フェーズ 1: DB / pipeline の残った失敗境界を閉じる
+
+- 目的: DB writer shutdown、loader fallback、watcher、manual refresh cleanup の失敗分類を最後まで明確にする。
+- 対象:
+  - `services.db_writing`
+  - `core.pipeline.loaders`
+  - `core.pipeline.watcher`
+  - `core.pipeline.manual_refresh`
+- 作業:
+  - `DBWritingService.stop`, `_maybe_checkpoint`, `_restore_normal_mode`, `_emit_progress` の best effort failure をログレベル込みで分類する。
+  - `core.pipeline.loaders` の optional decoder fallback、壊れた画像、producer thread failure を追加テストする。
+  - `core.pipeline.watcher` の start/stop、例外、キャンセル、queue drain をテストする。
+  - `docs/exception-audit-db-pipeline.md` は DB / pipeline 例外境界の作業台帳として継続更新する。
 - 完了条件:
-  - 失敗を伝播すべき処理、best effort cleanup、環境依存 fallback の分類がコードまたはテストで明確になっている。
-  - `docs/exception-audit-db-pipeline.md` の残タスクを順次解消する。
-  - 意図的に握りつぶす cleanup 失敗はログ確認テストまたは近接コメントで理由を残す。
-- 検証:
-  - `.\scripts\check.ps1`
-  - `.\scripts\check-integration.ps1`
-  - `.\scripts\check-db-stress.ps1`
+  - 成功扱いにしてよい cleanup と、呼び出し元へ伝播すべき失敗がテスト名または近接コメントで読める。
+  - `check.ps1`, `check-integration.ps1`, 必要に応じて `check-db-stress.ps1` が通る。
 
-## 中期: UI worker と巨大タブを段階分割する
+## 次フェーズ 2: 巨大 UI ファイルを状態単位でさらに分割する
 
-- 目的: UIフリーズ、キャンセル後の状態破損、worker例外の見落としを減らす。
-- 対象: `ui.tags_tab`, `ui.dup_tab`, `ui.search_worker`, `ui.dup_workers`, `ui.thumbnail_tasks`, `ui.file_actions`
+- 目的: `tags_tab.py` / `dup_tab.py` の変更リスクを下げ、UI 状態遷移を小さな単位でテストできるようにする。
+- 対象:
+  - `ui.tags_tab`
+  - `ui.dup_tab`
+  - `ui.index_feedback`
+  - `ui.dup_status`
+  - `ui.dup_workers`
+  - `ui.thumbnail_tasks`
+- 作業:
+  - `tags_tab.py` から index task lifecycle、refresh folder selection、connection restore retry を小さな helper / controller に分ける。
+  - `dup_tab.py` から scan lifecycle、refine dialog lifecycle、trash/export 後の cluster 更新を分ける。
+  - `thumbnail_tasks` と duplicate thumbnail queue の重複・キャンセル・壊れた画像 path を追加テストする。
+  - 一括リライトは避け、1回の変更で 1 境界だけ移す。
 - 完了条件:
-  - 検索、サムネイル、コピー、重複 scan/refine、trash/export を helper / viewmodel / worker 単位で小さく切り出す。
-  - `tags_tab.py` と `dup_tab.py` は一括リライトせず、分割前に既存挙動を smoke / headless テストで固定する。
-  - `dup_widgets.py`, `dup_workers.py`, `tag_stats.py`, `spinner_overlay.py`, `thumbnail_tasks.py`, `file_actions.py` の主要な成功系と失敗系をテストする。
+  - UI worker 例外後に button / status / active task / connection state が復帰することを smoke または headless test で確認できる。
+  - `tags_tab.py` / `dup_tab.py` の本体は widget orchestration に寄り、文言生成・集計・状態判定は helper 側に寄る。
 - 検証:
   - `.\scripts\check.ps1`
   - `.\scripts\check-gui-smoke.ps1`
 
-## 長期: 型チェックとカバレッジの重点を広げる
+## 次フェーズ 3: 重複検出 refine と画像 IO の実データ耐性を上げる
 
-- 目的: DB、pipeline、service で固めた型チェックを UI worker / viewmodel へ広げる。
+- 目的: 破損画像、巨大画像、optional dependency 不足、並列 refine の worker 失敗が結果全体を壊さないようにする。
+- 対象:
+  - `dup.refine`
+  - `dup.scanner`
+  - `ui.dup_refine_parallel`
+  - `ui.dup_workers`
+  - `utils.image_io`
+- 作業:
+  - `ui.dup_refine_parallel` の tilehash / pixel refine で、個別ファイル失敗、cancel、progress、summary logging をテストする。
+  - `dup.refine` の SSIM / ORB / pixel fallback の境界を fixture 付きで固定する。
+  - `utils.image_io.get_thumbnail` の PyQt 実 backend smoke と cache eviction を追加する。
+  - 実データに近い小型 fixture で pHash -> refine までの lightweight integration を作る。
 - 完了条件:
-  - 新規 core / db / service / worker モジュールは原則 mypy 対象へ追加する。
-  - 既存の mypy 対象 `45 source files` を下回らない。
-  - DB / pipeline / search worker は高水準のカバレッジを維持する。
-  - 巨大 UI 本体は総カバレッジ数値より、分割後の境界テストと状態遷移テストを優先する。
+  - 破損ファイルや依存不足が cluster 全体の silent failure にならない。
+  - ユーザーに返す件数、ログ、progress が実処理と一致する。
+- 検証:
+  - `.\scripts\check.ps1`
+  - `.\scripts\check-gui-smoke.ps1`
+  - 実データ fixture を追加した場合は該当 integration test
+
+## 次フェーズ 4: 型チェック対象を UI / tagger へ広げる
+
+- 目的: 非同期 worker、viewmodel、画像 IO で固めた型チェックを、残る UI helper と tagger backend へ広げる。
+- 現在維持する対象:
+  - `src/ui/index_tasks.py`
+  - `src/ui/dup_workers.py`
+  - `src/ui/file_actions.py`
+  - `src/ui/viewmodels/dup_view_model.py`
+  - `src/utils/image_io.py`
+- 次の追加候補:
+  - `src/ui/index_feedback.py`
+  - `src/ui/dup_status.py`
+  - `src/ui/thumbnail_tasks.py`
+  - `src/ui/tag_rendering.py`
+  - `src/ui/viewmodels/settings_view_model.py`
+  - `src/tagger/labels_util.py`
+- 保留候補:
+  - `src/tagger/wd14_onnx.py`
+  - `src/tagger/pixai_onnx.py`
+  - `src/ui/tags_tab.py`
+  - `src/ui/dup_tab.py`
+- 完了条件:
+  - mypy 対象 `50 source files` を下回らない。
+  - 新規 core / db / service / worker / helper モジュールは原則 mypy 対象へ追加する。
+  - `src/ui/dup_refine_parallel.py` の未型付け関数に由来する mypy note を減らす。
 - 検証:
   - `python -m mypy`
   - `python -m ruff check .`
-  - `.\scripts\check-package-smoke.ps1`（import構造、tools、packaging、モジュール先頭に触れた場合）
+  - import構造や module header に触った場合は `.\scripts\check-package-smoke.ps1`
 
-## 環境依存チェック
+## 次フェーズ 5: tagger backend / GPU 境界を別トラックで固める
 
-- GPU / ONNX Runtime CUDA / open_clip / 推論backendに触る変更だけ `.\scripts\check-gpu.ps1` を使う。
-- GPU精度改善やモデル更新は通常の品質改善とは別トラックで扱う。
-- PyQt6実backend、`core.jobs`、QThread / QRunnable、pipeline、DB bootstrap、GUI / integration / smokeに触った場合は、該当する CI 再現コマンドを実行または案内する。
+- 目的: ONNX Runtime CUDA / CPU fallback / model input layout / label merge の環境依存回帰を通常品質改善から分離して扱う。
+- 対象:
+  - `tagger.wd14_onnx`
+  - `tagger.pixai_onnx`
+  - `tagger.labels_util`
+- 作業:
+  - ONNX Runtime 不足、CUDA provider 不足、モデルファイル不足、labels CSV 不整合の user-facing error をテストする。
+  - CPU fallback と GPU provider 選択のログを確認できるようにする。
+  - 大きい backend 本体から provider selection / input layout / label postprocess を小さく切る。
+- 検証:
+  - 通常: `.\scripts\check.ps1`
+  - GPU / CUDA / open_clip に触った場合のみ: `.\scripts\check-gpu.ps1`
 
 ## 運用ルール
 
 - Windows + Python 3.10を主対象にする。
 - `PYTHONPATH=src` を前提にする。
 - ロードマップ更新時は `.\scripts\check.ps1` の実測値を記録する。
-- カバレッジは全体数値だけでなく、DB、pipeline、検索worker、UI worker の重要分岐を優先する。
+- カバレッジは全体数値だけでなく、DB、pipeline、検索worker、UI worker、画像 IO、重複 refine の重要分岐を優先する。
 - UI巨大ファイルは一括リライトせず、テストを追加してから小さく切り出す。
+- `docs/exception-audit-db-pipeline.md` は DB / pipeline 例外境界の作業メモとして維持し、完了した候補はロードマップと同期する。
+
+## チェック選択
+
+- 通常の高速確認: `.\scripts\check.ps1`
+- PyQt6 / worker / GUI 状態変更: `.\scripts\check-gui-smoke.ps1`
+- pipeline / DB bootstrap / end-to-end: `.\scripts\check-integration.ps1`
+- WAL / SQLite lock / checkpoint / quiesce: `.\scripts\check-db-stress.ps1`
+- import構造 / tools / packaging / module header: `.\scripts\check-package-smoke.ps1`
+- GPU / ONNX Runtime CUDA / open_clip: `.\scripts\check-gpu.ps1`
