@@ -86,12 +86,9 @@ class DBWritingService(DBWriteQueue):
 
     def stop(self, *, flush: bool = True, wait_forever: bool = False) -> None:
         self._log.debug("DBWritingService: stop requested (flush=%s, wait_forever=%s)", flush, wait_forever)
-        try:
-            if flush:
-                self._queue.put(DBFlush())
-            self._queue.put(DBStop())
-        except Exception:
-            pass
+        if flush:
+            self._put_shutdown_message(DBFlush(), "queue flush sentinel")
+        self._put_shutdown_message(DBStop(), "queue stop sentinel")
         self._stop_evt.set()
 
         if wait_forever:
@@ -103,6 +100,14 @@ class DBWritingService(DBWriteQueue):
             except RuntimeError:
                 pass
         self.raise_if_failed()
+
+    def _put_shutdown_message(self, message: object, operation: str) -> None:
+        """Best-effort shutdown queueing; worker failures still surface after join."""
+
+        try:
+            self._queue.put(message, timeout=1.0)
+        except Exception as exc:
+            self._log_best_effort_failure(operation, exc, level=logging.WARNING)
 
     @staticmethod
     def _require_positive_int(name: str, value: int) -> int:
@@ -393,28 +398,28 @@ class DBWritingService(DBWriteQueue):
         try:
             conn.rollback()
         except Exception as exc:  # pragma: no cover - rollback failures depend on SQLite state
-            self._log.warning("DBWritingService: rollback failed after batch error: %s", exc)
+            self._log_best_effort_failure("rollback after batch error", exc, level=logging.WARNING)
 
     def _maybe_checkpoint(self, conn: sqlite3.Connection) -> None:
         wal_size = self._wal_size_mb()
         if wal_size >= 256:
             try:
                 conn.execute("PRAGMA wal_checkpoint(PASSIVE)")
-            except Exception:
-                pass
+            except Exception as exc:
+                self._log_best_effort_failure("checkpoint passive after large WAL", exc, level=logging.DEBUG)
             return
         self._flush_count += 1
         if (self._flush_count % 2) == 0:
             try:
                 conn.execute("PRAGMA wal_checkpoint(PASSIVE)")
-            except Exception:
-                pass
+            except Exception as exc:
+                self._log_best_effort_failure("checkpoint passive", exc, level=logging.DEBUG)
         if (self._flush_count % 32) == 0 and self._queue.empty():
             try:
                 conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
                 conn.execute("PRAGMA optimize")
-            except Exception:
-                pass
+            except Exception as exc:
+                self._log_best_effort_failure("checkpoint truncate/optimize", exc, level=logging.DEBUG)
 
     def _wal_size_mb(self) -> int:
         try:
@@ -532,8 +537,8 @@ class DBWritingService(DBWriteQueue):
             ):
                 try:
                     conn.execute(ddl)
-                except Exception:
-                    pass
+                except Exception as exc:
+                    self._log_best_effort_failure(f"drop temporary merge object: {ddl}", exc, level=logging.DEBUG)
         try:
             self._emit_progress("merge.index", 0, 2)
             conn.execute("CREATE INDEX IF NOT EXISTS idx_file_tags_tag_id ON file_tags(tag_id)")
@@ -551,22 +556,33 @@ class DBWritingService(DBWriteQueue):
         if cb:
             try:
                 cb(kind, int(done), int(max(total, 1)))
-            except Exception:
-                pass
+            except Exception as exc:
+                self._log_best_effort_failure("progress callback", exc, level=logging.WARNING)
 
     def _restore_normal_mode(self, conn: sqlite3.Connection) -> None:
-        for statement in (
-            "END",
-            "PRAGMA locking_mode=NORMAL",
-            "PRAGMA journal_mode=DELETE",
-            "PRAGMA journal_mode=WAL",
-            "PRAGMA wal_checkpoint(TRUNCATE)",
-            "PRAGMA synchronous=NORMAL",
+        for statement, level in (
+            ("END", logging.DEBUG),
+            ("PRAGMA locking_mode=NORMAL", logging.WARNING),
+            ("PRAGMA journal_mode=DELETE", logging.WARNING),
+            ("PRAGMA journal_mode=WAL", logging.WARNING),
+            ("PRAGMA wal_checkpoint(TRUNCATE)", logging.DEBUG),
+            ("PRAGMA synchronous=NORMAL", logging.WARNING),
         ):
             try:
                 conn.execute(statement)
-            except Exception:
-                pass
+            except Exception as exc:
+                self._log_best_effort_failure(f"restore normal mode: {statement}", exc, level=level)
+
+    def _log_best_effort_failure(self, operation: str, exc: BaseException, *, level: int) -> None:
+        """Log cleanup/maintenance failures that must not mask the primary result."""
+
+        self._log.log(
+            level,
+            "DBWritingService: best-effort %s failed: %s",
+            operation,
+            exc,
+            exc_info=self._debug,
+        )
 
     # ------------------------------------------------------------------
     # Iteration helpers

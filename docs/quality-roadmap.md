@@ -4,16 +4,21 @@
 
 - 更新日: 2026-05-17
 - 基準チェック: `.\scripts\check.ps1`
-- 直近の基準値: `375 passed, 39 deselected`
+- 直近の基準値: `382 passed, 39 deselected`
 - 総カバレッジ: `79%`
 - mypy対象: `50 source files`
 - GUI smoke: `26 passed, 388 deselected`
+- integration: `7 passed, 414 deselected`
+- db_stress: `8 passed, 413 deselected`
 - package smoke: compile package smoke OK
 - 重点カバレッジ: `core.jobs`, `core.pipeline.retag`, `db.fts`, `ui.search_worker` は合計 `91%`
 
 ## ここまでで改善済み
 
 - `manual_refresh` の missing cleanup は、キャンセル後に実際に処理した soft/hard delete 件数を stats に返す。
+- フェーズ1: `DBWritingService` の shutdown sentinel、checkpoint、restore、progress callback は best effort 失敗としてログレベル込みで分類済み。
+- フェーズ1: `core.pipeline.loaders` は壊れた個別画像をスキップし、producer / IO worker 失敗は iterator で伝播することをテストで固定済み。
+- フェーズ1: `ProcessingPipeline` は path resolve 失敗時の fallback と stop / shutdown / finished 後の scheduled queue 解放をテストで固定済み。
 - `IndexRunnable` は pre-run / runner 例外を `signals.error` に流し、失敗時に `signals.finished` を出さないことをテストで固定済み。
 - `tags_tab.py` から index / refresh の feedback 生成を `ui.index_feedback` へ切り出し済み。
 - `dup_tab.py` から duplicate status 生成を `ui.dup_status` へ切り出し済み。
@@ -30,7 +35,7 @@
 - `tagger.wd14_onnx` と `tagger.pixai_onnx` は大きく、環境依存 fallback と推論 backend の品質確認が通常チェックから外れやすい。
 - 標準チェックは GUI / integration / db_stress を除外するため、変更内容に応じた追加確認が必須である。
 
-## 次フェーズ 1: DB / pipeline の残った失敗境界を閉じる
+## 完了フェーズ 1: DB / pipeline の残った失敗境界を閉じる
 
 - 目的: DB writer shutdown、loader fallback、watcher、manual refresh cleanup の失敗分類を最後まで明確にする。
 - 対象:
@@ -39,13 +44,13 @@
   - `core.pipeline.watcher`
   - `core.pipeline.manual_refresh`
 - 作業:
-  - `DBWritingService.stop`, `_maybe_checkpoint`, `_restore_normal_mode`, `_emit_progress` の best effort failure をログレベル込みで分類する。
-  - `core.pipeline.loaders` の optional decoder fallback、壊れた画像、producer thread failure を追加テストする。
-  - `core.pipeline.watcher` の start/stop、例外、キャンセル、queue drain をテストする。
+  - `DBWritingService.stop`, `_maybe_checkpoint`, `_restore_normal_mode`, `_emit_progress` の best effort failure をログレベル込みで分類する。完了。
+  - `core.pipeline.loaders` の optional decoder fallback、壊れた画像、producer thread failure を追加テストする。完了。
+  - `core.pipeline.watcher` の start/stop、例外、キャンセル、queue drain をテストする。`ProcessingPipeline` の enqueue / stop / shutdown / finished queue drain と resolve fallback を headless test で固定済み。
   - `docs/exception-audit-db-pipeline.md` は DB / pipeline 例外境界の作業台帳として継続更新する。
 - 完了条件:
-  - 成功扱いにしてよい cleanup と、呼び出し元へ伝播すべき失敗がテスト名または近接コメントで読める。
-  - `check.ps1`, `check-integration.ps1`, 必要に応じて `check-db-stress.ps1` が通る。
+  - 成功扱いにしてよい cleanup と、呼び出し元へ伝播すべき失敗がテスト名または近接コメントで読める。完了。
+  - `check.ps1`, `check-integration.ps1`, 必要に応じて `check-db-stress.ps1` が通る。実行結果はこのファイルの「現状」を更新して記録する。
 
 ## 次フェーズ 2: 巨大 UI ファイルを状態単位でさらに分割する
 

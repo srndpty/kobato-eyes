@@ -36,6 +36,7 @@ class FakeJobManager:
     def __init__(self) -> None:
         self.submissions: list[list[Path]] = []
         self.signals: list[FakeSignals] = []
+        self.shutdown_calls = 0
 
     def submit(self, job, priority=None):  # type: ignore[no-untyped-def]
         self.submissions.append(list(job.items))
@@ -44,7 +45,7 @@ class FakeJobManager:
         return signals
 
     def shutdown(self) -> None:
-        pass
+        self.shutdown_calls += 1
 
 
 @pytest.fixture()
@@ -271,3 +272,45 @@ def test_enqueue_index_filters_duplicates_and_clears(
     assert pipeline._scheduled
     pipeline.stop()
     assert pipeline._scheduled == set()
+
+
+def test_enqueue_index_falls_back_when_resolve_fails(
+    processing_pipeline: tuple[Any, FakeJobManager],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pipeline, manager = processing_pipeline
+    image_path = tmp_path / "resolve-fails.png"
+    original_resolve = type(image_path).resolve
+
+    def fail_resolve(self: Path, strict: bool = False) -> Path:
+        if self == image_path:
+            raise OSError("resolve failed")
+        return original_resolve(self, strict=strict)
+
+    monkeypatch.setattr(type(image_path), "resolve", fail_resolve)
+
+    pipeline.enqueue_index([image_path])
+
+    assert len(manager.submissions) == 1
+    assert manager.submissions[0] == [image_path.expanduser().absolute()]
+    manager.signals[0].finished.emit()
+    assert pipeline._scheduled == set()
+
+
+def test_pipeline_stop_and_shutdown_clear_queue_state(
+    processing_pipeline: tuple[Any, FakeJobManager],
+    tmp_path: Path,
+) -> None:
+    pipeline, manager = processing_pipeline
+    first = tmp_path / "first.png"
+    second = tmp_path / "second.png"
+
+    pipeline.enqueue_index([first, second])
+    assert pipeline._scheduled == {first.expanduser().resolve(), second.expanduser().resolve()}
+
+    pipeline.stop()
+    assert pipeline._scheduled == set()
+
+    pipeline.shutdown()
+    assert manager.shutdown_calls == 1

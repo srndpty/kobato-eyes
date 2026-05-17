@@ -116,3 +116,58 @@ def test_prefetch_loader_propagates_producer_failures(tmp_path) -> None:
         loader.close()
 
     assert not loader._th.is_alive()
+
+
+def test_prefetch_loader_skips_corrupt_images_without_failing_batch(tmp_path: Path) -> None:
+    good_path = tmp_path / "good.png"
+    corrupt_path = tmp_path / "corrupt.png"
+    _create_png(good_path)
+    corrupt_path.write_bytes(b"not an image")
+    dummy = _DummyTagger()
+
+    loader = loaders.PrefetchLoaderPrepared(
+        [str(corrupt_path), str(good_path)],
+        tagger=dummy,
+        batch_size=2,
+        prefetch_batches=1,
+        io_workers=1,
+    )
+
+    try:
+        batches = list(loader)
+    finally:
+        loader.close()
+
+    assert len(batches) == 1
+    paths, np_batch, sizes = batches[0]
+    assert paths == [str(good_path)]
+    assert np_batch.shape[0] == 1
+    assert sizes == [(64, 48)]
+
+
+def test_prefetch_loader_propagates_io_worker_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    png_path = tmp_path / "sample.png"
+    _create_png(png_path)
+
+    def fail_load_one(self: loaders.PrefetchLoaderPrepared, path: str):  # noqa: ARG001
+        raise RuntimeError("io worker exploded")
+
+    monkeypatch.setattr(loaders.PrefetchLoaderPrepared, "_load_one", fail_load_one)
+    loader = loaders.PrefetchLoaderPrepared(
+        [str(png_path)],
+        tagger=_DummyTagger(),
+        batch_size=1,
+        prefetch_batches=1,
+        io_workers=1,
+    )
+
+    try:
+        with pytest.raises(RuntimeError, match="producer failed"):
+            list(loader)
+        assert isinstance(loader._producer_error, RuntimeError)
+        assert str(loader._producer_error) == "io worker exploded"
+    finally:
+        loader.close()

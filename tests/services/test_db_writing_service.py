@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib
 import importlib.util
+import logging
 import queue
 import sqlite3
 import sys
@@ -693,6 +694,64 @@ def test_maybe_checkpoint_ignores_checkpoint_failure(monkeypatch: pytest.MonkeyP
     monkeypatch.setattr(service, "_wal_size_mb", lambda: 300)
 
     service._maybe_checkpoint(_FakeConn())  # type: ignore[arg-type]
+
+
+def test_maybe_checkpoint_logs_best_effort_failure_at_debug(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    class _FakeConn:
+        def execute(self, sql: str):
+            raise db_writing_module.sqlite3.OperationalError(f"failed: {sql}")
+
+    service = DBWritingService("ignored.db")
+    monkeypatch.setattr(service, "_wal_size_mb", lambda: 300)
+
+    with caplog.at_level(logging.DEBUG, logger="services.db_writing"):
+        service._maybe_checkpoint(_FakeConn())  # type: ignore[arg-type]
+
+    assert "best-effort checkpoint passive after large WAL failed" in caplog.text
+
+
+def test_emit_progress_callback_failure_is_best_effort_warning(caplog: pytest.LogCaptureFixture) -> None:
+    def fail_progress(kind: str, done: int, total: int) -> None:
+        raise RuntimeError(f"progress failed: {kind}:{done}:{total}")
+
+    service = DBWritingService("ignored.db", progress_cb=fail_progress)
+
+    with caplog.at_level(logging.WARNING, logger="services.db_writing"):
+        service._emit_progress("merge.insert", 1, 2)
+
+    assert "best-effort progress callback failed" in caplog.text
+
+
+def test_stop_sentinel_queue_failure_is_best_effort_but_worker_failure_still_propagates(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    service = DBWritingService("ignored.db")
+    service._record_failure(RuntimeError("primary worker failure"))
+
+    class _FailingQueue:
+        def put(self, item: object, block: bool = True, timeout: float | None = None) -> None:
+            raise queue.Full("queue blocked")
+
+    class _DummyThread:
+        def join(self, timeout: float | None = None) -> None:
+            assert timeout == 10.0
+
+        def is_alive(self) -> bool:
+            return False
+
+    service._queue = _FailingQueue()  # type: ignore[assignment]
+    service._thread = _DummyThread()  # type: ignore[assignment]
+
+    with caplog.at_level(logging.WARNING, logger="services.db_writing"):
+        with pytest.raises(RuntimeError, match="primary worker failure"):
+            service.stop(wait_forever=False)
+
+    assert "best-effort queue flush sentinel failed" in caplog.text
+    assert "best-effort queue stop sentinel failed" in caplog.text
 
 
 def test_flush_batch_triggers_checkpoint_when_wal_large(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
