@@ -2,15 +2,15 @@
 
 ## 現状
 
-- 更新日: 2026-05-17
+- 更新日: 2026-05-18
 - 基準チェック: `.\scripts\check.ps1`
-- 直近の基準値: `436 passed, 42 deselected`
+- 直近の基準値: `439 passed, 42 deselected`
 - 総カバレッジ: `81%`
 - 重点カバレッジ: `core.jobs`, `core.pipeline.retag`, `db.fts`, `ui.search_worker` 合計 `91%`
 - mypy対象: `64 source files`
 - GUI smoke: `27 passed, 449 deselected`
 - db_stress: `8 passed, 441 deselected`
-- GPU check: `1 passed, 1 skipped, 476 deselected`
+- GPU check: `1 passed, 1 skipped, 476 deselected` を直近の既知基準とする
 - integration: `7 passed, 471 deselected` を直近の既知基準とする
 - package smoke: compile package smoke OK
 
@@ -22,6 +22,7 @@
 - 画像 IO: 壊れた画像、巨大画像、pixel cap 復元、thumbnail cache hit / copy / eviction はテスト済み。
 - tagger backend: ONNX provider selection、model / labels file error、label count mismatch は `tagger.onnx_backend` で共通化済み。
 - GPU check: CUDA provider smoke を追加し、CUDA provider 不在時は明示 skip、`onnx` package がある環境では dummy ONNX の WD14 実行 smoke を行う。
+- GPU tagging: `tools\bench.py tagger` で 1000枚など固定件数の baseline を取得できる。PixAI は RTX4090 / batch 32 / prefetch 4 の実測で約37 images/sec。
 - 型チェック: 主要 helper / worker / viewmodel / tagger utility を mypy 対象化済み。
 - 型チェック: `tagger.wd14_onnx`, `tagger.pixai_onnx`, `core.pipeline.manual_refresh` を mypy 対象化済み。
 - UI orchestration: index / refresh / retag lifecycle と duplicate scan / refine / trash / export の状態判定を pure helper へ切り出し済み。
@@ -34,6 +35,7 @@
 - `ui.result_delegates`, `ui.widgets.spinner_overlay`, `ui.dup_widgets`, `ui.tag_stats`, `core.pipeline.watcher`, `utils.image_io` は低カバレッジ境界の重要分岐を一部固定済みだが、描画本体や実 widget 経路には追加余地がある。
 - open_clip 依存の実行確認は通常チェックでは保証されない。ONNX Runtime CUDA provider は専用 GPU check で smoke 済み。
 - 標準チェックは GUI / integration / db_stress を除外するため、変更内容に応じた追加確認が必要である。
+- Settings の Device コンボは現在の tagger provider / ONNX provider 選択に接続されていないため、UI整理または設定スキーマ追加の余地がある。
 
 ## フェーズ 6: UI orchestration をさらに薄くする（実装済み）
 
@@ -71,7 +73,7 @@
   - `.\scripts\check.ps1`
   - `.\scripts\check-integration.ps1`
   - `.\scripts\check-package-smoke.ps1`
-  - `.\scripts\check-gpu.ps1`（GPU test 未定義のため skip）
+  - `.\scripts\check-gpu.ps1`（環境依存。CUDA provider smoke / dummy ONNX smoke を実行または skip）
 
 ## フェーズ 8: 低カバレッジ UI / IO 境界を埋める（実装済み）
 
@@ -142,6 +144,7 @@
 - カバレッジは全体数値より、DB、pipeline、検索 worker、UI worker、画像 IO、重複 refine の重要分岐を優先する。
 - UI 巨大ファイルは一括リライトせず、テストを追加してから 1 境界ずつ切り出す。
 - GPU / CUDA / open_clip は環境依存なので通常チェックの必須条件に混ぜず、専用チェックに分ける。
+- リリース成果物は `.\scripts\package-release.ps1` で PyInstaller build、7z圧縮、SHA256生成をまとめて行う。
 
 ## チェック選択
 

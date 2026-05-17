@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "kobato-eyes"
-version = "0.0.1"
+version = "0.6.0"
 description = "Desktop application for tagging images with Danbooru metadata and duplicate detection."
 readme = "README.md"
 authors = [
@@ -42,6 +42,9 @@ tagging-cpu = [
 ]
 tagging-gpu = [
     "onnxruntime-gpu>=1.18.0",
+]
+packaging = [
+    "PyInstaller>=6.11.0,<7.0",
 ]
 vector = [
     "hnswlib>=0.8.0",

@@ -15,6 +15,7 @@ pydantic-core==2.41.1
 PyQt6==6.9.1
 PyQt6-Qt6==6.9.2
 PyQt6-sip==13.10.2
+PyInstaller==6.11.1
 pytest==8.4.2
 pytest-cov==6.2.1
 pytest-qt==4.5.0
