@@ -8,7 +8,7 @@ import time
 from collections import deque
 from contextlib import closing
 from pathlib import Path
-from typing import Iterator, Sequence
+from typing import Iterator
 
 from PyQt6.QtCore import QEvent, QPoint, QSize, Qt, QThreadPool, QTimer, QtMsgType, qInstallMessageHandler
 from PyQt6.QtGui import QAction, QColor, QIcon, QImage, QPainter, QPixmap
@@ -32,6 +32,7 @@ from PyQt6.QtWidgets import (
 )
 
 from dup.scanner import DuplicateCluster, DuplicateClusterEntry
+from ui.dup_cluster_update import rebuild_clusters_after_removal, sort_entries_for_display
 from ui.dup_status import format_duplicate_scan_complete, format_duplicate_summary
 from ui.dup_widgets import ThumbPanel, ThumbTile, format_duplicate_resolution, format_duplicate_size
 from ui.dup_workers import DuplicateScanRequest, DuplicateScanRunnable, RefinePipelineRunnable, ThumbJob, ThumbSignals
@@ -975,7 +976,7 @@ class DupTab(QWidget):
     def _build_children_for_cluster(self, parent_item: QTreeWidgetItem, cluster: "DuplicateCluster") -> None:
         # logger.info("ui: build_panel group_size=%d", len(cluster.files))
         # 並び替えは既存関数をそのまま利用
-        entries = self._sort_entries_for_display(cluster.files, cluster.keeper_id)
+        entries = sort_entries_for_display(cluster.files, cluster.keeper_id)
         panel_item = QTreeWidgetItem(parent_item)
         panel_item.setFirstColumnSpanned(True)
         # パネル生成（アイコン 256 推奨）
@@ -1043,12 +1044,7 @@ class DupTab(QWidget):
                 successes.clear()
         removed_ids = {entry.file.file_id for entry in successes}
         if removed_ids:
-            new_clusters: list[DuplicateCluster] = []
-            for cluster in self._clusters:
-                rebuilt = self._rebuild_cluster(cluster, removed_ids)
-                if rebuilt is not None:
-                    new_clusters.append(rebuilt)
-            self._clusters = new_clusters
+            self._clusters = rebuild_clusters_after_removal(self._clusters, removed_ids)
             self._populate_tree()
             self._update_status_summary()
         summary = f"Moved {len(successes)} file(s) to trash."
@@ -1059,43 +1055,6 @@ class DupTab(QWidget):
             message = "\n".join(f"{entry.file.path}: {reason}" for entry, reason in failures)
             QMessageBox.warning(self, "Trash duplicates", f"Some files could not be moved:\n{message}")
         self._update_action_states()
-
-    def _rebuild_cluster(self, cluster: DuplicateCluster, removed_ids: set[int]) -> DuplicateCluster | None:
-        remaining = [entry for entry in cluster.files if entry.file.file_id not in removed_ids]
-        if len(remaining) < 2:
-            return None
-        new_keeper = self._choose_keeper(remaining)
-        sorted_entries = self._sort_entries_for_display(remaining, new_keeper)
-        return DuplicateCluster(files=sorted_entries, keeper_id=new_keeper)
-
-    def _choose_keeper(self, entries: Sequence[DuplicateClusterEntry]) -> int:
-        def key(entry: DuplicateClusterEntry) -> tuple:
-            file = entry.file
-            return (
-                -(file.size or 0),
-                -file.resolution,
-                -file.extension_priority,
-                file.path.suffix.lower(),
-                file.path.name.lower(),
-                file.file_id,
-            )
-
-        return min(entries, key=key).file.file_id
-
-    def _sort_entries_for_display(
-        self, entries: Sequence[DuplicateClusterEntry], keeper_id: int
-    ) -> list[DuplicateClusterEntry]:
-        return sorted(
-            entries,
-            key=lambda entry: (
-                0 if entry.file.file_id == keeper_id else 1,
-                -(entry.file.size or 0),
-                -entry.file.resolution,
-                -entry.file.extension_priority,
-                entry.file.path.name.lower(),
-                entry.file.file_id,
-            ),
-        )
 
     def _on_export_csv(self) -> None:
         if not self._clusters:

@@ -4,10 +4,10 @@
 
 - 更新日: 2026-05-17
 - 基準チェック: `.\scripts\check.ps1`
-- 直近の基準値: `382 passed, 39 deselected`
-- 総カバレッジ: `79%`
-- mypy対象: `50 source files`
-- GUI smoke: `26 passed, 388 deselected`
+- 直近の基準値: `392 passed, 40 deselected`
+- 総カバレッジ: `80%`
+- mypy対象: `53 source files`
+- GUI smoke: `27 passed, 405 deselected`
 - integration: `7 passed, 414 deselected`
 - db_stress: `8 passed, 413 deselected`
 - package smoke: compile package smoke OK
@@ -19,13 +19,16 @@
 - フェーズ1: `DBWritingService` の shutdown sentinel、checkpoint、restore、progress callback は best effort 失敗としてログレベル込みで分類済み。
 - フェーズ1: `core.pipeline.loaders` は壊れた個別画像をスキップし、producer / IO worker 失敗は iterator で伝播することをテストで固定済み。
 - フェーズ1: `ProcessingPipeline` は path resolve 失敗時の fallback と stop / shutdown / finished 後の scheduled queue 解放をテストで固定済み。
+- フェーズ2: `tags_tab.py` の control enabled 判定を `ui.tags_control_state` へ切り出し、処理中状態ごとのボタン復帰条件を pure test で固定済み。
+- フェーズ2: `dup_tab.py` の trash 後クラスタ再構築を `ui.dup_cluster_update` へ切り出し、keeper 選択・表示順・singleton drop を単体テストで固定済み。
+- フェーズ2: `ui.thumbnail_tasks` は cancel と壊れた画像時の空 pixmap emit をテスト済み。重複検出サムネ queue の重複投入防止と `ThumbJob` の壊れた画像 path もテスト済み。
 - `IndexRunnable` は pre-run / runner 例外を `signals.error` に流し、失敗時に `signals.finished` を出さないことをテストで固定済み。
 - `tags_tab.py` から index / refresh の feedback 生成を `ui.index_feedback` へ切り出し済み。
 - `dup_tab.py` から duplicate status 生成を `ui.dup_status` へ切り出し済み。
 - `utils.image_io` は巨大画像 skip、壊れた画像、pixel cap 復元、RGB変換時 close をテスト済み。
 - `dup.scanner` は BLOB / hex pHash、embedding 不一致時の fallback をテスト済み。
 - `DuplicateScanRunnable` は不正 row skip と file_id 型不正時の error signal をテスト済み。
-- mypy 対象を `45 source files` から `50 source files` に拡張済み。
+- mypy 対象を `45 source files` から `53 source files` に拡張済み。
 
 ## 現在の主要リスク
 
@@ -52,7 +55,7 @@
   - 成功扱いにしてよい cleanup と、呼び出し元へ伝播すべき失敗がテスト名または近接コメントで読める。完了。
   - `check.ps1`, `check-integration.ps1`, 必要に応じて `check-db-stress.ps1` が通る。実行結果はこのファイルの「現状」を更新して記録する。
 
-## 次フェーズ 2: 巨大 UI ファイルを状態単位でさらに分割する
+## 進行中フェーズ 2: 巨大 UI ファイルを状態単位でさらに分割する
 
 - 目的: `tags_tab.py` / `dup_tab.py` の変更リスクを下げ、UI 状態遷移を小さな単位でテストできるようにする。
 - 対象:
@@ -63,9 +66,9 @@
   - `ui.dup_workers`
   - `ui.thumbnail_tasks`
 - 作業:
-  - `tags_tab.py` から index task lifecycle、refresh folder selection、connection restore retry を小さな helper / controller に分ける。
-  - `dup_tab.py` から scan lifecycle、refine dialog lifecycle、trash/export 後の cluster 更新を分ける。
-  - `thumbnail_tasks` と duplicate thumbnail queue の重複・キャンセル・壊れた画像 path を追加テストする。
+  - `tags_tab.py` から index task lifecycle、refresh folder selection、connection restore retry を小さな helper / controller に分ける。control enabled 判定は `ui.tags_control_state` へ分離済み。
+  - `dup_tab.py` から scan lifecycle、refine dialog lifecycle、trash/export 後の cluster 更新を分ける。trash 後 cluster 更新は `ui.dup_cluster_update` へ分離済み。
+  - `thumbnail_tasks` と duplicate thumbnail queue の重複・キャンセル・壊れた画像 path を追加テストする。実装済み。
   - 一括リライトは避け、1回の変更で 1 境界だけ移す。
 - 完了条件:
   - UI worker 例外後に button / status / active task / connection state が復帰することを smoke または headless test で確認できる。
@@ -118,7 +121,7 @@
   - `src/ui/tags_tab.py`
   - `src/ui/dup_tab.py`
 - 完了条件:
-  - mypy 対象 `50 source files` を下回らない。
+- mypy 対象 `53 source files` を下回らない。
   - 新規 core / db / service / worker / helper モジュールは原則 mypy 対象へ追加する。
   - `src/ui/dup_refine_parallel.py` の未型付け関数に由来する mypy note を減らす。
 - 検証:
