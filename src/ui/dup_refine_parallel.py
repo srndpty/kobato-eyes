@@ -202,8 +202,9 @@ def refine_by_tilehash_parallel(
 
 def _load_small_gray(path: Path, size: int = 128) -> np.ndarray:
     with Image.open(path) as opened:
-        gray = ImageOps.fit(opened.convert("L"), (size, size), Image.Resampling.BILINEAR)
-        return np.asarray(gray, dtype=np.uint8)
+        gray = ImageOps.exif_transpose(opened).convert("L")
+        resized = gray.resize((size, size), Image.Resampling.BILINEAR)
+        return np.asarray(resized, dtype=np.uint8)
 
 
 def _mae01(a: np.ndarray, b: np.ndarray) -> float:

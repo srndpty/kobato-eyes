@@ -221,6 +221,34 @@ def test_refine_by_pixels_parallel_handles_mixed_aspect_ratios(tmp_path: Path) -
     assert {entry.file.file_id for entry in refined[0].files} == {1, 2}
 
 
+def test_refine_by_pixels_parallel_keeps_wide_image_edges(tmp_path: Path) -> None:
+    base_path = tmp_path / "wide_base.png"
+    edge_variant_path = tmp_path / "wide_edge_variant.png"
+
+    base = Image.new("L", (96, 32), color=120)
+    edge_variant = base.copy()
+    px = edge_variant.load()
+    for y in range(edge_variant.height):
+        for x in range(8):
+            px[x, y] = 255
+        for x in range(edge_variant.width - 8, edge_variant.width):
+            px[x, y] = 255
+    base.save(base_path, format="PNG")
+    edge_variant.save(edge_variant_path, format="PNG")
+
+    cluster = DummyCluster(
+        files=[
+            _make_entry(base_path, 1),
+            _make_entry(edge_variant_path, 2),
+        ],
+        keeper_id=1,
+    )
+
+    refined = refine_by_pixels_parallel([cluster], mae_thr=0.001, thumb_size=32, workers=1)
+
+    assert refined == []
+
+
 def test_refine_by_tilehash_parallel_logs_failures(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
     missing_path = tmp_path / "missing.png"
     cluster = DummyCluster(files=[_make_entry(missing_path, 1)], keeper_id=1)
