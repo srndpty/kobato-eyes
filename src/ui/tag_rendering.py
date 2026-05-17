@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import html
+from collections.abc import Iterable, Sequence
+from typing import Any, Protocol, cast
 
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QColor
@@ -11,6 +13,17 @@ from tagger.base import TagCategory
 from tagger.categories import build_category_lookup
 
 TagDisplayEntry = tuple[str, float, TagCategory | None]
+
+
+class _PaletteLike(Protocol):
+    """Palette methods used by highlight color selection."""
+
+    def window(self) -> Any:
+        """Return a brush-like object with ``color``."""
+
+    def text(self) -> Any:
+        """Return a brush-like object with ``color``."""
+
 
 _CATEGORY_KEY_LOOKUP = build_category_lookup()
 _TAG_COLOR_MAP = {
@@ -46,7 +59,7 @@ def coerce_category(value: object) -> TagCategory | None:
     return None
 
 
-def filter_tags_by_threshold(tag_rows) -> list[TagDisplayEntry]:
+def filter_tags_by_threshold(tag_rows: Iterable[dict[str, object] | Sequence[object]]) -> list[TagDisplayEntry]:
     """Return displayable tag rows at the fixed copy/export threshold."""
 
     out: list[TagDisplayEntry] = []
@@ -72,7 +85,7 @@ def filter_tags_by_threshold(tag_rows) -> list[TagDisplayEntry]:
                 continue
 
         try:
-            score = float(score_value)
+            score = float(cast(Any, score_value))
         except (TypeError, ValueError):
             continue
 
@@ -94,7 +107,7 @@ def relative_luminance(color: QColor) -> float:
     return 0.2126 * channel(color.red()) + 0.7152 * channel(color.green()) + 0.0722 * channel(color.blue())
 
 
-def pick_highlight_colors(palette) -> tuple[str, str]:
+def pick_highlight_colors(palette: _PaletteLike) -> tuple[str, str]:
     """Choose highlight background/foreground colors based on the palette."""
 
     base = palette.window().color()
@@ -108,6 +121,8 @@ def pick_highlight_colors(palette) -> tuple[str, str]:
 def category_color(category: TagCategory | None) -> str:
     """Return the display color for a tag category."""
 
+    if category is None:
+        return _NEUTRAL_TAG_COLOR
     return _TAG_COLOR_MAP.get(category, _NEUTRAL_TAG_COLOR)
 
 

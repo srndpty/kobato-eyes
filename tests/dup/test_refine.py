@@ -6,6 +6,7 @@ from pathlib import Path
 
 from PIL import Image, ImageEnhance
 
+import dup.refine as refine_module
 from dup.refine import RefinedMatch, RefinementThresholds, refine_pair
 
 
@@ -43,3 +44,52 @@ def test_refine_pair_non_duplicate(tmp_path: Path) -> None:
     assert isinstance(result, RefinedMatch)
     assert not result.is_duplicate
     assert result.reason == "below thresholds"
+
+
+def test_refine_pair_returns_none_for_unreadable_image(tmp_path: Path) -> None:
+    path_a = tmp_path / "a.png"
+    broken = tmp_path / "broken.png"
+    _make_image(path_a, (200, 10, 10))
+    broken.write_bytes(b"not an image")
+
+    assert refine_pair(1, 2, path_a, broken) is None
+
+
+def test_refine_pair_keeps_ssim_result_when_orb_fails(monkeypatch, tmp_path: Path) -> None:
+    path_a = tmp_path / "a.png"
+    path_b = tmp_path / "b.png"
+    _make_image(path_a, (200, 10, 10))
+    _make_variant(path_b, path_a)
+
+    def fail_orb(img_a, img_b):  # noqa: ANN001
+        raise RuntimeError("orb unavailable")
+
+    monkeypatch.setattr(refine_module, "_compute_orb_ratio", fail_orb)
+
+    result = refine_pair(1, 2, path_a, path_b)
+
+    assert isinstance(result, RefinedMatch)
+    assert result.is_duplicate
+    assert result.ssim is not None
+    assert result.orb_ratio is None
+    assert result.reason == "ssim>=0.9"
+
+
+def test_refine_pair_reports_metric_unavailable_when_all_metrics_fail(monkeypatch, tmp_path: Path) -> None:
+    path_a = tmp_path / "a.png"
+    path_b = tmp_path / "b.png"
+    _make_image(path_a, (200, 10, 10))
+    _make_variant(path_b, path_a)
+
+    monkeypatch.setattr(refine_module, "_compute_ssim", lambda img_a, img_b: (_ for _ in ()).throw(ValueError("ssim")))
+    monkeypatch.setattr(
+        refine_module, "_compute_orb_ratio", lambda img_a, img_b: (_ for _ in ()).throw(ValueError("orb"))
+    )
+
+    result = refine_pair(1, 2, path_a, path_b)
+
+    assert isinstance(result, RefinedMatch)
+    assert not result.is_duplicate
+    assert result.ssim is None
+    assert result.orb_ratio is None
+    assert result.reason == "ssim unavailable, orb unavailable"

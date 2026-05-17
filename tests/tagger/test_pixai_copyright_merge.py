@@ -1,5 +1,6 @@
 from pathlib import Path
 
+import numpy as np
 import pytest
 
 from tagger.base import TagCategory
@@ -85,3 +86,21 @@ def test_load_selected_tags_parses_pixai_ips(tmp_path: Path) -> None:
     assert meta["char_empty"].ips == ()
     assert meta["char_plain"].ips == ("ip-one",)
     assert meta["char_escaped"].ips == ("ip-a", "ip-b")
+
+
+def test_pixai_postprocess_reports_output_label_mismatch() -> None:
+    tagger = PixaiOnnxTagger.__new__(PixaiOnnxTagger)
+    tagger._default_thresholds = {}  # type: ignore[attr-defined]
+    tagger._default_max_tags = {}  # type: ignore[attr-defined]
+    tagger._score_floor = 0.0  # type: ignore[attr-defined]
+    tagger._label_name_cache = ["tag_a", "tag_b"]  # type: ignore[attr-defined]
+    tagger._effective_cats = [int(TagCategory.GENERAL), int(TagCategory.GENERAL)]  # type: ignore[attr-defined]
+    tagger._tag_meta_index = {}  # type: ignore[attr-defined]
+    tagger._topk_cap = 128  # type: ignore[attr-defined]
+
+    with pytest.raises(RuntimeError, match="PixAI: model output dimension 3 does not match label count 2"):
+        tagger._postprocess_logits_topk(  # type: ignore[attr-defined]
+            np.zeros((1, 3), dtype=np.float32),
+            thresholds=None,
+            max_tags=None,
+        )

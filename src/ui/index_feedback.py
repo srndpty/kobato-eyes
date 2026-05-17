@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Mapping, Sequence
+from typing import Any, Mapping, Sequence, cast
 
 
 @dataclass(frozen=True)
@@ -15,15 +15,33 @@ class IndexFeedback:
     toast: str
 
 
+def _as_int(value: object, default: int = 0) -> int:
+    """Convert loose stats values to int for display."""
+
+    try:
+        return int(cast(Any, value))
+    except (TypeError, ValueError):
+        return default
+
+
+def _as_float(value: object, default: float = 0.0) -> float:
+    """Convert loose stats values to float for display."""
+
+    try:
+        return float(cast(Any, value))
+    except (TypeError, ValueError):
+        return default
+
+
 def format_refresh_feedback(stats: Mapping[str, object], folders: Sequence[Path]) -> IndexFeedback:
     """Return status and toast text for a completed manual refresh."""
 
-    elapsed = float(stats.get("elapsed_sec", 0.0) or 0.0)
-    queued = int(stats.get("queued", 0) or 0)
-    tagged = int(stats.get("tagged", 0) or 0)
-    missing = int(stats.get("missing", 0) or 0)
-    soft_deleted = int(stats.get("soft_deleted", 0) or 0)
-    hard_deleted = int(stats.get("hard_deleted", 0) or 0)
+    elapsed = _as_float(stats.get("elapsed_sec"))
+    queued = _as_int(stats.get("queued"))
+    tagged = _as_int(stats.get("tagged"))
+    missing = _as_int(stats.get("missing"))
+    soft_deleted = _as_int(stats.get("soft_deleted"))
+    hard_deleted = _as_int(stats.get("hard_deleted"))
     removed_total = soft_deleted + hard_deleted
     if missing <= 0 and removed_total > 0:
         missing = removed_total
@@ -48,9 +66,9 @@ def format_index_success_toast(stats: Mapping[str, object], *, retag_active: boo
     """Return toast text for a completed index or retag operation."""
 
     tagger_name = str(stats.get("tagger_name") or "unknown")
-    message = f"Indexed: {int(stats.get('scanned', 0))} files / Tagged: {int(stats.get('tagged', 0))}"
-    retagged = int(stats.get("retagged", 0) or 0)
-    requested = int(stats.get("retagged_marked", retagged) or 0)
+    message = f"Indexed: {_as_int(stats.get('scanned'))} files / Tagged: {_as_int(stats.get('tagged'))}"
+    retagged = _as_int(stats.get("retagged"))
+    requested = _as_int(stats.get("retagged_marked"), retagged)
     if retag_active:
         if requested and requested != retagged:
             message += f" / Retagged: {retagged}/{requested}"

@@ -105,3 +105,17 @@ def test_cluster_enables_actions_and_trash_updates_state(monkeypatch, dup_tab: D
 
     assert marked == [[2]]
     assert dup_tab._status_label.text() == "Moved 1 file(s) to trash."  # type: ignore[attr-defined]
+
+
+def test_duplicate_thumbnail_queue_deduplicates_pending_work(dup_tab: DupTab, tmp_path: Path) -> None:
+    image_path = tmp_path / "image.png"
+
+    dup_tab._queue_thumb(image_path)  # type: ignore[attr-defined]
+    dup_tab._queue_thumb(image_path)  # type: ignore[attr-defined]
+
+    assert list(dup_tab._thumb_pending).count(str(image_path)) == 1  # type: ignore[attr-defined]
+
+    dup_tab._thumb_inflight.add(str(image_path))  # type: ignore[attr-defined]
+    dup_tab._queue_thumb(image_path)  # type: ignore[attr-defined]
+
+    assert list(dup_tab._thumb_pending).count(str(image_path)) == 1  # type: ignore[attr-defined]

@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 from PyQt6.QtCore import QObject, QRunnable, pyqtSignal
 from PyQt6.QtGui import QPixmap
 
 from utils.image_io import get_thumbnail
+
+logger = logging.getLogger(__name__)
 
 
 class ThumbnailSignal(QObject):
@@ -26,11 +29,25 @@ class ThumbnailTask(QRunnable):
         self._width = width
         self._height = height
         self._signal = signal
+        self._cancelled = False
+
+    def cancel(self) -> None:
+        """Request cancellation before the thumbnail is emitted."""
+
+        self._cancelled = True
 
     def run(self) -> None:
         """Run the thumbnail load."""
 
-        pixmap = get_thumbnail(self._path, self._width, self._height)
+        if self._cancelled:
+            return
+        try:
+            pixmap = get_thumbnail(self._path, self._width, self._height)
+        except Exception as exc:
+            logger.warning("ThumbnailTask: failed to load %s: %s", self._path, exc)
+            pixmap = QPixmap()
+        if self._cancelled:
+            return
         self._signal.finished.emit(self._row, pixmap)
 
 

@@ -13,6 +13,7 @@ from PIL import Image
 
 from tagger.base import MaxTagsMap, TagCategory, TagPrediction, TagResult, ThresholdMap
 from tagger.labels_util import BROKEN_TAG_PREFIX, TagMeta, load_selected_tags
+from tagger.onnx_backend import validate_label_count
 
 from .wd14_onnx import WD14Tagger, _sigmoid
 
@@ -297,8 +298,7 @@ class PixaiOnnxTagger(WD14Tagger):
         names = self._label_name_cache
         # cats = self._label_cat_cache
         cats = self._effective_cats
-        if logits.shape[1] != len(names):
-            raise RuntimeError(f"Model output dim {logits.shape[1]} != labels {len(names)}")
+        validate_label_count(int(logits.shape[1]), len(names), backend_name="PixAI")
 
         results: list[TagResult] = []
         hard_cap = max(1, int(getattr(self, "_topk_cap", 128)))

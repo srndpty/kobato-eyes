@@ -75,6 +75,7 @@ from ui.tag_rendering import _SCORE_COLOR, _TAG_LIST_ROLE, TagDisplayEntry
 from ui.tag_rendering import coerce_category as _coerce_category
 from ui.tag_rendering import filter_tags_by_threshold as _filter_tags_by_threshold
 from ui.tag_stats import TagStatsDialog
+from ui.tags_control_state import TagsActivityState, compute_tags_control_availability
 from ui.thumbnail_tasks import ThumbnailSignal as _ThumbnailSignal
 from ui.thumbnail_tasks import ThumbnailTask as _ThumbnailTask
 from ui.viewmodels import TagsSearchState, TagsViewModel
@@ -1770,25 +1771,26 @@ class TagsTab(QWidget):
         self._grid_view.viewport().update()
 
     def _update_control_states(self) -> None:
-        search_enabled = not self._indexing_active
-        input_enabled = not self._indexing_active
-        self._search_button.setEnabled(search_enabled)
-        self._query_edit.setEnabled(input_enabled)
-        self._load_more_button.setEnabled(self._can_load_more and not self._indexing_active and not self._search_busy)
-        self._placeholder_button.setEnabled(not self._indexing_active)
-        self._table_button.setEnabled(not self._indexing_active)
-        self._grid_button.setEnabled(not self._indexing_active)
-        retag_enabled = not self._indexing_active and not self._search_busy
-        self._retag_button.setEnabled(retag_enabled)
-        self._retag_results_action.setEnabled(bool(self._current_where) and retag_enabled)
-        refresh_enabled = not self._refresh_active and not self._indexing_active and not self._search_busy
-        self._refresh_button.setEnabled(refresh_enabled)
-        # ★ 検索済み & 処理中でない時だけコピーを有効化
-        copy_enabled = bool(self._current_where) and not (
-            self._search_busy or self._indexing_active or self._refresh_active
+        availability = compute_tags_control_availability(
+            TagsActivityState(
+                indexing_active=self._indexing_active,
+                search_busy=self._search_busy,
+                refresh_active=self._refresh_active,
+                has_current_query=bool(self._current_where),
+                can_load_more=self._can_load_more,
+            )
         )
+        self._search_button.setEnabled(availability.search)
+        self._query_edit.setEnabled(availability.query_input)
+        self._load_more_button.setEnabled(availability.load_more)
+        self._placeholder_button.setEnabled(availability.placeholder)
+        self._table_button.setEnabled(availability.table_view)
+        self._grid_button.setEnabled(availability.grid_view)
+        self._retag_button.setEnabled(availability.retag)
+        self._retag_results_action.setEnabled(availability.retag_results)
+        self._refresh_button.setEnabled(availability.refresh)
         if hasattr(self, "_copy_button"):
-            self._copy_button.setEnabled(copy_enabled)
+            self._copy_button.setEnabled(availability.copy_results)
 
     def _handle_index_started(self) -> None:
         self._indexing_active = True
