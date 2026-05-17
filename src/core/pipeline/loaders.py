@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 _CV2_ERROR = getattr(cv2, "error", RuntimeError)
 if not isinstance(_CV2_ERROR, type) or not issubclass(_CV2_ERROR, BaseException):
     _CV2_ERROR = RuntimeError
-_DECODE_FALLBACK_ERRORS: tuple[type[BaseException], ...] = (OSError, ValueError, RuntimeError, _CV2_ERROR)
+_DECODE_FALLBACK_ERRORS: tuple[type[BaseException], ...] = (OSError, ValueError, RuntimeError, MemoryError, _CV2_ERROR)
 
 
 _USE_TJ = os.getenv("KE_USE_TURBOJPEG", "1") != "0"
@@ -63,6 +63,22 @@ def _alpha_to_white_bgr(bg_or_bgra: np.ndarray) -> np.ndarray:
         bgr = (bgr * a + 255.0 * (1.0 - a)).astype(np.uint8)
         return bgr
     return bg_or_bgra[:, :, :3]
+
+
+def _resize_to_target_side(image: np.ndarray) -> np.ndarray:
+    """Resize image so the longest side is near the tagger target size."""
+
+    height, width = image.shape[:2]
+    side = max(height, width)
+    if side == _TARGET:
+        return image
+    ratio = _TARGET / max(1, side)
+    interp = cv2.INTER_AREA if side > _TARGET else cv2.INTER_CUBIC
+    return cv2.resize(
+        image,
+        (max(1, int(width * ratio)), max(1, int(height * ratio))),
+        interpolation=interp,
+    )
 
 
 class PrefetchLoaderPrepared:
@@ -137,16 +153,11 @@ class PrefetchLoaderPrepared:
             im = cv2.imdecode(data, cv2.IMREAD_UNCHANGED)
             if im is None:
                 raise RuntimeError("cv2.imdecode failed")
+            H0, W0 = (im.shape[0], im.shape[1]) if im.ndim >= 2 else (0, 0)
+            im = _resize_to_target_side(im)
             bgr = _alpha_to_white_bgr(im)
-            hh, ww = bgr.shape[:2]
-            side = max(hh, ww)
-            if side != _TARGET:
-                ratio = _TARGET / side
-                interp = cv2.INTER_AREA if side > _TARGET else cv2.INTER_CUBIC
-                bgr = cv2.resize(bgr, (max(1, int(ww * ratio)), max(1, int(hh * ratio))), interpolation=interp)
             rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
             # 元サイズは im の生サイズ（アルファ有無に関係なし）
-            H0, W0 = (im.shape[0], im.shape[1]) if im.ndim >= 2 else (hh, ww)
             return (p, rgb, (int(W0), int(H0)))
 
         except _DECODE_FALLBACK_ERRORS as e:
@@ -155,12 +166,11 @@ class PrefetchLoaderPrepared:
             try:
                 with Image.open(p) as pil_image:
                     w, h = pil_image.size
+                    pil_image.thumbnail((_TARGET, _TARGET), Image.Resampling.LANCZOS)
                     rgba = pil_image.convert("RGBA")
                     bg = Image.new("RGBA", rgba.size, "WHITE")
                     bg.paste(rgba, mask=rgba.split()[-1])
                     rgb = bg.convert("RGB")
-                    # ここでは軽く縮小のみ（最終整形は tagger に任せる）
-                    rgb.thumbnail((_TARGET, _TARGET))
                     # bgr = np.asarray(rgb)[:, :, ::-1]  # RGB->BGR
                     rgb_arr = np.asarray(rgb)  # ここはそのままRGB
                     return (p, rgb_arr, (w, h))

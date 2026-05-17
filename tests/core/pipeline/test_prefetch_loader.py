@@ -145,6 +145,40 @@ def test_prefetch_loader_skips_corrupt_images_without_failing_batch(tmp_path: Pa
     assert sizes == [(64, 48)]
 
 
+def test_prefetch_loader_falls_back_when_alpha_blend_runs_out_of_memory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    png_path = tmp_path / "alpha.png"
+    _create_png(png_path)
+    dummy = _DummyTagger()
+
+    def _raise_memory_error(_image: np.ndarray) -> np.ndarray:
+        raise MemoryError("simulated alpha blend allocation failure")
+
+    monkeypatch.setattr(loaders, "_alpha_to_white_bgr", _raise_memory_error)
+
+    loader = loaders.PrefetchLoaderPrepared(
+        [str(png_path)],
+        tagger=dummy,
+        batch_size=1,
+        prefetch_batches=1,
+        io_workers=1,
+    )
+
+    try:
+        batches = list(loader)
+    finally:
+        loader.close()
+
+    assert len(batches) == 1
+    paths, np_batch, sizes = batches[0]
+    assert paths == [str(png_path)]
+    assert np_batch.shape[0] == 1
+    assert sizes == [(64, 48)]
+    assert dummy.calls[0][0].shape == (48, 64, 3)
+
+
 def test_prefetch_loader_propagates_io_worker_failure(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

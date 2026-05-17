@@ -191,7 +191,7 @@ def test_tagging_stage_env_invalid_values(monkeypatch):
     stage = TaggingStage(_ctx(), emitter, deps=deps, writer_deps=FakeWriteDeps(fake_db))
     stage.run(recs)
 
-    assert captured["prefetch_batches"] == 128
+    assert captured["prefetch_batches"] == 4
     assert captured["io_workers"] == 12
 
 
