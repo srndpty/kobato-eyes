@@ -181,7 +181,7 @@ def test_scan_and_tag_treats_write_stage_cancel_as_cancelled_stats(
 
     monkeypatch.setattr(manual_refresh, "WriteStage", CancellingWriteStage)
 
-    stats = scan_and_tag(root)
+    stats = scan_and_tag(root, is_cancelled=lambda: False)
 
     assert stats["cancelled"] is True
     assert stats["tagged"] == 0

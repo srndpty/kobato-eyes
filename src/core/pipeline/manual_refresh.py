@@ -455,7 +455,7 @@ def scan_and_tag(
         elapsed = time.perf_counter() - start_time
         stats_out["tagged"] = tagged
         stats_out["elapsed_sec"] = elapsed
-        stats_out["cancelled"] = emitter.cancelled(ctx.is_cancelled)
+        stats_out["cancelled"] = cancelled or emitter.cancelled(ctx.is_cancelled)
         logger.info(
             "Manual tag refresh complete: tagged %d of %d file(s) in %.2fs (missing removed=%d, hard=%s)",
             tagged,
