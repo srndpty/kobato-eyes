@@ -144,10 +144,11 @@ CI などで GUI を起動しない場合は、環境変数 `KOE_HEADLESS=1` を
 
 ## パッケージング
 
-1. Python 3.10.x の環境で開発依存をインストール: `python -m pip install -c requirements-dev.lock -e ".[dev]"`
-2. Windows バイナリを生成: `pyinstaller tools/kobato-eyes.spec`
-3. `dist/kobato-eyes/` に成果物が出力されます
-4. 実行前に `onnxruntime-gpu` とモデルファイルを同梱してください
+1. Python 3.10.x の環境で開発依存をインストール: `python -m pip install -c requirements-dev.lock -e ".[dev,tagging-gpu]"`
+2. リリース用バイナリと 7z を生成: `.\scripts\package-release.ps1 -Version v0.6 -Clean`
+3. `dist\release\kobato-eyes-v0.6-win-x64.7z` と `dist\release\SHA256SUMS.txt` が出力されます
+4. Windows 標準展開用の zip も作る場合: `.\scripts\package-release.ps1 -Version v0.6 -Clean -Zip`
+5. モデルファイルは同梱せず、利用者が Quick Setup の手順で配置します
 
 ## トラブルシューティング
 
