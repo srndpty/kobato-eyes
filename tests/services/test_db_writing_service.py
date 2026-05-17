@@ -754,6 +754,69 @@ def test_stop_sentinel_queue_failure_is_best_effort_but_worker_failure_still_pro
     assert "best-effort queue stop sentinel failed" in caplog.text
 
 
+def test_stop_retries_stop_sentinel_while_worker_is_alive() -> None:
+    service = DBWritingService("ignored.db")
+    queued: list[object] = []
+
+    class _TemporarilyFullQueue:
+        def __init__(self) -> None:
+            self.stop_attempts = 0
+
+        def put(self, item: object, block: bool = True, timeout: float | None = None) -> None:
+            if isinstance(item, DBStop) and self.stop_attempts == 0:
+                self.stop_attempts += 1
+                raise queue.Full("queue temporarily full")
+            queued.append(item)
+
+    class _DummyThread:
+        def __init__(self) -> None:
+            self.alive = True
+            self.join_timeouts: list[float | None] = []
+
+        def join(self, timeout: float | None = None) -> None:
+            self.join_timeouts.append(timeout)
+            self.alive = False
+
+        def is_alive(self) -> bool:
+            return self.alive
+
+    fake_queue = _TemporarilyFullQueue()
+    fake_thread = _DummyThread()
+    service._queue = fake_queue  # type: ignore[assignment]
+    service._thread = fake_thread  # type: ignore[assignment]
+
+    service.stop(wait_forever=True)
+
+    assert [type(item) for item in queued] == [DBFlush, DBStop]
+    assert fake_queue.stop_attempts == 1
+    assert fake_thread.join_timeouts == [1.0]
+
+
+def test_process_queue_exits_after_stop_event_when_sentinel_is_missing(monkeypatch: pytest.MonkeyPatch) -> None:
+    service = DBWritingService("ignored.db")
+    item = DBItem(1, [("tag", 0.5, 0)], None, None, None, None)
+    polled: list[object | None] = [item, None]
+    flushed: list[tuple[DBItem, ...]] = []
+
+    class _DummyConn:
+        pass
+
+    def _poll_queue() -> object | None:
+        return polled.pop(0)
+
+    def _flush_batch(conn: _DummyConn, items: Sequence[DBItem]) -> None:
+        flushed.append(tuple(items))
+
+    monkeypatch.setattr(service, "_poll_queue", _poll_queue)
+    monkeypatch.setattr(service, "_flush_batch", _flush_batch)
+    service._stop_evt.set()
+
+    service._process_queue(_DummyConn())  # type: ignore[arg-type]
+
+    assert flushed == [(item,)]
+    assert polled == []
+
+
 def test_flush_batch_triggers_checkpoint_when_wal_large(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     db_path = tmp_path / "checkpoint.db"
     file_id = _prepare_db(str(db_path), "C:/images/checkpoint.png")

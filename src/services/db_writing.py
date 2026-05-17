@@ -88,7 +88,7 @@ class DBWritingService(DBWriteQueue):
         self._log.debug("DBWritingService: stop requested (flush=%s, wait_forever=%s)", flush, wait_forever)
         if flush:
             self._put_shutdown_message(DBFlush(), "queue flush sentinel")
-        self._put_shutdown_message(DBStop(), "queue stop sentinel")
+        self._put_shutdown_message(DBStop(), "queue stop sentinel", retry_while_alive=wait_forever)
         self._stop_evt.set()
 
         if wait_forever:
@@ -101,13 +101,22 @@ class DBWritingService(DBWriteQueue):
                 pass
         self.raise_if_failed()
 
-    def _put_shutdown_message(self, message: object, operation: str) -> None:
-        """Best-effort shutdown queueing; worker failures still surface after join."""
+    def _put_shutdown_message(self, message: object, operation: str, *, retry_while_alive: bool = False) -> None:
+        """Queue shutdown messages while preserving worker failures after join."""
 
-        try:
-            self._queue.put(message, timeout=1.0)
-        except Exception as exc:
-            self._log_best_effort_failure(operation, exc, level=logging.WARNING)
+        while True:
+            try:
+                self._queue.put(message, timeout=1.0)
+                return
+            except queue.Full as exc:
+                if retry_while_alive and self._thread.is_alive():
+                    self._log_best_effort_failure(operation, exc, level=logging.DEBUG)
+                    continue
+                self._log_best_effort_failure(operation, exc, level=logging.WARNING)
+                return
+            except Exception as exc:
+                self._log_best_effort_failure(operation, exc, level=logging.WARNING)
+                return
 
     @staticmethod
     def _require_positive_int(name: str, value: int) -> int:
@@ -211,6 +220,8 @@ class DBWritingService(DBWriteQueue):
                 if batch:
                     self._flush_batch(conn, batch)
                     batch.clear()
+                if self._stop_evt.is_set():
+                    break
                 continue
             if isinstance(msg, DBStop):
                 if batch:
