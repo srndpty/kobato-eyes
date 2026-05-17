@@ -132,3 +132,97 @@ def test_get_thumbnail_reports_missing_qt(monkeypatch, tmp_path: Path) -> None:
 
     with pytest.raises(RuntimeError, match="QPixmap is unavailable"):
         image_io.get_thumbnail(tmp_path / "source.png")
+
+
+def test_get_thumbnail_uses_memory_cache_and_returns_copy(monkeypatch, tmp_path: Path) -> None:
+    source = tmp_path / "source.png"
+    thumb = tmp_path / "thumb.webp"
+    source.write_bytes(b"source")
+    thumb.write_bytes(b"thumb")
+    generated: list[Path] = []
+
+    class FakePixmap:
+        def __init__(self, *args: object) -> None:
+            self.args = args
+            self.copied = bool(args and isinstance(args[0], FakePixmap))
+
+        def fill(self, color: object) -> None:
+            return None
+
+        def isNull(self) -> bool:  # noqa: N802 - Qt-compatible name
+            return False
+
+        def scaled(self, width: int, height: int, aspect: object, transform: object) -> "FakePixmap":
+            return FakePixmap("scaled", width, height, aspect, transform)
+
+    class FakeQt:
+        class GlobalColor:
+            transparent = object()
+
+        class AspectRatioMode:
+            KeepAspectRatio = object()
+
+        class TransformationMode:
+            SmoothTransformation = object()
+
+    def fake_generate_thumbnail(source_path: Path, cache_dir: Path, *, size: tuple[int, int], format: str) -> Path:
+        generated.append(Path(source_path))
+        return thumb
+
+    monkeypatch.setattr(image_io, "QPixmap", FakePixmap)
+    monkeypatch.setattr(image_io, "Qt", FakeQt)
+    monkeypatch.setattr(image_io, "generate_thumbnail", fake_generate_thumbnail)
+    image_io._THUMB_CACHE.clear()
+
+    first = image_io.get_thumbnail(source, 32, 32)
+    second = image_io.get_thumbnail(source, 32, 32)
+
+    assert generated == [source]
+    assert isinstance(first, FakePixmap)
+    assert isinstance(second, FakePixmap)
+    assert second.copied is True
+
+
+def test_get_thumbnail_evicts_old_memory_cache_entries(monkeypatch, tmp_path: Path) -> None:
+    first_source = tmp_path / "first.png"
+    second_source = tmp_path / "second.png"
+    thumb = tmp_path / "thumb.webp"
+    first_source.write_bytes(b"first")
+    second_source.write_bytes(b"second")
+    thumb.write_bytes(b"thumb")
+
+    class FakePixmap:
+        def __init__(self, *args: object) -> None:
+            self.args = args
+
+        def fill(self, color: object) -> None:
+            return None
+
+        def isNull(self) -> bool:  # noqa: N802 - Qt-compatible name
+            return False
+
+        def scaled(self, width: int, height: int, aspect: object, transform: object) -> "FakePixmap":
+            return FakePixmap("scaled", width, height, aspect, transform)
+
+    class FakeQt:
+        class GlobalColor:
+            transparent = object()
+
+        class AspectRatioMode:
+            KeepAspectRatio = object()
+
+        class TransformationMode:
+            SmoothTransformation = object()
+
+    monkeypatch.setattr(image_io, "QPixmap", FakePixmap)
+    monkeypatch.setattr(image_io, "Qt", FakeQt)
+    monkeypatch.setattr(image_io, "generate_thumbnail", lambda *args, **kwargs: thumb)
+    monkeypatch.setattr(image_io, "_THUMB_CACHE_LIMIT", 1)
+    image_io._THUMB_CACHE.clear()
+
+    image_io.get_thumbnail(first_source, 32, 32)
+    image_io.get_thumbnail(second_source, 32, 32)
+
+    keys = list(image_io._THUMB_CACHE)
+    assert len(keys) == 1
+    assert str(second_source.resolve()) in keys[0]

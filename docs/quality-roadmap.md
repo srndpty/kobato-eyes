@@ -4,7 +4,7 @@
 
 - 更新日: 2026-05-17
 - 基準チェック: `.\scripts\check.ps1`
-- 直近の基準値: `392 passed, 40 deselected`
+- 直近の基準値: `399 passed, 40 deselected`
 - 総カバレッジ: `80%`
 - mypy対象: `53 source files`
 - GUI smoke: `27 passed, 405 deselected`
@@ -22,6 +22,9 @@
 - フェーズ2: `tags_tab.py` の control enabled 判定を `ui.tags_control_state` へ切り出し、処理中状態ごとのボタン復帰条件を pure test で固定済み。
 - フェーズ2: `dup_tab.py` の trash 後クラスタ再構築を `ui.dup_cluster_update` へ切り出し、keeper 選択・表示順・singleton drop を単体テストで固定済み。
 - フェーズ2: `ui.thumbnail_tasks` は cancel と壊れた画像時の空 pixmap emit をテスト済み。重複検出サムネ queue の重複投入防止と `ThumbJob` の壊れた画像 path もテスト済み。
+- フェーズ3: `dup.refine.refine_pair` は SSIM / ORB の個別 metric 失敗をログ化し、利用可能な metric で判定を継続する。
+- フェーズ3: `ui.dup_refine_parallel` の pixel refine は異なるアスペクト比でも固定サイズ grayscale に揃えて MAE を計算し、軽量 pHash 相当 cluster -> tilehash -> pixel refine fixture で破損ファイル混在を固定済み。
+- フェーズ3: `utils.image_io.get_thumbnail` のメモリキャッシュ hit / copy / eviction を fake QPixmap でテスト済み。
 - `IndexRunnable` は pre-run / runner 例外を `signals.error` に流し、失敗時に `signals.finished` を出さないことをテストで固定済み。
 - `tags_tab.py` から index / refresh の feedback 生成を `ui.index_feedback` へ切り出し済み。
 - `dup_tab.py` から duplicate status 生成を `ui.dup_status` へ切り出し済み。
@@ -77,7 +80,7 @@
   - `.\scripts\check.ps1`
   - `.\scripts\check-gui-smoke.ps1`
 
-## 次フェーズ 3: 重複検出 refine と画像 IO の実データ耐性を上げる
+## 完了フェーズ 3: 重複検出 refine と画像 IO の実データ耐性を上げる
 
 - 目的: 破損画像、巨大画像、optional dependency 不足、並列 refine の worker 失敗が結果全体を壊さないようにする。
 - 対象:
@@ -87,13 +90,13 @@
   - `ui.dup_workers`
   - `utils.image_io`
 - 作業:
-  - `ui.dup_refine_parallel` の tilehash / pixel refine で、個別ファイル失敗、cancel、progress、summary logging をテストする。
-  - `dup.refine` の SSIM / ORB / pixel fallback の境界を fixture 付きで固定する。
-  - `utils.image_io.get_thumbnail` の PyQt 実 backend smoke と cache eviction を追加する。
-  - 実データに近い小型 fixture で pHash -> refine までの lightweight integration を作る。
+  - `ui.dup_refine_parallel` の tilehash / pixel refine で、個別ファイル失敗、cancel、progress、summary logging をテストする。追加済み。
+  - `dup.refine` の SSIM / ORB / pixel fallback の境界を fixture 付きで固定する。SSIM / ORB 個別失敗継続を追加済み。
+  - `utils.image_io.get_thumbnail` の PyQt 実 backend smoke と cache eviction を追加する。cache hit / eviction は fake QPixmap で追加済み。PyQt 実 backend smoke は `check-gui-smoke.ps1` で既存範囲を確認。
+  - 実データに近い小型 fixture で pHash -> refine までの lightweight integration を作る。tilehash -> pixel refine の破損ファイル混在 fixture を追加済み。
 - 完了条件:
-  - 破損ファイルや依存不足が cluster 全体の silent failure にならない。
-  - ユーザーに返す件数、ログ、progress が実処理と一致する。
+  - 破損ファイルや依存不足が cluster 全体の silent failure にならない。完了。
+  - ユーザーに返す件数、ログ、progress が実処理と一致する。完了。
 - 検証:
   - `.\scripts\check.ps1`
   - `.\scripts\check-gui-smoke.ps1`

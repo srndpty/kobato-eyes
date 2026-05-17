@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -11,6 +12,8 @@ from PIL import Image, ImageOps
 from skimage.metrics import structural_similarity
 
 from utils.image_io import safe_load_image
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -80,19 +83,30 @@ def refine_pair(
         return None
 
     cfg = thresholds or RefinementThresholds()
-    ssim_value = _compute_ssim(image_a, image_b)
-    orb_ratio = _compute_orb_ratio(image_a, image_b)
+    ssim_value: float | None = None
+    orb_ratio: float | None = None
+    metric_errors: list[str] = []
+    try:
+        ssim_value = _compute_ssim(image_a, image_b)
+    except Exception as exc:
+        logger.warning("SSIM refinement failed for %s and %s: %s", path_a, path_b, exc)
+        metric_errors.append("ssim unavailable")
+    try:
+        orb_ratio = _compute_orb_ratio(image_a, image_b)
+    except Exception as exc:
+        logger.warning("ORB refinement failed for %s and %s: %s", path_a, path_b, exc)
+        metric_errors.append("orb unavailable")
 
     reasons: list[str] = []
     is_duplicate = False
-    if ssim_value >= cfg.ssim:
+    if ssim_value is not None and ssim_value >= cfg.ssim:
         reasons.append(f"ssim>={cfg.ssim}")
         is_duplicate = True
-    if orb_ratio >= cfg.orb:
+    if orb_ratio is not None and orb_ratio >= cfg.orb:
         reasons.append(f"orb>={cfg.orb}")
         is_duplicate = True
 
-    reason = ", ".join(reasons) if reasons else "below thresholds"
+    reason = ", ".join(reasons or metric_errors) if reasons or metric_errors else "below thresholds"
     return RefinedMatch(
         file_id_a=file_id_a,
         file_id_b=file_id_b,

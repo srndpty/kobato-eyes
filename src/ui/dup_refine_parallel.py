@@ -161,8 +161,7 @@ def refine_by_tilehash_parallel(
 
 def _load_small_gray(path: Path, size=128):
     with Image.open(path) as opened:
-        gray = opened.convert("L")
-        gray.thumbnail((size, size), Image.Resampling.BILINEAR)
+        gray = ImageOps.fit(opened.convert("L"), (size, size), Image.Resampling.BILINEAR)
         return np.asarray(gray, dtype=np.uint8)
 
 

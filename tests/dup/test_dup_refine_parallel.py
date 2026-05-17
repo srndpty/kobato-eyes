@@ -199,6 +199,28 @@ def test_refine_by_pixels_parallel_filters_and_callbacks(tmp_path: Path) -> None
     assert ticks == [(1, 1)]
 
 
+def test_refine_by_pixels_parallel_handles_mixed_aspect_ratios(tmp_path: Path) -> None:
+    wide_path = tmp_path / "wide.png"
+    tall_path = tmp_path / "tall.png"
+    different_path = tmp_path / "different.png"
+    Image.new("L", (64, 32), color=120).save(wide_path, format="PNG")
+    Image.new("L", (32, 64), color=120).save(tall_path, format="PNG")
+    Image.new("L", (32, 64), color=20).save(different_path, format="PNG")
+    cluster = DummyCluster(
+        files=[
+            _make_entry(wide_path, 1),
+            _make_entry(tall_path, 2),
+            _make_entry(different_path, 3),
+        ],
+        keeper_id=1,
+    )
+
+    refined = refine_by_pixels_parallel([cluster], mae_thr=0.001, thumb_size=32)
+
+    assert len(refined) == 1
+    assert {entry.file.file_id for entry in refined[0].files} == {1, 2}
+
+
 def test_refine_by_tilehash_parallel_logs_failures(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
     missing_path = tmp_path / "missing.png"
     cluster = DummyCluster(files=[_make_entry(missing_path, 1)], keeper_id=1)
@@ -271,3 +293,31 @@ def test_refine_by_pixels_parallel_cancelled(tmp_path: Path) -> None:
     cancelled = refine_by_pixels_parallel([cluster, cluster], is_cancelled=lambda: True, tick=tick)
     assert cancelled == []
     assert not calls
+
+
+def test_lightweight_phash_to_refine_pipeline_with_corrupt_member(tmp_path: Path) -> None:
+    base_path = tmp_path / "base.png"
+    duplicate_path = tmp_path / "duplicate.png"
+    different_path = tmp_path / "different.png"
+    broken_path = tmp_path / "broken.png"
+    _save_split_image(base_path)
+    _copy_image(duplicate_path, base_path)
+    Image.new("L", (32, 32), color=0).save(different_path, format="PNG")
+    broken_path.write_bytes(b"broken image")
+    cluster = DummyCluster(
+        files=[
+            _make_entry(base_path, 1),
+            _make_entry(duplicate_path, 2),
+            _make_entry(different_path, 3),
+            _make_entry(broken_path, 4),
+        ],
+        keeper_id=1,
+    )
+
+    tile_refined = refine_by_tilehash_parallel([cluster], max_bits=0, io_workers=1)
+    pixel_refined = refine_by_pixels_parallel(tile_refined, mae_thr=0.001, workers=1)
+
+    assert len(tile_refined) == 1
+    assert {entry.file.file_id for entry in tile_refined[0].files} == {1, 2}
+    assert len(pixel_refined) == 1
+    assert {entry.file.file_id for entry in pixel_refined[0].files} == {1, 2}
