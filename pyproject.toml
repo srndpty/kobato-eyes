@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "kobato-eyes"
-version = "0.0.1"
+version = "0.6.0"
 description = "Desktop application for tagging images with Danbooru metadata and duplicate detection."
 readme = "README.md"
 authors = [

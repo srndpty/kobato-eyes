@@ -7,13 +7,14 @@
 **kobato-eyes** は、ローカル PC 上の画像に Danbooru タグを自動付与し、類似画像検出と検索を行う Windows 向けデスクトップアプリケーションです。PyQt6 を用いた GUI と SQLite + FTS5 データベースを組み合わせ、スキャンからタグ付け、検索、重複チェックまでを一貫して実行します。
 
 # Quick Setup
-- [リリースページ](https://github.com/srndpty/kobato-eyes/releases)から最新版の7zをDL→展開
+- [リリースページ](https://github.com/srndpty/kobato-eyes/releases)から最新版の 7z または zip をDL→展開
 - kobato-eyes.exeを起動
 - settingsタブのrootsに、danbooruタグを付けたい画像があるフォルダを指定
-- taggerモデルを指定（tagsタブ→Open DB folderでdbフォルダを開き、そこに新しいフォルダを作ってそこに置くのがおすすめ）
+- taggerモデルを指定（tagsタブ→Open DB folderでdbフォルダを開き、そこにモデル用フォルダを作って置くのがおすすめ）
 - PixAIの場合
   - [deepghs/pixai-tagger-v0.9-onnx](https://huggingface.co/deepghs/pixai-tagger-v0.9-onnx/tree/main) から model.onnxとselected_tags.csv、preprocess.jsonの **3ファイル** をDLし、同じフォルダに置く
-  - settingsタブからtaggerをwd14-onnxに指定し、modelでmodel.onnxを指定
+  - settingsタブではtaggerをwd14-onnxに指定し、modelでmodel.onnxを指定する
+  - PixAI / WD14 の判定は selected_tags.csv から自動判定される
 - WD14の場合
   - [SmilingWolf/wd-swinv2-tagger-v3](https://huggingface.co/SmilingWolf/wd-swinv2-tagger-v3/tree/main) などからmodel.onnxとselected_tags.csvをDLし、同じフォルダに置く
   - settingsタブからtaggerをwd14-onnxに指定し、modelでmodel.onnxを指定
@@ -53,7 +54,7 @@
 - **重複検出**: pHash による候補抽出と SSIM / ORB による最終判定で近似重複を抽出し、UI 上でクラスタごとに整理・破棄操作が可能です。
 - **検索 UI**: タグ検索・オートコンプリート・統計表示・重複レビューなどを備えたタブ UI。設定タブから監視ルートやモデルパス、閾値を編集できます。
 - **堅牢なデータ管理**: SQLite (WAL / 外部キー ON) に画像メタ情報とタグを格納し、FTS5 で高速全文検索を提供。AppData 配下にデータ・ログ・インデックスを自動作成します。
-- **拡張性**: core/、ui/、tagger/、dup/、sig/ などモジュール分割済みで、カスタムタグガーやステージを容易に追加可能です。
+- **拡張性**: core/、ui/、tagger/、dup/、sig/ などモジュール分割済みで、カスタムタグガーやステージを追加しやすい構成です。
 
 ## プロジェクト構成
 
@@ -62,7 +63,7 @@ src/
 ├─ core/        # パイプライン、設定、ジョブ管理
 ├─ db/          # SQLite スキーマとリポジトリ
 ├─ dup/         # 重複検出ロジック
-├─ index/       # ベクトル検索モジュール（将来的な拡張用スタブ）
+├─ index/       # ベクトル検索モジュール（将来的な拡張用）
 ├─ sig/         # 画像署名と特徴量計算
 ├─ tagger/      # ONNX タガー実装 (WD14 / PixAI / ダミー)
 ├─ ui/          # PyQt6 GUI、ViewModel、ウィジェット
@@ -95,7 +96,7 @@ GPU で ONNX タガーを実行する開発環境では、CPU 版の代わりに
 
 ### モデルファイルの配置
 
-1. WD14 または PixAI の ONNX モデルと `tags.csv` をダウンロード
+1. WD14 または PixAI の ONNX モデルと `selected_tags.csv` をダウンロード
 2. 任意のディレクトリに保存 (`models/` など)
 3. 初回起動後に作成される設定タブまたは `config.yaml` でパスを指定
 
