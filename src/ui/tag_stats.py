@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
-from typing import Callable
+from typing import Any, Callable, cast
 
 from PyQt6.QtCore import QAbstractTableModel, QModelIndex, QSortFilterProxyModel, Qt
 from PyQt6.QtGui import QKeyEvent
@@ -32,24 +32,42 @@ _CATEGORY_NAMES: dict[int, str] = {
 _FALLBACK_THRESHOLDS: dict[int, float] = {0: 0.35, 4: 0.25, 3: 0.25}
 
 
-def _load_thresholds(conn: sqlite3.Connection) -> dict[int, float]:
-    """Return tag thresholds using database overrides when available."""
+def category_name(category_id: int) -> str:
+    """Return the display name for a Danbooru category id."""
+
+    return _CATEGORY_NAMES.get(category_id, str(category_id))
+
+
+def format_score(value: float) -> str:
+    """Return a tag score formatted for the stats table."""
+
+    return f"{float(value):.3f}"
+
+
+def merge_thresholds(rows: list[tuple[object, object]]) -> dict[int, float]:
+    """Merge threshold rows with built-in fallback thresholds."""
 
     thresholds: dict[int, float] = {}
-    try:
-        cursor = conn.execute("SELECT category, threshold FROM tagger_thresholds")
-        for category, value in cursor.fetchall():
-            try:
-                thresholds[int(category)] = float(value)
-            except Exception:
-                continue
-    except sqlite3.Error:
-        pass
-
+    for category, value in rows:
+        try:
+            thresholds[int(cast(Any, category))] = float(cast(Any, value))
+        except (TypeError, ValueError):
+            continue
     merged: dict[int, float] = {key: 0.0 for key in range(6)}
     merged.update(_FALLBACK_THRESHOLDS)
     merged.update(thresholds)
     return merged
+
+
+def _load_thresholds(conn: sqlite3.Connection) -> dict[int, float]:
+    """Return tag thresholds using database overrides when available."""
+
+    try:
+        cursor = conn.execute("SELECT category, threshold FROM tagger_thresholds")
+        rows = list(cursor.fetchall())
+    except sqlite3.Error:
+        rows = []
+    return merge_thresholds(rows)
 
 
 class _TagStatsModel(QAbstractTableModel):
@@ -147,15 +165,15 @@ class _TagStatsModel(QAbstractTableModel):
 
         if role == Qt.ItemDataRole.DisplayRole:
             if column_index == 0:
-                return _CATEGORY_NAMES.get(category_id, str(category_id))
+                return category_name(category_id)
             if column_index == 1:
                 return tag_name
             if column_index == 2:
                 return file_count
             if column_index == 3:
-                return f"{avg_score:.3f}"
+                return format_score(avg_score)
             if column_index == 4:
-                return f"{max_score:.3f}"
+                return format_score(max_score)
         if role == Qt.ItemDataRole.UserRole:
             if column_index == 0:
                 return category_id
@@ -281,4 +299,4 @@ class TagStatsDialog(QDialog):
             edit.setCursorPosition(len(new_text))
 
 
-__all__ = ["TagStatsDialog"]
+__all__ = ["TagStatsDialog", "category_name", "format_score", "merge_thresholds"]

@@ -31,6 +31,30 @@ def format_duplicate_resolution(width: int | None, height: int | None) -> str:
     return f"{width}×{height}"
 
 
+def duplicate_tile_metadata(entry: DuplicateClusterEntry) -> str:
+    """Return primary duplicate tile metadata text."""
+
+    size_text = format_duplicate_size(entry.file.size)
+    resolution_text = format_duplicate_resolution(entry.file.width, entry.file.height)
+    hamming_text = "-" if entry.best_hamming is None else f"H:{entry.best_hamming}"
+    return f"{size_text}   {resolution_text}   {hamming_text}"
+
+
+def thumb_panel_columns(width: int, tile_width: int, col_gap: int) -> int:
+    """Return the number of thumbnail columns that fit in a panel."""
+
+    cell_width = max(1, tile_width + col_gap)
+    return max(1, max(1, width) // cell_width)
+
+
+def thumb_panel_content_height(tile_count: int, columns: int, tile_height: int, row_gap: int) -> int:
+    """Return panel content height for a fixed tile grid."""
+
+    safe_columns = max(1, columns)
+    rows = (max(0, tile_count) + safe_columns - 1) // safe_columns
+    return rows * (tile_height + row_gap)
+
+
 class ThumbTile(QFrame):
     """Tile widget for one duplicate candidate."""
 
@@ -72,10 +96,7 @@ class ThumbTile(QFrame):
         layout.addWidget(self.meta1)
         layout.addWidget(self.meta2)
 
-        size_text = format_duplicate_size(entry.file.size)
-        resolution_text = format_duplicate_resolution(entry.file.width, entry.file.height)
-        hamming_text = "-" if entry.best_hamming is None else f"H:{entry.best_hamming}"
-        self.meta1.setText(f"{size_text}   {resolution_text}   {hamming_text}")
+        self.meta1.setText(duplicate_tile_metadata(entry))
 
         metrics = QFontMetrics(self.font())
         folder = str(entry.file.path.parent)
@@ -146,9 +167,7 @@ class ThumbPanel(QWidget):
         self.setMinimumHeight(self._tile_size.height() + 8)
 
     def _compute_cols(self) -> int:
-        width = max(1, self.width())
-        cell_width = self._tile_size.width() + self._col_gap
-        return max(1, width // cell_width)
+        return thumb_panel_columns(self.width(), self._tile_size.width(), self._col_gap)
 
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
@@ -165,9 +184,13 @@ class ThumbPanel(QWidget):
             column = index % self._cols
             tile.setGeometry(column * cell_width, row * cell_height, self._tile_size.width(), self._tile_size.height())
 
-        rows = (len(self.tiles) + self._cols - 1) // self._cols
-        self._content_h = rows * cell_height
-        self.setMinimumHeight(rows * cell_height)
+        self._content_h = thumb_panel_content_height(
+            len(self.tiles),
+            self._cols,
+            self._tile_size.height(),
+            self._row_gap,
+        )
+        self.setMinimumHeight(self._content_h)
         self.updateGeometry()
         self.sizeHintChanged.emit()
 
@@ -186,4 +209,12 @@ class ThumbPanel(QWidget):
         return visible
 
 
-__all__ = ["ThumbPanel", "ThumbTile", "format_duplicate_resolution", "format_duplicate_size"]
+__all__ = [
+    "ThumbPanel",
+    "ThumbTile",
+    "duplicate_tile_metadata",
+    "format_duplicate_resolution",
+    "format_duplicate_size",
+    "thumb_panel_columns",
+    "thumb_panel_content_height",
+]

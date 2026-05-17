@@ -10,9 +10,9 @@
 - DBはSQLite（WAL/外部キーON）。全文検索はFTS5。ベクトル近傍はhnswlib。
 - 画像読込は最初はPillowでOK（後でpyvipsに差し替え可）。埋め込みはopen_clip（CLIP系）。
 - タガーはONNX Runtime(CUDA)優先（後からPyTorch差し替え可）。重複は多段判定（pHash→CLIP→SSIM/ORB）。
-- 各タスクは**小さく**出力。巨大単一ファイルは禁止。必ず**作成/変更するファイル一覧**を先頭に出し、続けて内容を出力。
-- すべて**実行手順**（pip/pytest/起動方法）を最後に短く付ける。
-- モジュール先頭の行順序を厳守：1.module docstring、2. from __future__ import ...、3. 通常の import。これ以外の行を docstring より前に挿入しない。
+- 各タスクは**小さく**出力。巨大単一ファイルは禁止。
+- すべて実行手順（pip/pytest/起動方法）を最後に短く付ける。
+
 
 ## Danbooruタグ仕様に関する前提
 

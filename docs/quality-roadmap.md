@@ -4,14 +4,14 @@
 
 - 更新日: 2026-05-17
 - 基準チェック: `.\scripts\check.ps1`
-- 直近の基準値: `425 passed, 40 deselected`
-- 総カバレッジ: `80%`
+- 直近の基準値: `436 passed, 40 deselected`
+- 総カバレッジ: `81%`
 - 重点カバレッジ: `core.jobs`, `core.pipeline.retag`, `db.fts`, `ui.search_worker` 合計 `91%`
 - mypy対象: `61 source files`
-- GUI smoke: `27 passed, 435 deselected`
+- GUI smoke: `27 passed, 449 deselected`
 - db_stress: `8 passed, 441 deselected`
 - GPU check: GPU test 未定義時は skip 扱い
-- integration: `7 passed, 458 deselected` を直近の既知基準とする
+- integration: `7 passed, 469 deselected` を直近の既知基準とする
 - package smoke: compile package smoke OK
 
 ## 安定化済みの基盤
@@ -23,12 +23,13 @@
 - tagger backend: ONNX provider selection、model / labels file error、label count mismatch は `tagger.onnx_backend` で共通化済み。
 - 型チェック: 主要 helper / worker / viewmodel / tagger utility を mypy 対象化済み。
 - UI orchestration: index / refresh / retag lifecycle と duplicate scan / refine / trash / export の状態判定を pure helper へ切り出し済み。
+- 低カバレッジ境界: result delegate、spinner、duplicate widgets、tag stats、watcher、image IO の重要分岐を helper 化し、軽量テストで固定済み。
 
 ## 現在の主要リスク
 
 - `ui.tags_tab` と `ui.dup_tab` はまだ大きく、worker 制御、DB 接続復旧、表示更新、状態遷移が密である。
 - `services.db_writing`, `core.pipeline.loaders`, `core.pipeline.manual_refresh`, `dup.scanner`, `tagger.wd14_onnx`, `tagger.pixai_onnx` の broad catch は failure policy を近接コメント、helper 名、テスト名、監査文書で分類済み。
-- `ui.result_delegates`, `ui.widgets.spinner_overlay`, `ui.dup_widgets`, `ui.tag_stats`, `core.pipeline.watcher`, `utils.image_io` はカバレッジが低い。
+- `ui.result_delegates`, `ui.widgets.spinner_overlay`, `ui.dup_widgets`, `ui.tag_stats`, `core.pipeline.watcher`, `utils.image_io` は低カバレッジ境界の重要分岐を一部固定済みだが、描画本体や実 widget 経路には追加余地がある。
 - tagger 実 backend、GPU / CUDA provider、open_clip 依存の実行確認は通常チェックでは保証されない。
 - 標準チェックは GUI / integration / db_stress を除外するため、変更内容に応じた追加確認が必要である。
 
@@ -70,7 +71,7 @@
   - `.\scripts\check-package-smoke.ps1`
   - `.\scripts\check-gpu.ps1`（GPU test 未定義のため skip）
 
-## 次フェーズ 8: 低カバレッジ UI / IO 境界を埋める
+## フェーズ 8: 低カバレッジ UI / IO 境界を埋める（実装済み）
 
 - 目的: 描画 delegate、spinner、duplicate widgets、tag stats、watcher、image IO の実事故に近い分岐を軽量に固定する。
 - 対象:
@@ -80,16 +81,18 @@
   - `src/ui/tag_stats.py`
   - `src/core/pipeline/watcher.py`
   - `src/utils/image_io.py`
-- 作業:
-  - pure helper 化できる計算、表示テキスト、状態遷移を先に抽出して unit test を追加する。
-  - PyQt 描画は最小 smoke に留め、ピクセル完全一致に依存しない確認にする。
-  - image IO は EXIF transpose、RGBA / palette、巨大画像 skip、close 漏れを追加 fixture で確認する。
-- 完了条件:
-  - 低カバレッジモジュールの重要分岐が、少なくとも skip / error / success の 3 系統で確認できる。
-  - UI 描画変更で `check-gui-smoke.ps1` が必須であることが PR / レビューで判断できる。
-- 検証:
+- 実装:
+  - `ui.result_delegates` の grid caption / dark background 判定を helper 化した。
+  - `ui.widgets.spinner_overlay` の default message / geometry 判定を helper 化した。
+  - `ui.dup_widgets` の duplicate tile metadata / panel layout 計算を helper 化した。
+  - `ui.tag_stats` の category / score / threshold merge を helper 化した。
+  - `core.pipeline.watcher` の enqueue 対象 path 解決を helper 化し、モジュール先頭 docstring を追加した。
+  - `utils.image_io.safe_load_image` に EXIF transpose と alpha の白背景合成を追加し、巨大画像 skip / close 漏れと合わせてテストした。
+- 検証済み:
   - `.\scripts\check.ps1`
   - `.\scripts\check-gui-smoke.ps1`
+  - `.\scripts\check-integration.ps1`
+  - `.\scripts\check-package-smoke.ps1`
 
 ## 次フェーズ 9: tagger backend と GPU 経路の実テストを作る
 

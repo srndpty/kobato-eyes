@@ -11,7 +11,7 @@ from pathlib import Path
 from threading import Lock
 from typing import Any
 
-from PIL import Image, ImageFile, UnidentifiedImageError
+from PIL import Image, ImageFile, ImageOps, UnidentifiedImageError
 from PIL.Image import DecompressionBombError
 
 try:  # pragma: no cover - handled at runtime when PyQt6 is missing
@@ -106,12 +106,18 @@ def safe_load_image(
                 img.close()
             return None
 
+        transposed = _exif_transpose_safely(img)
+        if transposed is not img:
+            with suppress(Exception):
+                img.close()
+            img = transposed
+
         # ここまで来たら即縮小して RAM を抑える
         if max(img.size) > max_side:
             img.thumbnail((max_side, max_side), Image.Resampling.LANCZOS)
 
         if rgb and img.mode != "RGB":
-            converted = img.convert("RGB")
+            converted = _convert_image_to_rgb(img)
             if converted is not img:
                 with suppress(Exception):
                     img.close()
@@ -123,6 +129,28 @@ def safe_load_image(
         return None
     finally:
         Image.MAX_IMAGE_PIXELS = old_cap
+
+
+def _convert_image_to_rgb(image: Image.Image) -> Image.Image:
+    """Return an RGB image, compositing alpha over white when needed."""
+
+    if image.mode == "RGB":
+        return image
+    if image.mode in {"RGBA", "LA"} or ("transparency" in getattr(image, "info", {})):
+        rgba = image.convert("RGBA")
+        background = Image.new("RGBA", rgba.size, "WHITE")
+        background.alpha_composite(rgba)
+        return background.convert("RGB")
+    return image.convert("RGB")
+
+
+def _exif_transpose_safely(image: Image.Image) -> Image.Image:
+    """Apply EXIF orientation when available."""
+
+    try:
+        return ImageOps.exif_transpose(image)
+    except (AttributeError, TypeError, ValueError):
+        return image
 
 
 def resize_image(
