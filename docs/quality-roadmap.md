@@ -4,13 +4,13 @@
 
 - 更新日: 2026-05-17
 - 基準チェック: `.\scripts\check.ps1`
-- 直近の基準値: `436 passed, 40 deselected`
+- 直近の基準値: `436 passed, 42 deselected`
 - 総カバレッジ: `81%`
 - 重点カバレッジ: `core.jobs`, `core.pipeline.retag`, `db.fts`, `ui.search_worker` 合計 `91%`
 - mypy対象: `61 source files`
 - GUI smoke: `27 passed, 449 deselected`
 - db_stress: `8 passed, 441 deselected`
-- GPU check: GPU test 未定義時は skip 扱い
+- GPU check: `1 passed, 1 skipped, 476 deselected`
 - integration: `7 passed, 469 deselected` を直近の既知基準とする
 - package smoke: compile package smoke OK
 
@@ -21,6 +21,7 @@
 - 重複検出: tilehash / pixel refine、SSIM / ORB fallback、破損画像混在、非正方形画像の pixel refine はテスト済み。
 - 画像 IO: 壊れた画像、巨大画像、pixel cap 復元、thumbnail cache hit / copy / eviction はテスト済み。
 - tagger backend: ONNX provider selection、model / labels file error、label count mismatch は `tagger.onnx_backend` で共通化済み。
+- GPU check: CUDA provider smoke を追加し、CUDA provider 不在時は明示 skip、`onnx` package がある環境では dummy ONNX の WD14 実行 smoke を行う。
 - 型チェック: 主要 helper / worker / viewmodel / tagger utility を mypy 対象化済み。
 - UI orchestration: index / refresh / retag lifecycle と duplicate scan / refine / trash / export の状態判定を pure helper へ切り出し済み。
 - 低カバレッジ境界: result delegate、spinner、duplicate widgets、tag stats、watcher、image IO の重要分岐を helper 化し、軽量テストで固定済み。
@@ -30,7 +31,7 @@
 - `ui.tags_tab` と `ui.dup_tab` はまだ大きく、worker 制御、DB 接続復旧、表示更新、状態遷移が密である。
 - `services.db_writing`, `core.pipeline.loaders`, `core.pipeline.manual_refresh`, `dup.scanner`, `tagger.wd14_onnx`, `tagger.pixai_onnx` の broad catch は failure policy を近接コメント、helper 名、テスト名、監査文書で分類済み。
 - `ui.result_delegates`, `ui.widgets.spinner_overlay`, `ui.dup_widgets`, `ui.tag_stats`, `core.pipeline.watcher`, `utils.image_io` は低カバレッジ境界の重要分岐を一部固定済みだが、描画本体や実 widget 経路には追加余地がある。
-- tagger 実 backend、GPU / CUDA provider、open_clip 依存の実行確認は通常チェックでは保証されない。
+- open_clip 依存の実行確認は通常チェックでは保証されない。ONNX Runtime CUDA provider は専用 GPU check で smoke 済み。
 - 標準チェックは GUI / integration / db_stress を除外するため、変更内容に応じた追加確認が必要である。
 
 ## フェーズ 6: UI orchestration をさらに薄くする（実装済み）
@@ -94,7 +95,7 @@
   - `.\scripts\check-integration.ps1`
   - `.\scripts\check-package-smoke.ps1`
 
-## 次フェーズ 9: tagger backend と GPU 経路の実テストを作る
+## フェーズ 9: tagger backend と GPU 経路の実テストを作る（実装済み）
 
 - 目的: mocked provider 計画だけでなく、環境がある場合に ONNX Runtime CUDA / CPU fallback / input layout を実行確認できるようにする。
 - 対象:
@@ -102,16 +103,13 @@
   - `src/tagger/pixai_onnx.py`
   - `src/tagger/onnx_backend.py`
   - `scripts/check-gpu.ps1`
-- 作業:
-  - `@pytest.mark.gpu` の最小 smoke を追加し、CUDA provider がない環境では明示 skip する。
-  - 小型 dummy ONNX または session double で input name / output shape / label mismatch を追加確認する。
-  - GPU test 未定義時 skip の運用を維持し、実 GPU test 追加後は失敗を正しく検出する。
-- 完了条件:
-  - RTX 環境で `check-gpu.ps1` が実テストを少なくとも 1 件実行する。
-  - GPU 不在環境では skip 理由が明確に表示される。
-- 検証:
-  - `.\scripts\check.ps1`
-  - `.\scripts\check-gpu.ps1`
+- 実装:
+  - `tests/tagger/test_gpu_onnx_runtime.py` に `@pytest.mark.gpu` の CUDA provider smoke を追加した。
+  - CUDA provider 不在時は provider 一覧付きで skip する。
+  - `onnx` package がある環境では小型 dummy ONNX を生成し、`WD14Tagger` の input name / output tensor / label count / inference output を CUDA provider で確認する。
+  - `onnx` package がない環境では dummy model smoke のみ skip し、CUDA provider smoke は実行する。
+- 検証済み:
+  - `.\scripts\check-gpu.ps1`（`1 passed, 1 skipped, 476 deselected`）
 
 ## 次フェーズ 10: 型チェック対象を backend 本体へ広げる
 
