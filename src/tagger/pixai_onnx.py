@@ -7,7 +7,7 @@ import json
 import logging
 import os
 from pathlib import Path
-from typing import Iterable, Mapping
+from typing import Iterable, Mapping, Sequence
 
 import numpy as np
 from PIL import Image
@@ -21,7 +21,7 @@ from .wd14_onnx import WD14Tagger, _sigmoid
 logger = logging.getLogger(__name__)
 
 
-def _normalize_np_chw(x: np.ndarray, mean, std):
+def _normalize_np_chw(x: np.ndarray, mean: Sequence[float], std: Sequence[float]) -> np.ndarray:
     # x: (3,H,W) in [0,1]
     x = x.astype(np.float32, copy=False)
     for c in range(3):
@@ -114,7 +114,7 @@ class PixaiOnnxTagger(WD14Tagger):
         # __init__ の末尾で呼ぶ
         self._try_fix_label_order_with_json()
 
-    def _try_fix_label_order_with_json(self):
+    def _try_fix_label_order_with_json(self) -> None:
         # 1) JSON の場所を推定 or 指定
         model_dir = Path(self._model_path).parent
         cand = [
@@ -137,7 +137,7 @@ class PixaiOnnxTagger(WD14Tagger):
 
         # index は 0..N-1 の連番を想定。欠番や "" はプレースホルダに置き換え
         N = len(self._label_name_cache)
-        expected = [None] * N
+        expected: list[str | None] = [None] * N
         for name, idx in tag_map.items():
             if 0 <= int(idx) < N:
                 expected[int(idx)] = name if name else f"{BROKEN_TAG_PREFIX}{idx}"
@@ -156,7 +156,7 @@ class PixaiOnnxTagger(WD14Tagger):
         logger.warning("PixAI: label order mismatch detected: %d / %d differ; fixing", mismatches, N)
 
         # 4) 名前配列を JSON 準拠に差し替え
-        self._label_name_cache = expected
+        self._label_name_cache = [str(name) for name in expected]
 
         # 5) カテゴリ配列を、読み込んだ meta（CSV）から名前で再構築
         new_cats: list[int] = []
@@ -173,7 +173,7 @@ class PixaiOnnxTagger(WD14Tagger):
         vals, cnts = np.unique(np.array(self._label_cat_cache, dtype=np.int32), return_counts=True)
         logger.info("PixAI labels category distribution (after fix): %s", {int(v): int(c) for v, c in zip(vals, cnts)})
 
-    def prepare_batch_from_rgb_np(self, rgb_list: list[np.ndarray]) -> np.ndarray:
+    def prepare_batch_from_rgb_np(self, rgb_list: Sequence[np.ndarray]) -> np.ndarray:
         assert len(rgb_list) >= 1, "rgb_list empty"
         # 入力検証
         # a0 = rgb_list[0]
@@ -208,7 +208,7 @@ class PixaiOnnxTagger(WD14Tagger):
             scale = target / min(w, h)
             nw, nh = int(round(w * scale)), int(round(h * scale))
             if (nw, nh) != (w, h):
-                im = im.resize((nw, nh), Image.BICUBIC)
+                im = im.resize((nw, nh), Image.Resampling.BICUBIC)
 
             # 中央クロップで target x target
             left = (im.width - target) // 2

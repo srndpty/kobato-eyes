@@ -7,11 +7,11 @@
 - 直近の基準値: `436 passed, 42 deselected`
 - 総カバレッジ: `81%`
 - 重点カバレッジ: `core.jobs`, `core.pipeline.retag`, `db.fts`, `ui.search_worker` 合計 `91%`
-- mypy対象: `61 source files`
+- mypy対象: `64 source files`
 - GUI smoke: `27 passed, 449 deselected`
 - db_stress: `8 passed, 441 deselected`
 - GPU check: `1 passed, 1 skipped, 476 deselected`
-- integration: `7 passed, 469 deselected` を直近の既知基準とする
+- integration: `7 passed, 471 deselected` を直近の既知基準とする
 - package smoke: compile package smoke OK
 
 ## 安定化済みの基盤
@@ -23,6 +23,7 @@
 - tagger backend: ONNX provider selection、model / labels file error、label count mismatch は `tagger.onnx_backend` で共通化済み。
 - GPU check: CUDA provider smoke を追加し、CUDA provider 不在時は明示 skip、`onnx` package がある環境では dummy ONNX の WD14 実行 smoke を行う。
 - 型チェック: 主要 helper / worker / viewmodel / tagger utility を mypy 対象化済み。
+- 型チェック: `tagger.wd14_onnx`, `tagger.pixai_onnx`, `core.pipeline.manual_refresh` を mypy 対象化済み。
 - UI orchestration: index / refresh / retag lifecycle と duplicate scan / refine / trash / export の状態判定を pure helper へ切り出し済み。
 - 低カバレッジ境界: result delegate、spinner、duplicate widgets、tag stats、watcher、image IO の重要分岐を helper 化し、軽量テストで固定済み。
 
@@ -111,7 +112,7 @@
 - 検証済み:
   - `.\scripts\check-gpu.ps1`（`1 passed, 1 skipped, 476 deselected`）
 
-## 次フェーズ 10: 型チェック対象を backend 本体へ広げる
+## フェーズ 10: 型チェック対象を backend 本体へ広げる（実装済み）
 
 - 目的: helper だけでなく、tagger backend と残る UI controller の public surface を型で保護する。
 - 優先候補:
@@ -119,17 +120,19 @@
   - `src/tagger/pixai_onnx.py`
   - `src/core/pipeline/manual_refresh.py`
   - 新しく切り出す UI controller / helper
-- 作業:
-  - まず小 helper を対象へ追加し、型エラーが多い巨大モジュールは分割後に対象化する。
-  - Protocol / dataclass / TypedDict を使い、PyQt object や ONNX session の境界は必要最小限に抽象化する。
-  - mypy 対象数を減らさず、新規 core / db / service / worker / helper は原則対象に含める。
-- 完了条件:
-  - mypy 対象が `59 source files` を下回らない。
-  - 新規 helper の public 関数は型注釈付きで、未型付け関数 note を増やさない。
-- 検証:
-  - `.\.venv\Scripts\python.exe -m mypy`
+- 実装:
+  - `src/tagger/wd14_onnx.py` を mypy 対象化した。
+  - `src/tagger/pixai_onnx.py` を mypy 対象化した。
+  - `src/core/pipeline/manual_refresh.py` を mypy 対象化した。
+  - Optional connection / cursor、ONNX provider request、threshold mapping、PIL / ndarray 境界を型で追えるように局所修正した。
+- 完了:
+  - mypy 対象は `64 source files`。
+  - `.\.venv\Scripts\python.exe -m mypy` は `Success: no issues found in 64 source files`。
+- 検証済み:
   - `.\scripts\check.ps1`
-  - import構造に触った場合: `.\scripts\check-package-smoke.ps1`
+  - `.\scripts\check-integration.ps1`
+  - `.\scripts\check-package-smoke.ps1`
+  - `.\scripts\check-gpu.ps1`
 
 ## 運用ルール
 

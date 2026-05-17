@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import sqlite3
 import time
 from pathlib import Path
 from typing import Callable, Iterable, Iterator, Sequence
@@ -78,6 +79,7 @@ def scan_and_tag(
     db_path = get_db_path()
     bootstrap_if_needed(db_path)
     conn = get_conn(db_path, allow_when_quiesced=True)
+    conn_closed = False
     tagger: ITagger | None = None
 
     def _like_pattern_for_input(path: Path) -> str:
@@ -206,18 +208,18 @@ def scan_and_tag(
                 yield list(items[index : index + size])
 
         missing_ids: list[int] = []
-        cursor = None
+        missing_cursor: sqlite3.Cursor | None = None
         try:
             if root_exists and resolved_root.is_file():
-                cursor = conn.execute(
+                missing_cursor = conn.execute(
                     "SELECT id, path FROM files WHERE is_present = 1 AND path = ?", (str(resolved_root),)
                 )
             else:
-                cursor = conn.execute(
+                missing_cursor = conn.execute(
                     "SELECT id, path FROM files WHERE is_present = 1 AND path LIKE ?",
                     (_like_pattern_for_input(resolved_root),),
                 )
-            for row in cursor.fetchall():
+            for row in missing_cursor.fetchall():
                 if _cancelled():
                     break
                 path_text = str(row["path"])
@@ -227,8 +229,8 @@ def scan_and_tag(
                 if path_text not in fs_paths:
                     missing_ids.append(int(row["id"]))
         finally:
-            if cursor is not None:
-                cursor.close()
+            if missing_cursor is not None:
+                missing_cursor.close()
 
         missing_count = len(missing_ids)
         stats_out["missing"] = missing_count
@@ -314,8 +316,8 @@ def scan_and_tag(
             max_tags=None,
         )
         tagger = tagger_obj
-        effective_thresholds = th_fallback or None
-        effective_max_tags = max_tags_fallback or None
+        effective_thresholds = dict(th_fallback or {})
+        effective_max_tags = dict(max_tags_fallback or {})
         tagger_sig = current_tagger_sig(
             settings,
             thresholds=effective_thresholds,
@@ -421,17 +423,17 @@ def scan_and_tag(
         finally:
             try:
                 conn.close()
+                conn_closed = True
             except Exception:
                 # Failure policy: connection close after a successful commit is
                 # best-effort cleanup and must not mask the tagging result.
                 pass
-        conn = None  # finally節で二重closeしないように
 
         ctx = PipelineContext(
             db_path=str(db_path),
             settings=settings,
-            thresholds=effective_thresholds or {},
-            max_tags_map=effective_max_tags or {},
+            thresholds=effective_thresholds,
+            max_tags_map=effective_max_tags,
             tagger_sig=tagger_sig,
             tagger_override=tagger_obj,
             progress_cb=progress_cb,
@@ -483,9 +485,10 @@ def scan_and_tag(
         _emit(IndexProgress(phase=IndexPhase.DONE, done=1, total=1, message=str(resolved_root)), force=True)
         return stats_out
     finally:
-        if conn is not None:
+        if not conn_closed:
             try:
                 conn.close()
+                conn_closed = True
             except Exception:
                 # Failure policy: final close is best-effort cleanup; the main
                 # refresh result has already been decided.
