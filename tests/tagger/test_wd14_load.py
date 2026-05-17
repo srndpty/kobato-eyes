@@ -108,6 +108,40 @@ def test_wd14_tagger_respects_explicit_csv(tmp_path: Path, _mock_labels: list[Pa
     assert tagger._labels_path == csv_path  # type: ignore[attr-defined]
 
 
+def test_wd14_tagger_reports_missing_model_before_session_start(tmp_path: Path, _mock_labels: list[Path]) -> None:
+    """Missing model paths should fail with a clear user-facing message."""
+
+    csv_path = tmp_path / "selected_tags.csv"
+    csv_path.write_text("tag,0\n", encoding="utf-8")
+
+    with pytest.raises(FileNotFoundError, match="WD14 model not found"):
+        wd14_onnx.WD14Tagger(tmp_path / "missing.onnx")
+
+    assert _mock_labels == []
+
+
+def test_wd14_tagger_reports_missing_tags_csv(tmp_path: Path, _mock_labels: list[Path]) -> None:
+    """Explicit missing labels CSV paths should fail before session start."""
+
+    model_path = tmp_path / "model.onnx"
+    model_path.write_bytes(b"dummy")
+
+    with pytest.raises(FileNotFoundError, match="tags CSV not found"):
+        wd14_onnx.WD14Tagger(model_path, tags_csv=tmp_path / "missing.csv")
+
+    assert _mock_labels == []
+
+
+def test_wd14_load_labels_reports_empty_label_csv(tmp_path: Path) -> None:
+    """Empty or comment-only label CSV files should not initialise silently."""
+
+    csv_path = tmp_path / "selected_tags.csv"
+    csv_path.write_text("# no labels\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="No labels parsed"):
+        wd14_onnx.WD14Tagger._load_labels(csv_path)
+
+
 def test_wd14_tagger_falls_back_to_cpu_provider(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

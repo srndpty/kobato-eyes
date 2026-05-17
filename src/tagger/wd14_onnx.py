@@ -17,6 +17,13 @@ from PIL import Image
 
 from tagger.base import ITagger, MaxTagsMap, TagCategory, TagPrediction, TagResult, ThresholdMap
 from tagger.labels_util import load_selected_tags
+from tagger.onnx_backend import (
+    CPU_PROVIDER,
+    CUDA_PROVIDER,
+    plan_provider_attempts,
+    resolve_existing_file,
+    validate_label_count,
+)
 
 try:
     import torch
@@ -37,8 +44,8 @@ else:
 
 
 ONNXRUNTIME_MISSING_MESSAGE = "onnxruntime is required. Try: pip install onnxruntime-gpu  (or onnxruntime for CPU)"
-_CUDA_PROVIDER = "CUDAExecutionProvider"
-_CPU_PROVIDER = "CPUExecutionProvider"
+_CUDA_PROVIDER = CUDA_PROVIDER
+_CPU_PROVIDER = CPU_PROVIDER
 
 
 _ACTIVE_TAGGERS: "weakref.WeakSet[WD14Tagger]"  # type: ignore[name-defined]
@@ -99,7 +106,7 @@ class WD14Tagger(ITagger):
     ) -> None:
         ensure_onnxruntime()
 
-        self._model_path = Path(model_path)
+        self._model_path = resolve_existing_file(model_path, label="WD14 model")
         logger.info("WD14: using model %s", self._model_path)
         labels_path = self._resolve_labels_path(tags_csv or labels_csv)
         self._labels_path = labels_path
@@ -117,23 +124,12 @@ class WD14Tagger(ITagger):
             logger.warning("WD14: no ONNX providers reported by runtime")
 
         requested_providers: Sequence[str] | None = providers
-        provider_attempts: list[list[str]]
-        if requested_providers is not None:
-            provider_attempts = [list(requested_providers)]
-            if _CUDA_PROVIDER in provider_attempts[0] and _CUDA_PROVIDER not in available_providers:
-                logger.warning(
-                    "WD14: %s requested but not available; falling back to %s",
-                    _CUDA_PROVIDER,
-                    _CPU_PROVIDER,
-                )
-                provider_attempts = [[_CPU_PROVIDER]]
-        else:
-            if available_providers and _CUDA_PROVIDER not in available_providers:
-                logger.info(
-                    "WD14: %s not reported by runtime; CPU provider will be used if CUDA fails",
-                    _CUDA_PROVIDER,
-                )
-            provider_attempts = [[_CUDA_PROVIDER], [_CPU_PROVIDER]]
+        provider_plan = plan_provider_attempts(requested_providers, available_providers)
+        for message in provider_plan.infos:
+            logger.info("WD14: %s", message)
+        for message in provider_plan.warnings:
+            logger.warning("WD14: %s", message)
+        provider_attempts = provider_plan.attempts
         last_error: Exception | None = None
         session = None
         chosen_providers: list[str] | None = None
@@ -433,7 +429,7 @@ class WD14Tagger(ITagger):
         self, logits: np.ndarray, thresholds: ThresholdMap | None, max_tags: MaxTagsMap | None
     ) -> list[TagResult]:
         if logits.shape[1] != len(self._labels):
-            raise RuntimeError(f"Model output dim {logits.shape[1]} != labels {len(self._labels)}")
+            validate_label_count(int(logits.shape[1]), len(self._labels), backend_name="WD14")
 
         post_start = perf_counter()
         minv, maxv = float(np.min(logits)), float(np.max(logits))
@@ -512,6 +508,7 @@ class WD14Tagger(ITagger):
         probs = logits if (0.0 <= mn <= 1.0 and 0.0 <= mx <= 1.0) else _sigmoid(logits).astype(np.float32, copy=False)
 
         B, C = probs.shape
+        validate_label_count(int(C), len(self._labels), backend_name="WD14")
 
         # --- 2) 閾値ベクトル（デフォルトキャッシュを再利用）
         resolved_thr = self._resolve_thresholds(self._default_thresholds, thresholds)
@@ -779,10 +776,7 @@ class WD14Tagger(ITagger):
         ort_ms = (perf_counter() - ort_start) * 1000.0
         logits = outputs[0]
 
-        if logits.shape[1] != len(self._labels):
-            raise RuntimeError(
-                f"Model output dimension {logits.shape[1]} does not match label count {len(self._labels)}"
-            )
+        validate_label_count(int(logits.shape[1]), len(self._labels), backend_name="WD14")
 
         post_start = perf_counter()
         # --- ベクトル化: ロジット→確率（またはそのまま） ---

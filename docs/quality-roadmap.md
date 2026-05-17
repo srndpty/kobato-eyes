@@ -4,9 +4,9 @@
 
 - 更新日: 2026-05-17
 - 基準チェック: `.\scripts\check.ps1`
-- 直近の基準値: `399 passed, 40 deselected`
+- 直近の基準値: `407 passed, 40 deselected`
 - 総カバレッジ: `80%`
-- mypy対象: `58 source files`
+- mypy対象: `59 source files`
 - GUI smoke: `27 passed, 412 deselected`
 - integration: `7 passed, 414 deselected`
 - db_stress: `8 passed, 413 deselected`
@@ -34,6 +34,8 @@
 - フェーズ4: `ui.index_feedback`, `ui.dup_status`, `ui.thumbnail_tasks`, `ui.tag_rendering`, `ui.viewmodels.settings_view_model`, `tagger.labels_util` を mypy 対象へ追加済み。
 - フェーズ4: `ui.dup_refine_parallel` の public refine helpers に Protocol / callback 型を付け、未型付け関数 note を解消済み。
 - mypy 対象を `45 source files` から `58 source files` に拡張済み。
+- フェーズ5: ONNX provider selection / file existence / label count validation を `tagger.onnx_backend` へ切り出し、WD14 / PixAI backend の user-facing error と CPU fallback plan をテストで固定済み。
+- mypy 対象を `59 source files` に拡張済み。
 
 ## 現在の主要リスク
 
@@ -134,17 +136,18 @@
   - `python -m ruff check .`
   - import構造や module header に触った場合は `.\scripts\check-package-smoke.ps1`
 
-## 次フェーズ 5: tagger backend / GPU 境界を別トラックで固める
+## 完了フェーズ 5: tagger backend / GPU 境界を別トラックで固める
 
 - 目的: ONNX Runtime CUDA / CPU fallback / model input layout / label merge の環境依存回帰を通常品質改善から分離して扱う。
 - 対象:
   - `tagger.wd14_onnx`
   - `tagger.pixai_onnx`
   - `tagger.labels_util`
+  - `tagger.onnx_backend`
 - 作業:
-  - ONNX Runtime 不足、CUDA provider 不足、モデルファイル不足、labels CSV 不整合の user-facing error をテストする。
-  - CPU fallback と GPU provider 選択のログを確認できるようにする。
-  - 大きい backend 本体から provider selection / input layout / label postprocess を小さく切る。
+  - ONNX Runtime 不足、CUDA provider 不足、モデルファイル不足、labels CSV 不整合の user-facing error をテストする。モデルファイル不足、tags CSV 不足、空 labels、出力次元と label 数の不整合を追加済み。
+  - CPU fallback と GPU provider 選択のログを確認できるようにする。`plan_provider_attempts` で明示 CUDA 不在時の warning と auto fallback hint を固定済み。
+  - 大きい backend 本体から provider selection / input layout / label postprocess を小さく切る。provider selection / file existence / label count validation を `tagger.onnx_backend` へ分離済み。
 - 検証:
   - 通常: `.\scripts\check.ps1`
   - GPU / CUDA / open_clip に触った場合のみ: `.\scripts\check-gpu.ps1`

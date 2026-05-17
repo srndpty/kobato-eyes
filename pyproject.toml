@@ -140,6 +140,7 @@ files = [
     "src/tagger/base.py",
     "src/tagger/categories.py",
     "src/tagger/dummy.py",
+    "src/tagger/onnx_backend.py",
     "src/core/pipeline/stages/write_stage.py",
     "src/core/pipeline/maintenance.py",
     "src/services/db_writing.py",
