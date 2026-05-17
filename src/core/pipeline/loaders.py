@@ -19,7 +19,10 @@ from utils.env import safe_int
 
 logger = logging.getLogger(__name__)
 
-_DECODE_FALLBACK_ERRORS = (OSError, ValueError, RuntimeError, cv2.error)
+_CV2_ERROR = getattr(cv2, "error", RuntimeError)
+if not isinstance(_CV2_ERROR, type) or not issubclass(_CV2_ERROR, BaseException):
+    _CV2_ERROR = RuntimeError
+_DECODE_FALLBACK_ERRORS: tuple[type[BaseException], ...] = (OSError, ValueError, RuntimeError, _CV2_ERROR)
 
 
 _USE_TJ = os.getenv("KE_USE_TURBOJPEG", "1") != "0"
