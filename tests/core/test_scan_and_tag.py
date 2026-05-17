@@ -167,6 +167,26 @@ def test_scan_and_tag_treats_write_stage_failure_result_as_failure(
         scan_and_tag(root)
 
 
+def test_scan_and_tag_treats_write_stage_cancel_as_cancelled_stats(
+    temp_env: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "library"
+    root.mkdir()
+    image_path = root / "cancelled-write.png"
+    _write_png(image_path)
+
+    class CancellingWriteStage:
+        def run(self, ctx, emitter, tag_result):  # noqa: ANN001 - signature defined by production class
+            return SimpleNamespace(written=0, fts_processed=0, success=False, cancelled=True, error=None)
+
+    monkeypatch.setattr(manual_refresh, "WriteStage", CancellingWriteStage)
+
+    stats = scan_and_tag(root)
+
+    assert stats["cancelled"] is True
+    assert stats["tagged"] == 0
+
+
 def test_scan_and_tag_soft_deletes_missing(temp_env: Path, tmp_path: Path) -> None:
     root = tmp_path / "library"
     root.mkdir()

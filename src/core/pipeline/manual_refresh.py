@@ -443,7 +443,11 @@ def scan_and_tag(
             except Exception:
                 logger.exception("Manual tag refresh: write stage failed")
                 raise
-            if not getattr(write_result, "success", True):
+            if getattr(write_result, "cancelled", False):
+                cancelled = True
+                logger.info("Manual tag refresh: write stage cancelled")
+                tagged = int(getattr(write_result, "written", tagged))
+            elif not getattr(write_result, "success", True):
                 error = str(getattr(write_result, "error", "") or "write stage failed")
                 logger.error("Manual tag refresh: write stage reported failure: %s", error)
                 raise RuntimeError(error)

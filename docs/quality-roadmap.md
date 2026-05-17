@@ -3,7 +3,7 @@
 ## 現状
 
 - 基準チェック: `.\scripts\check.ps1`
-- 直近の基準値: `356 passed, 39 deselected`
+- 直近の基準値: `357 passed, 39 deselected`
 - 総カバレッジ: `78%`
 - mypy対象: `45 source files`
 - CI構成: unit, integration, gui-smoke, db-stress, package-smoke を分離済み
