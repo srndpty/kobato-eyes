@@ -310,14 +310,15 @@ class PixaiOnnxTagger(WD14Tagger):
         hard_cap = max(1, int(getattr(self, "_topk_cap", 128)))
 
         for row in probs:
+            row_arr: np.ndarray = np.asarray(row, dtype=np.float32)
             # 先頭1枚だけ実インデックスと現在マッピング名をダンプ
             if not hasattr(self, "_dbg_top_once"):
                 self._dbg_top_once = True
-                row = probs[0]  # 先頭画像
-                top_idx = np.argsort(row)[-10:][::-1]
-                pairs = [(int(i), self._label_name_cache[int(i)], float(row[int(i)])) for i in top_idx]
+                first_row: np.ndarray = np.asarray(probs[0], dtype=np.float32)
+                top_idx = np.argsort(first_row)[-10:][::-1]
+                pairs = [(int(i), self._label_name_cache[int(i)], float(first_row[int(i)])) for i in top_idx]
                 logger.info("PixAI TOP10 indices (current mapping): %s", pairs)
-            base = {names[idx]: (float(row[idx]), cats[idx]) for idx in range(len(names))}
+            base = {names[idx]: (float(row_arr[idx]), cats[idx]) for idx in range(len(names))}
             merged = self._merge_copyrights(base)
             raw_predictions: list[TagPrediction] = []
             for tag_name, (score, category_value) in merged.items():
