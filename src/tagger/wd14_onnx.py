@@ -20,6 +20,7 @@ from tagger.labels_util import load_selected_tags
 from tagger.onnx_backend import (
     CPU_PROVIDER,
     CUDA_PROVIDER,
+    cuda_provider_options,
     plan_provider_attempts,
     resolve_existing_file,
     validate_label_count,
@@ -139,10 +140,16 @@ class WD14Tagger(ITagger):
         chosen_providers: list[str] | None = None
         for provider_list in provider_attempts:
             try:
+                provider_options = cuda_provider_options(provider_list)
+                session_kwargs: dict[str, object] = {
+                    "sess_options": session_options,
+                    "providers": provider_list,
+                }
+                if provider_options is not None:
+                    session_kwargs["provider_options"] = provider_options
                 session = ort.InferenceSession(
                     str(self._model_path),
-                    sess_options=session_options,
-                    providers=provider_list,
+                    **session_kwargs,
                 )
             except Exception as exc:  # pragma: no cover - handled in tests via mocks
                 # Failure policy: automatic CUDA attempt may fall back to CPU;
@@ -903,7 +910,12 @@ def _configure_session_options(options: "ort.SessionOptions") -> None:
     """Apply default optimisation, logging, and profiling settings."""
 
     options.graph_optimization_level = getattr(ort.GraphOptimizationLevel, "ORT_ENABLE_ALL", 99)
-    import os
+    intra_threads = _safe_positive_int(os.getenv("KE_ORT_INTRA_OP_THREADS"))
+    inter_threads = _safe_positive_int(os.getenv("KE_ORT_INTER_OP_THREADS"))
+    if intra_threads is not None:
+        options.intra_op_num_threads = intra_threads
+    if inter_threads is not None:
+        options.inter_op_num_threads = inter_threads
 
     options.enable_profiling = bool(int(os.getenv("KE_ORT_PROFILE", "0")))
     options.log_severity_level = 2
@@ -912,6 +924,18 @@ def _configure_session_options(options: "ort.SessionOptions") -> None:
     options.profile_file_prefix = str(profile_dir / "wd14")
     if options.enable_profiling:
         logger.info("WD14: profiling enabled (prefix=%s)", options.profile_file_prefix)
+
+
+def _safe_positive_int(value: str | None) -> int | None:
+    """Parse a positive integer environment value."""
+
+    if not value:
+        return None
+    try:
+        parsed = int(value)
+    except ValueError:
+        return None
+    return parsed if parsed > 0 else None
 
 
 def _log_provider_details(session: "ort.InferenceSession", chosen: Sequence[str]) -> None:
