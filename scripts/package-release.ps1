@@ -3,6 +3,7 @@ param(
     [ValidatePattern('^v?[0-9]+(\.[0-9]+){1,2}([-.][A-Za-z0-9.]+)?$')]
     [string]$Version,
 
+    [ValidatePattern('^[A-Za-z0-9._-]+$')]
     [string]$Platform = "win-x64",
 
     [ValidateRange(0, 9)]
@@ -42,8 +43,15 @@ function Assert-InProject {
     )
 
     $FullPath = [System.IO.Path]::GetFullPath($Path)
-    $RootPath = [System.IO.Path]::GetFullPath($ProjectRoot)
-    if (-not $FullPath.StartsWith($RootPath, [StringComparison]::OrdinalIgnoreCase)) {
+    $RootPath = [System.IO.Path]::GetFullPath($ProjectRoot).TrimEnd(
+        [System.IO.Path]::DirectorySeparatorChar,
+        [System.IO.Path]::AltDirectorySeparatorChar
+    )
+    $RootWithSeparator = $RootPath + [System.IO.Path]::DirectorySeparatorChar
+    if (
+        -not $FullPath.Equals($RootPath, [StringComparison]::OrdinalIgnoreCase) -and
+        -not $FullPath.StartsWith($RootWithSeparator, [StringComparison]::OrdinalIgnoreCase)
+    ) {
         throw "Refusing to operate outside project root: $FullPath"
     }
 }
