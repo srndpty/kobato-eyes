@@ -1,3 +1,5 @@
+"""Tests for manual scan-and-tag refresh behaviour."""
+
 from __future__ import annotations
 
 import base64
@@ -64,6 +66,13 @@ def _make_sha(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def _write_png(path: Path) -> None:
+    png_bytes = base64.b64decode(
+        b"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR4nGNgYAAAAAMAASsJTYQAAAAASUVORK5CYII="
+    )
+    path.write_bytes(png_bytes)
+
+
 def test_scan_and_tag_missing_root_returns_empty_stats(tmp_path: Path) -> None:
     missing_root = tmp_path / "does-not-exist"
 
@@ -98,10 +107,7 @@ def test_scan_and_tag_deduplicates_paths(temp_env: Path, tmp_path: Path, fake_pi
     root = tmp_path / "library"
     root.mkdir()
     image_path = root / "untagged.png"
-    png_bytes = base64.b64decode(
-        b"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR4nGNgYAAAAAMAASsJTYQAAAAASUVORK5CYII="
-    )
-    image_path.write_bytes(png_bytes)
+    _write_png(image_path)
 
     db_path = paths.get_db_path()
     conn = get_conn(db_path)
@@ -123,6 +129,62 @@ def test_scan_and_tag_deduplicates_paths(temp_env: Path, tmp_path: Path, fake_pi
     assert stats["tagged"] == 1
     assert len(fake_pipeline["tag"]) == 1
     assert fake_pipeline["tag"][0] == [image_path.resolve()]
+
+
+def test_scan_and_tag_propagates_tag_stage_failure(
+    temp_env: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "library"
+    root.mkdir()
+    image_path = root / "broken-tag.png"
+    _write_png(image_path)
+
+    class FailingTagStage:
+        def run(self, ctx, emitter, records):  # noqa: ANN001 - signature defined by production class
+            raise RuntimeError("tag stage exploded")
+
+    monkeypatch.setattr(manual_refresh, "TagStage", FailingTagStage)
+
+    with pytest.raises(RuntimeError, match="tag stage exploded"):
+        scan_and_tag(root)
+
+
+def test_scan_and_tag_treats_write_stage_failure_result_as_failure(
+    temp_env: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "library"
+    root.mkdir()
+    image_path = root / "broken-write.png"
+    _write_png(image_path)
+
+    class FailingWriteStage:
+        def run(self, ctx, emitter, tag_result):  # noqa: ANN001 - signature defined by production class
+            return SimpleNamespace(written=0, fts_processed=0, success=False, error="writer stopped")
+
+    monkeypatch.setattr(manual_refresh, "WriteStage", FailingWriteStage)
+
+    with pytest.raises(RuntimeError, match="writer stopped"):
+        scan_and_tag(root)
+
+
+def test_scan_and_tag_treats_write_stage_cancel_as_cancelled_stats(
+    temp_env: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "library"
+    root.mkdir()
+    image_path = root / "cancelled-write.png"
+    _write_png(image_path)
+
+    class CancellingWriteStage:
+        def run(self, ctx, emitter, tag_result):  # noqa: ANN001 - signature defined by production class
+            return SimpleNamespace(written=0, fts_processed=0, success=False, cancelled=True, error=None)
+
+    monkeypatch.setattr(manual_refresh, "WriteStage", CancellingWriteStage)
+
+    stats = scan_and_tag(root, is_cancelled=lambda: False)
+
+    assert stats["cancelled"] is True
+    assert stats["tagged"] == 0
 
 
 def test_scan_and_tag_soft_deletes_missing(temp_env: Path, tmp_path: Path) -> None:

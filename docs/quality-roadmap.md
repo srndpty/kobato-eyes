@@ -3,53 +3,63 @@
 ## 現状
 
 - 基準チェック: `.\scripts\check.ps1`
-- 直近の基準値: `346 passed, 35 deselected`
-- 総カバレッジ: `81%`
-- mypy対象: 45ファイルへ段階拡大済み
-- DBストレスチェック: `.\scripts\check-db-stress.ps1` 成功（`8 passed, 373 deselected`）
-- Integrationチェック: `.\scripts\check-integration.ps1` 成功（`7 passed, 374 deselected`）
+- 直近の基準値: `357 passed, 39 deselected`
+- 総カバレッジ: `78%`
+- mypy対象: `45 source files`
+- CI構成: unit, integration, gui-smoke, db-stress, package-smoke を分離済み
+- 最大リスク:
+  - `ui.tags_tab` と `ui.dup_tab` が巨大で、UI状態・worker・DB操作の境界が読みづらい。
+  - `services.db_writing` と `core.pipeline` 周辺に broad `except Exception` が残っている。
+  - 標準チェックは GUI / integration / db_stress を除外するため、変更内容に応じた追加確認が必要。
 
-## 短期: データ整合性と検索安定性
+## 短期: DB / pipeline の失敗境界を固定する
 
-- 目的: タグ書き込み後に検索結果が古いまま残る事故を防ぐ。
-- 対象: `core.pipeline.stages.write_stage`, `services.db_writing`, `db.fts_offline`
+- 目的: DB書き込み、FTS再構築、quiesce、checkpoint の失敗時に成功扱いへ流れないようにする。
+- 対象: `core.pipeline.manual_refresh`, `core.pipeline.loaders`, `core.pipeline.stages.write_stage`, `services.db_writing`
 - 完了条件:
-  - DB writer失敗時に成功扱いの結果を返さない。
-  - 高速書き込みでFTS更新を省略した後、オフラインFTS再構築が実行される。
-  - SQLiteロック解除とFTS再構築がテストで固定されている。
+  - 失敗を伝播すべき処理、best effort cleanup、環境依存 fallback の分類がコードまたはテストで明確になっている。
+  - `docs/exception-audit-db-pipeline.md` の残タスクを順次解消する。
+  - 意図的に握りつぶす cleanup 失敗はログ確認テストまたは近接コメントで理由を残す。
 - 検証:
-  - `pytest tests/core/pipeline/test_write_stage.py -q`
-  - `pytest tests/db/test_fts_offline.py -q`
-  - `.\scripts\check-db-stress.ps1`
+  - `.\scripts\check.ps1`
   - `.\scripts\check-integration.ps1`
+  - `.\scripts\check-db-stress.ps1`
 
-## 中期: 型チェックと例外境界
+## 中期: UI worker と巨大タブを段階分割する
 
-- 目的: DB、pipeline、重複検出、検索UI workerの回帰を早期に検出する。
-- 対象: `db/`, `core/pipeline/`, `dup/`, `sig/`, 小型 `ui/` ヘルパー
+- 目的: UIフリーズ、キャンセル後の状態破損、worker例外の見落としを減らす。
+- 対象: `ui.tags_tab`, `ui.dup_tab`, `ui.search_worker`, `ui.dup_workers`, `ui.thumbnail_tasks`, `ui.file_actions`
 - 完了条件:
-  - mypy対象を45ファイル以上に維持する。
-  - 新規に追加するDB/pipeline/serviceモジュールは原則mypy対象に入れる。
-  - `except Exception` はログ、ユーザー通知、復旧可否のいずれかを明確にする。
+  - 検索、サムネイル、コピー、重複 scan/refine、trash/export を helper / viewmodel / worker 単位で小さく切り出す。
+  - `tags_tab.py` と `dup_tab.py` は一括リライトせず、分割前に既存挙動を smoke / headless テストで固定する。
+  - `dup_widgets.py`, `dup_workers.py`, `tag_stats.py`, `spinner_overlay.py`, `thumbnail_tasks.py`, `file_actions.py` の主要な成功系と失敗系をテストする。
+- 検証:
+  - `.\scripts\check.ps1`
+  - `.\scripts\check-gui-smoke.ps1`
+
+## 長期: 型チェックとカバレッジの重点を広げる
+
+- 目的: DB、pipeline、service で固めた型チェックを UI worker / viewmodel へ広げる。
+- 完了条件:
+  - 新規 core / db / service / worker モジュールは原則 mypy 対象へ追加する。
+  - 既存の mypy 対象 `45 source files` を下回らない。
+  - DB / pipeline / search worker は高水準のカバレッジを維持する。
+  - 巨大 UI 本体は総カバレッジ数値より、分割後の境界テストと状態遷移テストを優先する。
 - 検証:
   - `python -m mypy`
   - `python -m ruff check .`
+  - `.\scripts\check-package-smoke.ps1`（import構造、tools、packaging、モジュール先頭に触れた場合）
 
-## 長期: UI分割と操作中断の堅牢化
+## 環境依存チェック
 
-- 目的: `tags_tab.py` と `dup_tab.py` の巨大クラスを縮小し、UIフリーズと状態破損を減らす。
-- 対象: `ui.tags_tab`, `ui.dup_tab`, `ui.viewmodels`, `ui.search_worker`
-- 完了条件:
-  - DBアクセス、ファイル操作、表示モデル更新を小さなサービスまたはヘルパーへ分離する。
-  - 検索、重複検出、サムネイル生成のキャンセル時にUI状態が復帰する。
-  - GUI smokeテストで主要操作の空結果、例外、キャンセルを固定する。
-- 検証:
-  - `pytest tests/ui -q`
-  - `pytest -m "gui or smoke" -q`
+- GPU / ONNX Runtime CUDA / open_clip / 推論backendに触る変更だけ `.\scripts\check-gpu.ps1` を使う。
+- GPU精度改善やモデル更新は通常の品質改善とは別トラックで扱う。
+- PyQt6実backend、`core.jobs`、QThread / QRunnable、pipeline、DB bootstrap、GUI / integration / smokeに触った場合は、該当する CI 再現コマンドを実行または案内する。
 
 ## 運用ルール
 
 - Windows + Python 3.10を主対象にする。
-- GPU/ONNX実推論の精度改善は別トラックで扱う。
-- カバレッジは全体数値だけでなく、DB、pipeline、検索workerの重要分岐を優先する。
+- `PYTHONPATH=src` を前提にする。
+- ロードマップ更新時は `.\scripts\check.ps1` の実測値を記録する。
+- カバレッジは全体数値だけでなく、DB、pipeline、検索worker、UI worker の重要分岐を優先する。
 - UI巨大ファイルは一括リライトせず、テストを追加してから小さく切り出す。

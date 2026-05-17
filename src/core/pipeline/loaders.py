@@ -1,3 +1,5 @@
+"""Image prefetch loaders used by the tagging pipeline."""
+
 from __future__ import annotations
 
 import logging
@@ -17,15 +19,22 @@ from utils.env import safe_int
 
 logger = logging.getLogger(__name__)
 
+_CV2_ERROR = getattr(cv2, "error", RuntimeError)
+if not isinstance(_CV2_ERROR, type) or not issubclass(_CV2_ERROR, BaseException):
+    _CV2_ERROR = RuntimeError
+_DECODE_FALLBACK_ERRORS: tuple[type[BaseException], ...] = (OSError, ValueError, RuntimeError, _CV2_ERROR)
+
 
 _USE_TJ = os.getenv("KE_USE_TURBOJPEG", "1") != "0"
 _TJ = None
+_TJPF_BGR = None
 if _USE_TJ:
     try:
         from turbojpeg import TJPF, TurboJPEG  # type: ignore
 
         _TJ = TurboJPEG()
-    except Exception as e:
+        _TJPF_BGR = TJPF.BGR
+    except (ImportError, OSError, RuntimeError) as e:
         logger.info("TurboJPEG not available (%s); falling back to OpenCV/PIL", e)
         _TJ = None
 
@@ -85,6 +94,7 @@ class PrefetchLoaderPrepared:
             current_workers = safe_int(env_workers, current_workers, min_value=1)
         self._io_workers = current_workers
         self._tagger = tagger
+        self._producer_error: BaseException | None = None
 
         # (paths, np_batch, sizes) or None(sentinal)
         self._q: "queue.Queue[tuple[list[str], np.ndarray, list[tuple[int,int]]] | None]" = queue.Queue(self._depth)
@@ -106,12 +116,12 @@ class PrefetchLoaderPrepared:
                 # ヘッダから元サイズ取得
                 try:
                     w, h, _, _ = _TJ.decode_header(buf)
-                except Exception:
+                except _DECODE_FALLBACK_ERRORS:
                     # ヘッダ取れない超古い JPEG 等は一旦フルで読んで形状から決める
-                    tmp = _TJ.decode(buf, pixel_format=TJPF.BGR)
+                    tmp = _TJ.decode(buf, pixel_format=_TJPF_BGR)
                     h, w = tmp.shape[:2]
                 scale = _choose_tj_scale(w, h)
-                bgr = _TJ.decode(buf, pixel_format=TJPF.BGR, scaling_factor=scale)
+                bgr = _TJ.decode(buf, pixel_format=_TJPF_BGR, scaling_factor=scale)
                 # ここで軽く TARGET 付近へ
                 hh, ww = bgr.shape[:2]
                 side = max(hh, ww)
@@ -139,7 +149,7 @@ class PrefetchLoaderPrepared:
             H0, W0 = (im.shape[0], im.shape[1]) if im.ndim >= 2 else (hh, ww)
             return (p, rgb, (int(W0), int(H0)))
 
-        except Exception as e:
+        except _DECODE_FALLBACK_ERRORS as e:
             logger.warning("PrefetchLoaderPrepared: failed to load %s: %s (fallback PIL)", p, e)
             # --- フォールバック: PIL ---
             try:
@@ -154,7 +164,7 @@ class PrefetchLoaderPrepared:
                     # bgr = np.asarray(rgb)[:, :, ::-1]  # RGB->BGR
                     rgb_arr = np.asarray(rgb)  # ここはそのままRGB
                     return (p, rgb_arr, (w, h))
-            except Exception as e2:
+            except _DECODE_FALLBACK_ERRORS as e2:
                 logger.warning("PrefetchLoaderPrepared: PIL fallback also failed %s: %s", p, e2)
                 return (p, None, None)
 
@@ -209,6 +219,7 @@ class PrefetchLoaderPrepared:
                     if self._stop.is_set():
                         break
         except Exception as e:
+            self._producer_error = e
             logger.error("PrefetchLoaderPrepared: producer failed: %s", e, exc_info=True)
         finally:
             # 終端シグナルは必ず入れる（ブロッキングでOK）
@@ -225,6 +236,8 @@ class PrefetchLoaderPrepared:
                     return
                 continue
             if item is None:
+                if self._producer_error is not None:
+                    raise RuntimeError("PrefetchLoaderPrepared producer failed") from self._producer_error
                 return
             yield item
 

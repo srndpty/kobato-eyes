@@ -1,3 +1,5 @@
+"""Manual refresh pipeline for tagging selected files or roots."""
+
 from __future__ import annotations
 
 import logging
@@ -431,20 +433,29 @@ def scan_and_tag(
             tag_result = tag_stage.run(ctx, emitter, records)
         except Exception:
             logger.exception("Manual tag refresh: tagging stage failed")
-            tag_result = None
+            raise
 
-        tagged = tag_result.tagged_count if tag_result is not None else 0
+        tagged = tag_result.tagged_count
 
-        if tag_result is not None and not emitter.cancelled(ctx.is_cancelled):
+        if not emitter.cancelled(ctx.is_cancelled):
             try:
-                write_stage.run(ctx, emitter, tag_result)
+                write_result = write_stage.run(ctx, emitter, tag_result)
             except Exception:
                 logger.exception("Manual tag refresh: write stage failed")
+                raise
+            if getattr(write_result, "cancelled", False):
+                cancelled = True
+                logger.info("Manual tag refresh: write stage cancelled")
+                tagged = int(getattr(write_result, "written", tagged))
+            elif not getattr(write_result, "success", True):
+                error = str(getattr(write_result, "error", "") or "write stage failed")
+                logger.error("Manual tag refresh: write stage reported failure: %s", error)
+                raise RuntimeError(error)
 
         elapsed = time.perf_counter() - start_time
         stats_out["tagged"] = tagged
         stats_out["elapsed_sec"] = elapsed
-        stats_out["cancelled"] = emitter.cancelled(ctx.is_cancelled)
+        stats_out["cancelled"] = cancelled or emitter.cancelled(ctx.is_cancelled)
         logger.info(
             "Manual tag refresh complete: tagged %d of %d file(s) in %.2fs (missing removed=%d, hard=%s)",
             tagged,
@@ -457,7 +468,10 @@ def scan_and_tag(
         return stats_out
     finally:
         if conn is not None:
-            conn.close()
+            try:
+                conn.close()
+            except Exception:
+                logger.exception("Failed to close database connection after manual refresh")
         if tagger is not None:
             closer = getattr(tagger, "close", None)
             if callable(closer):
@@ -471,7 +485,7 @@ def scan_and_tag(
 
             gc.collect()
         except Exception:
-            pass
+            logger.debug("gc.collect() failed after manual refresh", exc_info=True)
 
 
 __all__ = ["scan_and_tag"]
