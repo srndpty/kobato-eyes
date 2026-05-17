@@ -6,8 +6,8 @@
 - 基準チェック: `.\scripts\check.ps1`
 - 直近の基準値: `399 passed, 40 deselected`
 - 総カバレッジ: `80%`
-- mypy対象: `53 source files`
-- GUI smoke: `27 passed, 405 deselected`
+- mypy対象: `58 source files`
+- GUI smoke: `27 passed, 412 deselected`
 - integration: `7 passed, 414 deselected`
 - db_stress: `8 passed, 413 deselected`
 - package smoke: compile package smoke OK
@@ -31,7 +31,9 @@
 - `utils.image_io` は巨大画像 skip、壊れた画像、pixel cap 復元、RGB変換時 close をテスト済み。
 - `dup.scanner` は BLOB / hex pHash、embedding 不一致時の fallback をテスト済み。
 - `DuplicateScanRunnable` は不正 row skip と file_id 型不正時の error signal をテスト済み。
-- mypy 対象を `45 source files` から `53 source files` に拡張済み。
+- フェーズ4: `ui.index_feedback`, `ui.dup_status`, `ui.thumbnail_tasks`, `ui.tag_rendering`, `ui.viewmodels.settings_view_model`, `tagger.labels_util` を mypy 対象へ追加済み。
+- フェーズ4: `ui.dup_refine_parallel` の public refine helpers に Protocol / callback 型を付け、未型付け関数 note を解消済み。
+- mypy 対象を `45 source files` から `58 source files` に拡張済み。
 
 ## 現在の主要リスク
 
@@ -102,7 +104,7 @@
   - `.\scripts\check-gui-smoke.ps1`
   - 実データ fixture を追加した場合は該当 integration test
 
-## 次フェーズ 4: 型チェック対象を UI / tagger へ広げる
+## 完了フェーズ 4: 型チェック対象を UI / tagger へ広げる
 
 - 目的: 非同期 worker、viewmodel、画像 IO で固めた型チェックを、残る UI helper と tagger backend へ広げる。
 - 現在維持する対象:
@@ -111,7 +113,7 @@
   - `src/ui/file_actions.py`
   - `src/ui/viewmodels/dup_view_model.py`
   - `src/utils/image_io.py`
-- 次の追加候補:
+- 追加済み:
   - `src/ui/index_feedback.py`
   - `src/ui/dup_status.py`
   - `src/ui/thumbnail_tasks.py`
@@ -124,9 +126,9 @@
   - `src/ui/tags_tab.py`
   - `src/ui/dup_tab.py`
 - 完了条件:
-- mypy 対象 `53 source files` を下回らない。
+  - mypy 対象 `58 source files` を下回らない。
   - 新規 core / db / service / worker / helper モジュールは原則 mypy 対象へ追加する。
-  - `src/ui/dup_refine_parallel.py` の未型付け関数に由来する mypy note を減らす。
+  - `src/ui/dup_refine_parallel.py` の未型付け関数に由来する mypy note を減らす。完了。
 - 検証:
   - `python -m mypy`
   - `python -m ruff check .`

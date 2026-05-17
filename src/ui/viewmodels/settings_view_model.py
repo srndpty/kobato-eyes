@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Callable, Iterable
+from typing import Callable, Iterable, Protocol
 
 from PyQt6.QtCore import QObject, pyqtSignal
 
@@ -13,6 +13,13 @@ from db.admin import reset_database as _reset_database
 from utils.paths import get_db_path as _get_db_path
 
 logger = logging.getLogger(__name__)
+
+
+class _ResetDatabase(Protocol):
+    """Callable shape used by :class:`SettingsViewModel` for DB reset."""
+
+    def __call__(self, db_path: str | Path, *, backup: bool) -> dict[str, object]:
+        """Reset the database and return reset metadata."""
 
 
 def _default_provider_loader() -> list[str]:
@@ -34,7 +41,7 @@ class SettingsViewModel(QObject):
         parent: QObject | None = None,
         *,
         db_path: Path | None = None,
-        reset_database: Callable[[Path, bool], dict[str, object]] = _reset_database,
+        reset_database: _ResetDatabase = _reset_database,
         provider_loader: Callable[[], Iterable[str]] = _default_provider_loader,
     ) -> None:
         super().__init__(parent)
@@ -79,8 +86,8 @@ class SettingsViewModel(QObject):
             thresholds=dict(previous_tagger.thresholds),
         )
         settings = PipelineSettings(
-            roots=list(roots),
-            excluded=list(excluded),
+            roots=[str(path) for path in roots],
+            excluded=[str(path) for path in excluded],
             batch_size=batch_size,
             tagger=tagger_settings,
         )

@@ -148,9 +148,8 @@ def _parse_row(cells: list[str]) -> TagMeta | None:
     else:
         first = cells[0]
         name = first
-        second = cells[1] if cell_count > 1 else None
-        third = cells[2] if cell_count > 2 else None
-        category = _parse_category(second)
+        third = cells[2] if cell_count > 2 else ""
+        category = _parse_category(cells[1] if cell_count > 1 else None)
         if cell_count > 2:
             count = _parse_count(third)
         if cell_count > 3:

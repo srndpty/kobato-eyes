@@ -5,14 +5,55 @@ from __future__ import annotations
 import logging
 import os
 from collections import Counter
+from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from threading import Lock
+from typing import Any, Protocol, TypeVar, cast
 
 import numpy as np
 from PIL import Image, ImageOps
 
 log = logging.getLogger("ui.dup_refine")
+
+
+class _RefineFile(Protocol):
+    """File fields required by the refinement helpers."""
+
+    file_id: int
+    path: Path
+
+
+class _RefineEntry(Protocol):
+    """Cluster-entry fields required by the refinement helpers."""
+
+    file: _RefineFile
+
+
+class _RefineCluster(Protocol):
+    """Cluster fields required by the refinement helpers."""
+
+    files: Sequence[_RefineEntry]
+    keeper_id: int
+
+
+class _TileTick(Protocol):
+    """Progress callback for tilehash refinement."""
+
+    def __call__(self, done: int, total: int, *, phase: int) -> None:
+        """Emit tilehash progress."""
+
+
+_ClusterT = TypeVar("_ClusterT", bound=_RefineCluster)
+_CancelCallback = Callable[[], bool]
+_PixelTick = Callable[[int, int], None]
+
+
+def _rebuild_cluster_like(cluster: _ClusterT, files: Sequence[_RefineEntry]) -> _ClusterT:
+    """Return a cluster of the same runtime type with a narrowed file list."""
+
+    factory = cast(Any, type(cluster))
+    return cast(_ClusterT, factory(files=list(files), keeper_id=cluster.keeper_id))
 
 
 def tile_ahash_bits(path: Path, grid: int = 4, tile: int = 8) -> int:
@@ -70,14 +111,14 @@ def _format_failure_summary(
 
 
 def refine_by_tilehash_parallel(
-    clusters,
-    grid=4,
-    tile=8,
-    max_bits=32,
-    io_workers=None,
-    tick=None,  # tick(done, total, phase:int)
-    is_cancelled=None,  # is_cancelled() -> bool
-):
+    clusters: Sequence[_ClusterT],
+    grid: int = 4,
+    tile: int = 8,
+    max_bits: int = 32,
+    io_workers: int | None = None,
+    tick: _TileTick | None = None,
+    is_cancelled: _CancelCallback | None = None,
+) -> list[_ClusterT]:
     if is_cancelled and is_cancelled():
         return []
 
@@ -95,7 +136,7 @@ def refine_by_tilehash_parallel(
     failure_counts: Counter[str] = Counter()
     failure_samples: dict[str, Path | None] = {}
 
-    def _work(p: Path):
+    def _work(p: Path) -> tuple[Path, int]:
         return p, tile_ahash_bits(p, grid=grid, tile=tile)
 
     with ThreadPoolExecutor(max_workers=io_workers) as ex:
@@ -128,7 +169,7 @@ def refine_by_tilehash_parallel(
         )
 
     # --- phase 2: クラスタ絞り込み ---
-    out = []
+    out: list[_ClusterT] = []
     total2 = len(clusters)
     get = cache.get
     hamming = tile_hamming  # ローカル参照で少し速く
@@ -142,16 +183,16 @@ def refine_by_tilehash_parallel(
         if base is None:
             continue
 
-        oks = []
+        oks: list[_RefineEntry] = []
         for e in cl.files:
-            sig = get(_norm_path(e.file.path))
-            if sig is None:
+            member_sig = get(_norm_path(e.file.path))
+            if member_sig is None:
                 continue
-            if hamming(base, sig) <= max_bits:  # ← ここを tile_hamming に
+            if hamming(base, member_sig) <= max_bits:  # ← ここを tile_hamming に
                 oks.append(e)
 
         if len(oks) >= 2:
-            out.append(type(cl)(files=oks, keeper_id=cl.keeper_id))
+            out.append(_rebuild_cluster_like(cl, oks))
 
         if tick and (i % 16 == 0 or i == total2):
             tick(i, total2, phase=2)
@@ -159,7 +200,7 @@ def refine_by_tilehash_parallel(
     return out
 
 
-def _load_small_gray(path: Path, size=128):
+def _load_small_gray(path: Path, size: int = 128) -> np.ndarray:
     with Image.open(path) as opened:
         gray = ImageOps.fit(opened.convert("L"), (size, size), Image.Resampling.BILINEAR)
         return np.asarray(gray, dtype=np.uint8)
@@ -171,16 +212,15 @@ def _mae01(a: np.ndarray, b: np.ndarray) -> float:
 
 
 def refine_by_pixels_parallel(
-    clusters,
-    mae_thr=0.006,
-    thumb_size=128,
-    workers=None,
-    tick=None,  # tick(done, total)（単一フェーズ）
-    is_cancelled=None,
-):
+    clusters: Sequence[_ClusterT],
+    mae_thr: float = 0.006,
+    thumb_size: int = 128,
+    workers: int | None = None,
+    tick: _PixelTick | None = None,
+    is_cancelled: _CancelCallback | None = None,
+) -> list[_ClusterT]:
     total = len(clusters)
-    if workers is None:
-        workers = min(8, (os.cpu_count() or 4))  # CPU寄りなのでスレッド数は控えめでもOK
+    worker_count = workers if workers is not None else min(8, (os.cpu_count() or 4))
 
     keeper_failure_counts: Counter[str] = Counter()
     keeper_failure_samples: dict[str, Path | None] = {}
@@ -191,7 +231,7 @@ def refine_by_pixels_parallel(
     future_failure_counts: Counter[str] = Counter()
     future_failure_samples: dict[str, Path | None] = {}
 
-    def _process_cluster(cl):
+    def _process_cluster(cl: _ClusterT) -> _ClusterT | None:
         if is_cancelled and is_cancelled():
             return None
         keep = next((e for e in cl.files if e.file.file_id == cl.keeper_id), None)
@@ -206,7 +246,7 @@ def refine_by_pixels_parallel(
                 keeper_failure_samples.setdefault(key, keep.file.path)
             return None
 
-        oks = []
+        oks: list[_RefineEntry] = []
         for e in cl.files:
             try:
                 img = _load_small_gray(e.file.path, size=thumb_size)
@@ -218,12 +258,12 @@ def refine_by_pixels_parallel(
                     entry_failure_counts[key] += 1
                     entry_failure_samples.setdefault(key, e.file.path)
         if len(oks) >= 2:
-            return type(cl)(files=oks, keeper_id=cl.keeper_id)
+            return _rebuild_cluster_like(cl, oks)
         return None
 
-    out = []
+    out: list[_ClusterT] = []
     done = 0
-    with ThreadPoolExecutor(max_workers=workers) as ex:
+    with ThreadPoolExecutor(max_workers=worker_count) as ex:
         futs = {ex.submit(_process_cluster, cl): cl for cl in clusters}
         for f in as_completed(futs):
             if is_cancelled and is_cancelled():
