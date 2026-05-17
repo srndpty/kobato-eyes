@@ -236,9 +236,9 @@ class ThumbJob(QRunnable):
 
             with Image.open(self._path) as image:
                 image.load()
-                image = image.convert("RGB")
-                image.thumbnail(self._size, Image.Resampling.LANCZOS)
-                qimg = ImageQt(image).copy()
+                rgb_image = image.convert("RGB")
+                rgb_image.thumbnail(self._size, Image.Resampling.LANCZOS)
+                qimg = ImageQt(rgb_image).copy()
         except Exception as exc:
             if DEBUG_THUMBS:
                 logger.info("thumb worker error: %s %s", self._path, exc)
