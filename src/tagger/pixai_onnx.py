@@ -7,10 +7,10 @@ import json
 import logging
 import os
 from pathlib import Path
-from typing import Iterable, Mapping, Sequence
+from typing import Any, Iterable, Mapping, Sequence
 
+import cv2
 import numpy as np
-from PIL import Image
 
 from tagger.base import MaxTagsMap, TagCategory, TagPrediction, TagResult, ThresholdMap
 from tagger.labels_util import BROKEN_TAG_PREFIX, TagMeta, load_selected_tags
@@ -19,14 +19,6 @@ from tagger.onnx_backend import validate_label_count
 from .wd14_onnx import WD14Tagger, _sigmoid
 
 logger = logging.getLogger(__name__)
-
-
-def _normalize_np_chw(x: np.ndarray, mean: Sequence[float], std: Sequence[float]) -> np.ndarray:
-    # x: (3,H,W) in [0,1]
-    x = x.astype(np.float32, copy=False)
-    for c in range(3):
-        x[c] = (x[c] - mean[c]) / std[c]
-    return x
 
 
 class PixaiOnnxTagger(WD14Tagger):
@@ -111,8 +103,8 @@ class PixaiOnnxTagger(WD14Tagger):
             logger.warning("PixAI: preprocess.json not found; using fallback transforms")
             self._pixai_pp = []  # 後述のフォールバックで処理
 
-        # __init__ の末尾で呼ぶ
         self._try_fix_label_order_with_json()
+        self._refresh_pixai_fast_metadata()
 
     def _try_fix_label_order_with_json(self) -> None:
         # 1) JSON の場所を推定 or 指定
@@ -168,70 +160,87 @@ class PixaiOnnxTagger(WD14Tagger):
                 # 見つからないものは General に倒す（後工程で閾値＆プレースホルダ除外が効く）
                 new_cats.append(int(TagCategory.GENERAL))
         self._label_cat_cache = new_cats
+        self._effective_cats = list(new_cats)
 
         # 分布を再ログ
         vals, cnts = np.unique(np.array(self._label_cat_cache, dtype=np.int32), return_counts=True)
         logger.info("PixAI labels category distribution (after fix): %s", {int(v): int(c) for v, c in zip(vals, cnts)})
 
+    def _refresh_pixai_fast_metadata(self) -> None:
+        """Build PixAI lookup arrays used by hot preprocessing/postprocessing paths."""
+
+        self._pixai_label_names = np.array(self._label_name_cache, dtype=object)
+        self._pixai_effective_cats = np.array(self._effective_cats, dtype=np.int16)
+        self._pixai_name_to_idx = {name: idx for idx, name in enumerate(self._label_name_cache)}
+        self._pixai_cat_to_idx = {
+            int(cat): np.nonzero(self._pixai_effective_cats == int(cat))[0]
+            for cat in sorted(set(self._pixai_effective_cats.tolist()))
+        }
+        self._pixai_default_thr_vec = self._build_pixai_threshold_vector(self._default_thresholds)
+        mean, std = self._resolve_pixai_normalize()
+        self._pixai_mean_chw = np.asarray(mean, dtype=np.float32).reshape(3, 1, 1)
+        self._pixai_std_chw = np.asarray(std, dtype=np.float32).reshape(3, 1, 1)
+
+    def _resolve_pixai_normalize(self) -> tuple[Sequence[float], Sequence[float]]:
+        """Return normalization values from PixAI preprocess metadata."""
+
+        mean: Sequence[float] = [0.5, 0.5, 0.5]
+        std: Sequence[float] = [0.5, 0.5, 0.5]
+        for stage in self._pixai_pp or []:
+            stage_type = str(stage.get("type") or stage.get("op") or "").lower()
+            if stage_type == "normalize":
+                mean = stage.get("mean", mean)
+                std = stage.get("std", std)
+        return mean, std
+
     def prepare_batch_from_rgb_np(self, rgb_list: Sequence[np.ndarray]) -> np.ndarray:
         assert len(rgb_list) >= 1, "rgb_list empty"
-        # 入力検証
-        # a0 = rgb_list[0]
-        # logger.info(
-        #     "PixAI prepare: in[0] shape=%s dtype=%s min=%.3f max=%.3f",
-        #     getattr(a0, "shape", None),
-        #     getattr(a0, "dtype", None),
-        #     float(a0.min()),
-        #     float(a0.max()),
-        # )
-        out = []
-        # preprocess.json があれば mean/std を使い、なければ fallback を使う
-        mean = [0.5, 0.5, 0.5]
-        std = [0.5, 0.5, 0.5]
-        target = int(self._input_size)  # 例: 448
+        target = int(self._input_size)
+        batch = np.empty((len(rgb_list), 3, target, target), dtype=np.float32)
+        mean = self._pixai_mean_chw
+        std = self._pixai_std_chw
 
-        # preprocess.json から mean/std を拾えるよう軽いパーサ（なければデフォルト0.5/0.5）
-        for st in self._pixai_pp or []:
-            t = str(st.get("type") or st.get("op") or "").lower()
-            if t == "normalize":
-                mean = st.get("mean", mean)
-                std = st.get("std", std)
-
-        for arr in rgb_list:
-            # 1) PIL にして処理（アルファは白合成済みの想定。なければここで合成）
-            im = Image.fromarray(arr, mode="RGB")
-
-            # 2) PixAI はだいたい「短辺基準リサイズ + 中央クロップ」が多い
-            #    preprocess.json を厳密に再現できるならそれに従うのが最善。
-            #    ここでは汎用的な fallback を実装：
-            w, h = im.size
-            scale = target / min(w, h)
-            nw, nh = int(round(w * scale)), int(round(h * scale))
+        for index, arr in enumerate(rgb_list):
+            rgb = self._coerce_rgb_uint8(arr)
+            h, w = rgb.shape[:2]
+            scale = target / max(1, min(w, h))
+            nw = max(target, int(round(w * scale)))
+            nh = max(target, int(round(h * scale)))
             if (nw, nh) != (w, h):
-                im = im.resize((nw, nh), Image.Resampling.BICUBIC)
+                interp = cv2.INTER_AREA if scale < 1.0 else cv2.INTER_CUBIC
+                rgb = cv2.resize(rgb, (nw, nh), interpolation=interp)
 
-            # 中央クロップで target x target
-            left = (im.width - target) // 2
-            top = (im.height - target) // 2
-            im = im.crop((left, top, left + target, top + target))
+            left = max(0, (rgb.shape[1] - target) // 2)
+            top = max(0, (rgb.shape[0] - target) // 2)
+            cropped = rgb[top : top + target, left : left + target]
+            if cropped.shape[0] != target or cropped.shape[1] != target:
+                cropped = cv2.resize(cropped, (target, target), interpolation=cv2.INTER_CUBIC)
 
-            # 3) [H,W,3] -> [3,H,W], [0..255] -> [0..1] -> normalize
-            x = np.asarray(im, dtype=np.float32) / 255.0
-            x = np.transpose(x, (2, 0, 1))
-            x = _normalize_np_chw(x, mean, std)
+            chw = np.transpose(cropped, (2, 0, 1)).astype(np.float32, copy=False)
+            chw *= 1.0 / 255.0
+            batch[index] = (chw - mean) / std
 
-            out.append(x)
+        return np.ascontiguousarray(batch, dtype=np.float32)
 
-        # NCHW float32
-        batch = np.stack(out, axis=0)
-        # logger.info(
-        #     "PixAI prepare: out batch=%s dtype=%s min=%.3f max=%.3f",
-        #     batch.shape,
-        #     batch.dtype,
-        #     float(batch.min()),
-        #     float(batch.max()),
-        # )
-        return batch
+    @staticmethod
+    def _coerce_rgb_uint8(arr: np.ndarray) -> np.ndarray:
+        """Return an RGB uint8 image array suitable for PixAI preprocessing."""
+
+        rgb = np.asarray(arr)
+        if rgb.ndim == 2:
+            rgb = cv2.cvtColor(rgb, cv2.COLOR_GRAY2RGB)
+        elif rgb.ndim == 3 and rgb.shape[2] == 4:
+            base = rgb[:, :, :3].astype(np.float32)
+            alpha = rgb[:, :, 3:4].astype(np.float32) / 255.0
+            rgb = (base * alpha + 255.0 * (1.0 - alpha)).astype(np.uint8)
+        elif rgb.ndim == 3 and rgb.shape[2] >= 3:
+            rgb = rgb[:, :, :3]
+        else:
+            raise ValueError(f"PixAI: unsupported image array shape {getattr(rgb, 'shape', None)}")
+
+        if rgb.dtype != np.uint8:
+            rgb = np.clip(rgb, 0, 255).astype(np.uint8)
+        return np.ascontiguousarray(rgb)
 
     @staticmethod
     def _build_tag_meta_index(labels_csv: Path) -> dict[str, TagMeta]:
@@ -246,6 +255,19 @@ class PixaiOnnxTagger(WD14Tagger):
         else:
             return index
         return index
+
+    def _build_pixai_threshold_vector(self, thresholds: Mapping[Any, float]) -> np.ndarray:
+        """Build a per-label threshold vector using PixAI effective categories."""
+
+        names_count = len(getattr(self, "_label_name_cache", []))
+        vec = np.zeros((names_count,), dtype=np.float32)
+        cat_to_idx: Mapping[int, np.ndarray] = getattr(self, "_pixai_cat_to_idx", {})
+        for key, value in thresholds.items():
+            cat = int(key)
+            idx = cat_to_idx.get(cat)
+            if idx is not None and len(idx) > 0:
+                vec[idx] = float(value)
+        return vec
 
     def _merge_copyrights(
         self, probs_by_name: Mapping[str, tuple[float, int | TagCategory]]
@@ -291,23 +313,25 @@ class PixaiOnnxTagger(WD14Tagger):
         resolved_limits = self._resolve_max_tags(self._default_max_tags, max_tags)
         score_floor = float(getattr(self, "_score_floor", 0.0))
 
-        cat_thresholds: dict[int, float] = {}
-        for category in TagCategory:
-            base_thr = float(resolved_thr.get(category, 0.0))
-            cat_thresholds[int(category)] = max(base_thr, score_floor)
-
         cat_limits: dict[int, int | None] = {}
         for category in TagCategory:
             limit_value = resolved_limits.get(category)
             cat_limits[int(category)] = int(limit_value) if limit_value is not None else None
 
-        names = self._label_name_cache
-        # cats = self._label_cat_cache
-        cats = self._effective_cats
+        names = getattr(self, "_pixai_label_names", np.array(self._label_name_cache, dtype=object))
+        cats = getattr(self, "_pixai_effective_cats", np.array(self._effective_cats, dtype=np.int16))
         validate_label_count(int(logits.shape[1]), len(names), backend_name="PixAI")
+        thr_vec = (
+            self._pixai_default_thr_vec.copy()
+            if resolved_thr == self._default_thresholds
+            else self._build_pixai_threshold_vector(resolved_thr)
+        )
+        if score_floor > 0.0:
+            np.maximum(thr_vec, score_floor, out=thr_vec)
 
         results: list[TagResult] = []
-        hard_cap = max(1, int(getattr(self, "_topk_cap", 128)))
+        hard_cap = max(1, int(os.getenv("KE_PIXAI_TOPK_CAP", str(getattr(self, "_topk_cap", 128)))))
+        name_to_idx = getattr(self, "_pixai_name_to_idx", {})
 
         for row in probs:
             row_arr: np.ndarray = np.asarray(row, dtype=np.float32)
@@ -318,8 +342,24 @@ class PixaiOnnxTagger(WD14Tagger):
                 top_idx = np.argsort(first_row)[-10:][::-1]
                 pairs = [(int(i), self._label_name_cache[int(i)], float(first_row[int(i)])) for i in top_idx]
                 logger.info("PixAI TOP10 indices (current mapping): %s", pairs)
-            base = {names[idx]: (float(row_arr[idx]), cats[idx]) for idx in range(len(names))}
-            merged = self._merge_copyrights(base)
+
+            hit_mask = row_arr >= thr_vec
+            hit_count = int(hit_mask.sum())
+            if hit_count == 0:
+                results.append(TagResult(tags=[]))
+                continue
+
+            k = min(hit_count, hard_cap)
+            masked = np.where(hit_mask, row_arr, -np.inf)
+            cand_idx = np.argpartition(-masked, max(0, k - 1))[:k]
+            cand_sorted = cand_idx[np.argsort(-masked[cand_idx], kind="stable")]
+
+            merged: dict[str, tuple[float, int]] = {}
+            for idx in cand_sorted:
+                tag_name = str(names[int(idx)])
+                merged[tag_name] = (float(row_arr[int(idx)]), int(cats[int(idx)]))
+            merged = self._merge_candidate_copyrights(merged, row_arr, name_to_idx)
+
             raw_predictions: list[TagPrediction] = []
             for tag_name, (score, category_value) in merged.items():
                 # プレースホルダは常に捨てる（ユーザーに出さない）
@@ -329,7 +369,7 @@ class PixaiOnnxTagger(WD14Tagger):
                     category = TagCategory(int(category_value))
                 except ValueError:
                     continue
-                threshold = cat_thresholds.get(int(category), max(float(resolved_thr.get(category, 0.0)), score_floor))
+                threshold = max(float(resolved_thr.get(category, 0.0)), score_floor)
                 if float(score) < threshold:
                     continue
                 raw_predictions.append(TagPrediction(name=tag_name, score=float(score), category=category))
@@ -351,6 +391,38 @@ class PixaiOnnxTagger(WD14Tagger):
             results.append(TagResult(tags=taken))
 
         return results
+
+    def _merge_candidate_copyrights(
+        self,
+        candidates: Mapping[str, tuple[float, int | TagCategory]],
+        row: np.ndarray,
+        name_to_idx: Mapping[str, int],
+    ) -> dict[str, tuple[float, int]]:
+        """Merge copyright tags derived from candidate character predictions."""
+
+        merged: dict[str, tuple[float, int]] = {
+            name: (float(score), int(category)) for name, (score, category) in candidates.items()
+        }
+        for name, (score, category_value) in list(merged.items()):
+            try:
+                category = TagCategory(int(category_value))
+            except ValueError:
+                continue
+            if category != TagCategory.CHARACTER:
+                continue
+            meta = self._tag_meta_index.get(name)
+            if not meta or not meta.ips:
+                continue
+            for ip_name in meta.ips:
+                ip_score = float(score)
+                ip_idx = name_to_idx.get(ip_name)
+                if ip_idx is not None and 0 <= ip_idx < row.shape[0]:
+                    ip_score = max(ip_score, float(row[ip_idx]))
+                existing = merged.get(ip_name)
+                if existing is not None:
+                    ip_score = max(ip_score, float(existing[0]))
+                merged[ip_name] = (ip_score, int(TagCategory.COPYRIGHT))
+        return merged
 
     def predict(self, image: np.ndarray) -> list[tuple[str, float, TagCategory]]:
         """Run inference over a single preprocessed RGB image array."""

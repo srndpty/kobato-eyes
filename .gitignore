@@ -229,3 +229,6 @@ kobato-eyes.db
 !dev-data/db/.gitkeep
 !dev-data/index/.gitkeep
 !dev-data/cache/.gitkeep
+
+# temporary files
+tmp/

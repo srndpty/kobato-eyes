@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
@@ -61,10 +62,38 @@ def validate_label_count(output_dim: int, label_count: int, *, backend_name: str
         )
 
 
+def cuda_provider_options(provider_list: Iterable[str]) -> list[dict[str, str]] | None:
+    """Return optional ONNX Runtime provider options from environment variables."""
+
+    providers = list(provider_list)
+    if CUDA_PROVIDER not in providers:
+        return None
+
+    options_by_provider: dict[str, dict[str, str]] = {provider: {} for provider in providers}
+    cuda_options = options_by_provider.get(CUDA_PROVIDER, {})
+    mem_limit_mb = os.getenv("KE_ORT_CUDA_MEM_LIMIT_MB")
+    if mem_limit_mb:
+        try:
+            limit_bytes = max(1, int(mem_limit_mb)) * 1024 * 1024
+        except ValueError:
+            limit_bytes = 0
+        if limit_bytes > 0:
+            cuda_options["gpu_mem_limit"] = str(limit_bytes)
+
+    cudnn_search = os.getenv("KE_ORT_CUDA_CUDNN_CONV_ALGO_SEARCH")
+    if cudnn_search:
+        cuda_options["cudnn_conv_algo_search"] = cudnn_search
+
+    if not any(options_by_provider.values()):
+        return None
+    return [options_by_provider.get(provider, {}) for provider in providers]
+
+
 __all__ = [
     "CPU_PROVIDER",
     "CUDA_PROVIDER",
     "ProviderPlan",
+    "cuda_provider_options",
     "plan_provider_attempts",
     "resolve_existing_file",
     "validate_label_count",
