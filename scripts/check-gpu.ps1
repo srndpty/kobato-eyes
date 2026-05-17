@@ -18,6 +18,10 @@ $env:KOE_HEADLESS = "1"
 
 Write-Host "==> pytest gpu" -ForegroundColor Cyan
 & $Python -m pytest -m "gpu" -q
+if ($LASTEXITCODE -eq 5) {
+    Write-Host "No gpu tests collected; skipping gpu check." -ForegroundColor Yellow
+    exit 0
+}
 if ($LASTEXITCODE -ne 0) {
     throw "pytest gpu failed with exit code $LASTEXITCODE"
 }
