@@ -6,7 +6,7 @@
 - 基準チェック: `.\scripts\check.ps1`
 - 直近の基準値: `357 passed, 39 deselected`
 - 総カバレッジ: `78%`
-- mypy対象: `45 source files`
+- mypy対象: `50 source files`
 - CI構成: unit, integration, gui-smoke, db-stress, package-smoke を分離済み
 - 重点カバレッジ: `core.jobs`, `core.pipeline.retag`, `db.fts`, `ui.search_worker` は合計 `91%`
 
@@ -78,8 +78,8 @@
 - 目的: DB、pipeline、service で固めた型チェックを UI worker / viewmodel / IO 境界へ広げる。
 - 完了条件:
   - 新規 core / db / service / worker モジュールは原則 mypy 対象へ追加する。
-  - 既存の mypy 対象 `45 source files` を下回らない。
-  - 次の候補を段階的に mypy 対象へ追加する: `src/ui/index_tasks.py`, `src/ui/dup_workers.py`, `src/ui/file_actions.py`, `src/utils/image_io.py`
+  - 既存の mypy 対象 `50 source files` を下回らない。
+  - `src/ui/index_tasks.py`, `src/ui/dup_workers.py`, `src/ui/file_actions.py`, `src/ui/viewmodels/dup_view_model.py`, `src/utils/image_io.py` は mypy 対象として維持する。
   - `src/ui/dup_refine_parallel.py` の未型付け関数に由来する mypy note を減らす。
   - DB / pipeline / search worker は高水準のカバレッジを維持する。
   - 巨大 UI 本体は総カバレッジ数値より、分割後の境界テストと状態遷移テストを優先する。

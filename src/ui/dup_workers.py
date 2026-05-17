@@ -22,6 +22,14 @@ logger = logging.getLogger(__name__)
 DEBUG_THUMBS = False
 
 
+def _as_int(value: object) -> int:
+    """Convert database scalar values to int with a clear type boundary."""
+
+    if isinstance(value, (str, bytes, bytearray)) or hasattr(value, "__int__"):
+        return int(value)  # type: ignore[arg-type]
+    raise TypeError(f"expected int-compatible value, got {type(value).__name__}")
+
+
 class RefinePipelineSignals(QObject):
     """Signals emitted by duplicate refinement."""
 
@@ -127,7 +135,7 @@ class DuplicateScanRunnable(QRunnable):
 
             missing: list[tuple[int, str]] = []
             for row in rows:
-                file_id = int(row["file_id"])
+                file_id = _as_int(row["file_id"])
                 path = str(row["path"])
                 if row.get("phash_u64") is None:
                     missing.append((file_id, path))
@@ -149,7 +157,7 @@ class DuplicateScanRunnable(QRunnable):
                 computed_by_id = {file_id: (phash, dhash) for (file_id, phash, dhash) in computed}
                 patched = 0
                 for row in rows:
-                    pair = computed_by_id.get(int(row["file_id"]))
+                    pair = computed_by_id.get(_as_int(row["file_id"]))
                     if pair is not None:
                         row["phash_u64"] = int(pair[0])
                         patched += 1

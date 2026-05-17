@@ -113,3 +113,44 @@ def test_scanner_honours_ratio_and_cosine_thresholds() -> None:
     assert len(clusters) == 1
     ids = {entry.file.file_id for entry in clusters[0].files}
     assert ids == {2, 3, 4}
+
+
+def test_duplicate_file_from_row_accepts_blob_and_hex_hashes() -> None:
+    blob_file = DuplicateFile.from_row(
+        {
+            "file_id": 10,
+            "path": "blob.png",
+            "size": 12,
+            "width": 3,
+            "height": 4,
+            "phash_bytes": (123).to_bytes(8, "big"),
+        }
+    )
+    hex_file = DuplicateFile.from_row(
+        {
+            "id": 11,
+            "file_path": "hex.png",
+            "size": 12,
+            "width": 3,
+            "height": 4,
+            "phash_hex": "ff",
+        }
+    )
+
+    assert blob_file.file_id == 10
+    assert blob_file.phash == 123
+    assert hex_file.file_id == 11
+    assert hex_file.phash == 255
+
+
+def test_scanner_treats_missing_or_mismatched_embeddings_as_pass_through() -> None:
+    base_hash = 0x1234_5678_0000_0000
+    files = [
+        make_file(1, path="a.jpg", size=100, width=10, height=10, phash=base_hash, embedding=(1.0,)),
+        make_file(2, path="b.jpg", size=100, width=10, height=10, phash=base_hash, embedding=(1.0, 0.0)),
+    ]
+
+    clusters = DuplicateScanner(DuplicateScanConfig(hamming_threshold=0, cosine_threshold=0.99)).build_clusters(files)
+
+    assert len(clusters) == 1
+    assert {entry.file.file_id for entry in clusters[0].files} == {1, 2}

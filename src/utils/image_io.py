@@ -9,18 +9,25 @@ from collections import OrderedDict
 from contextlib import suppress
 from pathlib import Path
 from threading import Lock
+from typing import Any
 
 from PIL import Image, ImageFile, UnidentifiedImageError
 from PIL.Image import DecompressionBombError
 
 try:  # pragma: no cover - handled at runtime when PyQt6 is missing
-    from PyQt6.QtCore import Qt
-    from PyQt6.QtGui import QPixmap
+    from PyQt6.QtCore import Qt as _ImportedQt
+    from PyQt6.QtGui import QPixmap as _ImportedQPixmap
 except ImportError:  # pragma: no cover - simplifies headless testing environments
-    Qt = None  # type: ignore[assignment]
-    QPixmap = None  # type: ignore[assignment]
+    _QT_VALUE: Any = None
+    _QPIXMAP_VALUE: Any = None
+else:  # pragma: no cover - import depends on runtime environment
+    _QT_VALUE = _ImportedQt
+    _QPIXMAP_VALUE = _ImportedQPixmap
 
 from utils.paths import ensure_dirs, get_cache_dir
+
+Qt: Any = _QT_VALUE
+QPixmap: Any = _QPIXMAP_VALUE
 
 DEFAULT_THUMBNAIL_SIZE = (320, 320)
 _THUMB_CACHE_LIMIT = 256
@@ -60,7 +67,7 @@ def safe_load_image(
 
     try:
         # まずはヘッダだけでサイズを取る（ここは低コスト）
-        img = Image.open(p)  # デコード前
+        img: Image.Image = Image.open(p)  # デコード前
         w, h = img.size
         px = (w or 0) * (h or 0)
 
@@ -104,7 +111,11 @@ def safe_load_image(
             img.thumbnail((max_side, max_side), Image.Resampling.LANCZOS)
 
         if rgb and img.mode != "RGB":
-            img = img.convert("RGB")
+            converted = img.convert("RGB")
+            if converted is not img:
+                with suppress(Exception):
+                    img.close()
+            img = converted
         return img
 
     except (UnidentifiedImageError, OSError) as e:
@@ -126,9 +137,9 @@ def resize_image(
         if resampling is not None:  # Pillow >= 9.1
             resample = resampling.LANCZOS  # type: ignore[assignment]
         else:
-            resample = Image.LANCZOS
+            resample = Image.Resampling.LANCZOS
     copy = image.copy()
-    copy.thumbnail(size, resample)
+    copy.thumbnail(size, resample)  # type: ignore[arg-type]
     return copy
 
 
