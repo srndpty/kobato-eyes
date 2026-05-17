@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import csv
 import json
 import logging
 import os
@@ -94,7 +95,8 @@ class PixaiOnnxTagger(WD14Tagger):
                 len(self._effective_cats) - _from_meta,
                 dict(zip(uniq.tolist(), cnt.tolist())),
             )
-        except Exception:
+        except (TypeError, ValueError):
+            # Failure policy: category distribution logging is diagnostic-only.
             pass
 
         # 追加: preprocess.json をロード
@@ -237,8 +239,12 @@ class PixaiOnnxTagger(WD14Tagger):
         try:
             for meta in load_selected_tags(labels_csv):
                 index[meta.name] = meta
-        except Exception:
-            logger.warning("PixAI: failed to parse tag metadata from %s", labels_csv)
+        except (csv.Error, OSError, UnicodeError, ValueError) as exc:
+            # Failure policy: PixAI metadata enriches categories/copyrights. A
+            # malformed optional CSV should degrade to WD14 fallback labels.
+            logger.warning("PixAI: failed to parse tag metadata from %s: %s", labels_csv, exc)
+        else:
+            return index
         return index
 
     def _merge_copyrights(

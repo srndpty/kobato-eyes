@@ -4,14 +4,14 @@
 
 - 更新日: 2026-05-17
 - 基準チェック: `.\scripts\check.ps1`
-- 直近の基準値: `422 passed, 40 deselected`
+- 直近の基準値: `425 passed, 40 deselected`
 - 総カバレッジ: `80%`
 - 重点カバレッジ: `core.jobs`, `core.pipeline.retag`, `db.fts`, `ui.search_worker` 合計 `91%`
 - mypy対象: `61 source files`
 - GUI smoke: `27 passed, 435 deselected`
 - db_stress: `8 passed, 441 deselected`
 - GPU check: GPU test 未定義時は skip 扱い
-- integration: `7 passed, 414 deselected` を直近の既知基準とする
+- integration: `7 passed, 458 deselected` を直近の既知基準とする
 - package smoke: compile package smoke OK
 
 ## 安定化済みの基盤
@@ -27,7 +27,7 @@
 ## 現在の主要リスク
 
 - `ui.tags_tab` と `ui.dup_tab` はまだ大きく、worker 制御、DB 接続復旧、表示更新、状態遷移が密である。
-- `services.db_writing`, `core.pipeline.loaders`, `core.pipeline.manual_refresh`, `dup.scanner`, `tagger.wd14_onnx`, `tagger.pixai_onnx` には broad `except Exception` が残る。
+- `services.db_writing`, `core.pipeline.loaders`, `core.pipeline.manual_refresh`, `dup.scanner`, `tagger.wd14_onnx`, `tagger.pixai_onnx` の broad catch は failure policy を近接コメント、helper 名、テスト名、監査文書で分類済み。
 - `ui.result_delegates`, `ui.widgets.spinner_overlay`, `ui.dup_widgets`, `ui.tag_stats`, `core.pipeline.watcher`, `utils.image_io` はカバレッジが低い。
 - tagger 実 backend、GPU / CUDA provider、open_clip 依存の実行確認は通常チェックでは保証されない。
 - 標準チェックは GUI / integration / db_stress を除外するため、変更内容に応じた追加確認が必要である。
@@ -49,7 +49,7 @@
   - `.\scripts\check-gui-smoke.ps1`
   - `.\scripts\check-package-smoke.ps1`
 
-## 次フェーズ 7: 例外境界を監査して failure policy を明文化する
+## フェーズ 7: 例外境界を監査して failure policy を明文化する（実装済み）
 
 - 目的: broad `except Exception` を、best effort、skip、retry、fatal のどれかに分類し、ログとテスト名で意図を固定する。
 - 対象:
@@ -59,17 +59,16 @@
   - `src/dup/scanner.py`
   - `src/tagger/wd14_onnx.py`
   - `src/tagger/pixai_onnx.py`
-- 作業:
-  - broad catch ごとに failure policy を近接コメントまたは小 helper 名で表す。
-  - skip してよい入力不正と呼び出し元へ返すべき実行失敗をテストで分ける。
-  - DB / pipeline 変更では `docs/exception-audit-db-pipeline.md` と同期する。
-- 完了条件:
-  - silent failure が残らず、ユーザーに返る件数、ログ、progress が処理実態と一致する。
-  - 新しい broad catch 追加時は対応テストまたは明示的な理由がある。
-- 検証:
+- 実装:
+  - `services.db_writing`, `core.pipeline.loaders`, `core.pipeline.manual_refresh`, `dup.scanner`, `tagger.wd14_onnx`, `tagger.pixai_onnx` の failure policy を must propagate、best effort、environment fallback、input skip、diagnostics only に分類した。
+  - manual refresh の progress callback 失敗はログ後に進捗通知だけを無効化し、refresh 本体は継続するよう固定した。
+  - duplicate scanner の malformed phash と PixAI metadata parse fallback をテストで固定した。
+  - `docs/exception-audit-db-pipeline.md` と同期した。
+- 検証済み:
   - `.\scripts\check.ps1`
-  - pipeline / DB に触る場合: `.\scripts\check-integration.ps1`
-  - WAL / lock / checkpoint に触る場合: `.\scripts\check-db-stress.ps1`
+  - `.\scripts\check-integration.ps1`
+  - `.\scripts\check-package-smoke.ps1`
+  - `.\scripts\check-gpu.ps1`（GPU test 未定義のため skip）
 
 ## 次フェーズ 8: 低カバレッジ UI / IO 境界を埋める
 

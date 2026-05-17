@@ -82,6 +82,8 @@ class DBWritingService(DBWriteQueue):
         try:
             return self._queue.qsize()
         except Exception:
+            # Failure policy: queue size is diagnostic-only and must not fail
+            # callers while shutdown/error propagation uses raise_if_failed().
             return -1
 
     def stop(self, *, flush: bool = True, wait_forever: bool = False) -> None:
@@ -98,6 +100,9 @@ class DBWritingService(DBWriteQueue):
             try:
                 self._thread.join(timeout=10.0)
             except RuntimeError:
+                # Failure policy: joining an unstarted/current thread during
+                # shutdown is best effort; worker failures are still propagated
+                # by raise_if_failed() below.
                 pass
         self.raise_if_failed()
 
@@ -145,9 +150,13 @@ class DBWritingService(DBWriteQueue):
                     try:
                         self._restore_normal_mode(conn)
                     except Exception as exc:  # pragma: no cover - best effort
+                        # Failure policy: restoring PRAGMAs is cleanup and must
+                        # not mask a primary worker failure.
                         self._log.warning("DBWritingService: restore_normal_mode failed: %s", exc)
                 conn.close()
         except BaseException as exc:  # pragma: no cover - defensive catch
+            # Failure policy: worker-thread failures are fatal to the service and
+            # are stored for caller-side propagation.
             self._record_failure(exc)
             self._log.exception("DBWritingService crashed: %s", exc)
             self._stop_evt.set()
@@ -185,6 +194,7 @@ class DBWritingService(DBWriteQueue):
         try:
             conn.execute("PRAGMA mmap_size=268435456")
         except Exception as exc:  # pragma: no cover - depends on environment
+            # Failure policy: mmap tuning is environment-dependent and optional.
             self._log.warning("DBWritingService: pragma mmap_size failed: %s", exc)
         conn.execute("PRAGMA locking_mode=EXCLUSIVE")
         conn.execute("BEGIN EXCLUSIVE")
@@ -192,6 +202,8 @@ class DBWritingService(DBWriteQueue):
         try:
             conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
         except Exception as exc:  # pragma: no cover - defensive
+            # Failure policy: preflight checkpoint improves WAL shape but is not
+            # required for the main write transaction.
             self._log.warning("DBWritingService: wal_checkpoint failed: %s", exc)
         for _ in range(5):
             try:
@@ -303,6 +315,8 @@ class DBWritingService(DBWriteQueue):
                 )
             conn.commit()
         except Exception:
+            # Failure policy: temp batch transaction failures are fatal; rollback
+            # is best effort and the original failure is re-raised.
             self._rollback_safely(conn)
             raise
 
@@ -352,6 +366,8 @@ class DBWritingService(DBWriteQueue):
             self._bulk_update_files_meta_by_id_uncommitted(conn, meta_rows, coalesce_wh=True)
             conn.commit()
         except Exception:
+            # Failure policy: standard batch transaction failures are fatal;
+            # rollback is best effort and the original failure is re-raised.
             self._rollback_safely(conn)
             raise
         self._tag_cache = tag_cache
@@ -485,6 +501,8 @@ class DBWritingService(DBWriteQueue):
             conn.execute("DROP INDEX IF EXISTS idx_file_tags_tag_score")
             conn.execute("DROP INDEX IF EXISTS idx_file_tags_tag_id")
         except Exception as exc:
+            # Failure policy: index drops are an unsafe-fast optimisation; merge
+            # can still proceed and later recreate indexes best effort.
             self._log.warning("DBWritingService: drop index failed: %s", exc)
         conn.execute("BEGIN IMMEDIATE")
         try:
@@ -537,6 +555,7 @@ class DBWritingService(DBWriteQueue):
                 self._emit_progress("merge.update", done, total_meta)
             conn.commit()
         except Exception:
+            # Failure policy: persistent merge transaction failures are fatal.
             conn.rollback()
             raise
         finally:
@@ -558,6 +577,8 @@ class DBWritingService(DBWriteQueue):
             self._emit_progress("merge.index", 2, 2)
             conn.commit()
         except Exception as exc:
+            # Failure policy: post-merge index recreation is important for
+            # performance but should not discard already committed tag data.
             self._log.warning("DBWritingService: recreate index failed: %s", exc)
         self._emit_progress("merge.done", 1, 1)
         self._log.info("DBWritingService: offline merge done")

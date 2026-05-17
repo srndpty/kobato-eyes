@@ -88,6 +88,26 @@ def test_load_selected_tags_parses_pixai_ips(tmp_path: Path) -> None:
     assert meta["char_escaped"].ips == ("ip-a", "ip-b")
 
 
+def test_pixai_tag_metadata_parse_failure_uses_empty_fallback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    labels_csv = tmp_path / "selected_tags.csv"
+    labels_csv.write_text("broken", encoding="utf-8")
+
+    def fail_load_selected_tags(path: Path):  # noqa: ANN001
+        raise ValueError(f"bad metadata: {path.name}")
+
+    monkeypatch.setattr("tagger.pixai_onnx.load_selected_tags", fail_load_selected_tags)
+    with caplog.at_level("WARNING", logger="tagger.pixai_onnx"):
+        index = PixaiOnnxTagger._build_tag_meta_index(labels_csv)
+
+    assert index == {}
+    assert "failed to parse tag metadata" in caplog.text
+    assert "bad metadata" in caplog.text
+
+
 def test_pixai_postprocess_reports_output_label_mismatch() -> None:
     tagger = PixaiOnnxTagger.__new__(PixaiOnnxTagger)
     tagger._default_thresholds = {}  # type: ignore[attr-defined]

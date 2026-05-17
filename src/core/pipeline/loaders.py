@@ -172,6 +172,8 @@ class PrefetchLoaderPrepared:
         try:
             return self._q.qsize()
         except Exception:
+            # Failure policy: qsize is diagnostic-only and must never fail the
+            # tagging pipeline.
             return -1
 
     def _producer(self) -> None:
@@ -219,6 +221,8 @@ class PrefetchLoaderPrepared:
                     if self._stop.is_set():
                         break
         except Exception as e:
+            # Failure policy: producer errors are fatal. The iterator re-raises
+            # them when it observes the sentinel.
             self._producer_error = e
             logger.error("PrefetchLoaderPrepared: producer failed: %s", e, exc_info=True)
         finally:
@@ -252,7 +256,11 @@ class PrefetchLoaderPrepared:
         try:
             while True:
                 self._q.get_nowait()
-        except Exception:
+        except Exception as exc:
+            # Failure policy: queue draining during close is best-effort cleanup.
+            # The iterator path above is responsible for fatal producer errors.
+            if not isinstance(exc, queue.Empty):
+                logger.debug("PrefetchLoaderPrepared: queue drain cleanup failed: %s", exc)
             pass
         if self._th.is_alive():
             self._th.join(timeout=2.0)

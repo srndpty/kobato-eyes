@@ -121,16 +121,26 @@ def scan_and_tag(
         try:
             cancelled = bool(is_cancelled())
         except Exception:
+            # Failure policy: a cancellation callback failure is treated as a
+            # requested cancellation so the UI can unwind safely.
             logger.exception("Refresh cancellation callback failed")
             cancelled = True
         return cancelled
 
+    progress_disabled = False
+
     def _emit(progress: IndexProgress, *, force: bool = False) -> None:
+        nonlocal progress_disabled
         if progress_cb is None:
+            return
+        if progress_disabled:
             return
         try:
             progress_cb(progress)
         except Exception:
+            # Failure policy: progress callbacks are UI-extension boundaries.
+            # They are logged and disabled, but refresh work continues.
+            progress_disabled = True
             logger.exception("Refresh progress callback failed; disabling further updates")
 
     _emit(IndexProgress(phase=IndexPhase.SCAN, done=0, total=-1, message=str(resolved_root)), force=True)
@@ -412,6 +422,8 @@ def scan_and_tag(
             try:
                 conn.close()
             except Exception:
+                # Failure policy: connection close after a successful commit is
+                # best-effort cleanup and must not mask the tagging result.
                 pass
         conn = None  # finally節で二重closeしないように
 
@@ -432,6 +444,8 @@ def scan_and_tag(
         try:
             tag_result = tag_stage.run(ctx, emitter, records)
         except Exception:
+            # Failure policy: tagging-stage execution failures are fatal and
+            # must be surfaced to the UI worker.
             logger.exception("Manual tag refresh: tagging stage failed")
             raise
 
@@ -441,6 +455,8 @@ def scan_and_tag(
             try:
                 write_result = write_stage.run(ctx, emitter, tag_result)
             except Exception:
+                # Failure policy: DB write failures are fatal because counts and
+                # persisted state would otherwise diverge.
                 logger.exception("Manual tag refresh: write stage failed")
                 raise
             if getattr(write_result, "cancelled", False):
@@ -471,6 +487,8 @@ def scan_and_tag(
             try:
                 conn.close()
             except Exception:
+                # Failure policy: final close is best-effort cleanup; the main
+                # refresh result has already been decided.
                 logger.exception("Failed to close database connection after manual refresh")
         if tagger is not None:
             closer = getattr(tagger, "close", None)
@@ -478,6 +496,8 @@ def scan_and_tag(
                 try:
                     closer()
                 except Exception:
+                    # Failure policy: tagger close releases external resources
+                    # and should not mask the primary refresh error.
                     logger.exception("Failed to close tagger after manual refresh")
         # --- ここから追加：積極的に GPU メモリを解放 ---
         try:
@@ -485,6 +505,7 @@ def scan_and_tag(
 
             gc.collect()
         except Exception:
+            # Failure policy: GC is opportunistic memory cleanup only.
             logger.debug("gc.collect() failed after manual refresh", exc_info=True)
 
 
