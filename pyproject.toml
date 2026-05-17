@@ -43,6 +43,9 @@ tagging-cpu = [
 tagging-gpu = [
     "onnxruntime-gpu>=1.18.0",
 ]
+packaging = [
+    "PyInstaller>=6.11.0,<7.0",
+]
 vector = [
     "hnswlib>=0.8.0",
     "open_clip_torch>=2.26.0",
