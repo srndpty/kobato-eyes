@@ -102,8 +102,8 @@ Invoke-Step "ruff format check" {
 }
 
 if (-not $SkipTypeCheck) {
-    Invoke-Step "mypy" {
-        & $Python -m mypy
+    Invoke-Step "mypy --no-incremental" {
+        & $Python -m mypy --no-incremental
     }
 }
 

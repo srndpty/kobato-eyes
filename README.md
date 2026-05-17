@@ -87,11 +87,11 @@ python -m venv .venv
 .venv\Scripts\activate
 python --version  # Python 3.10.x であることを確認
 python -m pip install --upgrade pip
-pip install -e .[dev,tagging-cpu]
+python -m pip install -c requirements-dev.lock -e ".[dev,tagging-cpu]"
 pre-commit install
 ```
 
-GPU で ONNX タガーを実行する開発環境では、CPU 版の代わりに `pip install -e .[dev,tagging-gpu]` を使用してください。将来の CLIP / hnswlib ベクトル検索を試す場合は `vector` extra を追加します。
+GPU で ONNX タガーを実行する開発環境では、CPU 版の代わりに `python -m pip install -c requirements-dev.lock -e ".[dev,tagging-gpu]"` を使用してください。将来の CLIP / hnswlib ベクトル検索を試す場合は `vector` extra を追加します。
 
 ### モデルファイルの配置
 
@@ -128,7 +128,7 @@ CI などで GUI を起動しない場合は、環境変数 `KOE_HEADLESS=1` を
 
 ## テスト / CI
 
-- CI は GitHub Actions 上の Windows + Python 3.10 で実行します。
+- CI は GitHub Actions 上の Windows + Python 3.10 で実行し、ローカル開発と同じ `requirements-dev.lock` を pip constraints として参照します。
 - ヘッドレスでユニットテスト:
   ```powershell
   $env:PYTHONPATH="src"
@@ -144,7 +144,7 @@ CI などで GUI を起動しない場合は、環境変数 `KOE_HEADLESS=1` を
 
 ## パッケージング
 
-1. Python 3.10.x の環境で開発依存をインストール: `pip install -e .[dev]`
+1. Python 3.10.x の環境で開発依存をインストール: `python -m pip install -c requirements-dev.lock -e ".[dev]"`
 2. Windows バイナリを生成: `pyinstaller tools/kobato-eyes.spec`
 3. `dist/kobato-eyes/` に成果物が出力されます
 4. 実行前に `onnxruntime-gpu` とモデルファイルを同梱してください
