@@ -32,6 +32,7 @@ from PyQt6.QtWidgets import (
 )
 
 from dup.scanner import DuplicateCluster, DuplicateClusterEntry
+from ui.dup_status import format_duplicate_scan_complete, format_duplicate_summary
 from ui.dup_widgets import ThumbPanel, ThumbTile, format_duplicate_resolution, format_duplicate_size
 from ui.dup_workers import DuplicateScanRequest, DuplicateScanRunnable, RefinePipelineRunnable, ThumbJob, ThumbSignals
 from ui.file_actions import export_duplicate_clusters_csv, open_path, reveal_in_file_manager, trash_duplicate_entries
@@ -253,9 +254,7 @@ class DupTab(QWidget):
         self._hb.start()
 
     def _update_status_summary(self) -> None:
-        groups = len(self._clusters)
-        files = sum(len(c.files) for c in self._clusters)
-        self._status_label.setText(f"{groups} group(s), {files} file(s) detected.")
+        self._status_label.setText(format_duplicate_summary(self._clusters))
 
     def _start_refine_pipeline(self, clusters):
         # パラメータ（好みに応じて UI から取ってもOK）
@@ -780,9 +779,7 @@ class DupTab(QWidget):
         self._start_refine_pipeline(self._clusters)
         # リファイン完了後に populate されるので、ここで_populate_tree()は呼ばない
 
-        groups = len(self._clusters)
-        files = sum(len(cluster.files) for cluster in self._clusters)
-        self._status_label.setText(f"Scan complete: {groups} group(s), {files} file(s).")
+        self._status_label.setText(format_duplicate_scan_complete(self._clusters))
         self._update_action_states()
         logger.info("ui: _on_scan_finished end")
 

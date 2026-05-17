@@ -16,6 +16,7 @@
 - `WriteStage.run`: writer start, writer flush, and FTS rebuild failures must return `success=False`. Covered by tests.
 - `scan_and_tag`: manual refresh must propagate tagging-stage exceptions and treat `WriteStageResult.success=False` as a failed refresh. Covered by tests.
 - `scan_and_tag`: cancelled missing-file cleanup must report only actually processed soft/hard delete counts. Covered by tests.
+- `IndexRunnable.run`: pre-run and runner exceptions must emit `signals.error` and must not emit `signals.finished`. Covered by tests.
 - `PrefetchLoaderPrepared`: producer-thread failures such as tagger batch preparation errors must be re-raised by the iterator instead of ending as a successful empty stream. Covered by tests.
 
 ### Best effort cleanup
@@ -34,4 +35,3 @@
 ## Next candidates
 
 - Review `services.db_writing` shutdown paths for any remaining cleanup failures that should be logged more explicitly.
-- Add UI-level assertions that manual refresh worker errors surface through `IndexRunnable.signals.error`.
