@@ -156,7 +156,7 @@ def test_prefetch_loader_falls_back_when_alpha_blend_runs_out_of_memory(
     def _raise_memory_error(_image: np.ndarray) -> np.ndarray:
         raise MemoryError("simulated alpha blend allocation failure")
 
-    monkeypatch.setattr(loaders, "_alpha_to_white_bgr", _raise_memory_error)
+    monkeypatch.setattr(loaders, "_alpha_to_white_then_resize_bgr", _raise_memory_error)
 
     loader = loaders.PrefetchLoaderPrepared(
         [str(png_path)],
@@ -177,6 +177,19 @@ def test_prefetch_loader_falls_back_when_alpha_blend_runs_out_of_memory(
     assert np_batch.shape[0] == 1
     assert sizes == [(64, 48)]
     assert dummy.calls[0][0].shape == (48, 64, 3)
+
+
+def test_alpha_resize_composites_over_white_before_scaling() -> None:
+    rgba = np.zeros((64, 64, 4), dtype=np.uint8)
+    rgba[:, :, :3] = 0
+    rgba[:, :, 3] = 0
+    rgba[16:48, 16:48, :3] = 255
+    rgba[16:48, 16:48, 3] = 255
+
+    expected = loaders._resize_to_target_side(loaders._alpha_to_white_bgr(rgba))
+    actual = loaders._alpha_to_white_then_resize_bgr(rgba)
+
+    assert np.array_equal(actual, expected)
 
 
 def test_prefetch_loader_propagates_io_worker_failure(

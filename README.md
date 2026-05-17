@@ -26,8 +26,8 @@
 
 | tagger |   VRAM | 想定所要時間 |
 |:---|:---:|:---:|
-| wd tagger |  13 GB | 約30分 |
-| pixai tagger |   20 GB | 約2時間 |
+| wd tagger |  13 GB | 約20分 |
+| pixai tagger |   20 GB | 約50分 |
 
 - 検索はSQL-like（空白区切りでAND検索、ORとNOTが使用可能）
 - statsボタンで付けたタグの統計情報表示

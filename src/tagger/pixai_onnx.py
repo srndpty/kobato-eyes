@@ -343,16 +343,18 @@ class PixaiOnnxTagger(WD14Tagger):
                 pairs = [(int(i), self._label_name_cache[int(i)], float(first_row[int(i)])) for i in top_idx]
                 logger.info("PixAI TOP10 indices (current mapping): %s", pairs)
 
-            hit_mask = row_arr >= thr_vec
-            hit_count = int(hit_mask.sum())
-            if hit_count == 0:
+            cand_idx = self._candidate_indices_by_category(
+                row_arr,
+                cats=cats,
+                thresholds=thr_vec,
+                cat_limits=cat_limits,
+                hard_cap=hard_cap,
+            )
+            if cand_idx.size == 0:
                 results.append(TagResult(tags=[]))
                 continue
 
-            k = min(hit_count, hard_cap)
-            masked = np.where(hit_mask, row_arr, -np.inf)
-            cand_idx = np.argpartition(-masked, max(0, k - 1))[:k]
-            cand_sorted = cand_idx[np.argsort(-masked[cand_idx], kind="stable")]
+            cand_sorted = cand_idx[np.argsort(-row_arr[cand_idx], kind="stable")]
 
             merged: dict[str, tuple[float, int]] = {}
             for idx in cand_sorted:
@@ -391,6 +393,47 @@ class PixaiOnnxTagger(WD14Tagger):
             results.append(TagResult(tags=taken))
 
         return results
+
+    def _candidate_indices_by_category(
+        self,
+        scores: np.ndarray,
+        *,
+        cats: np.ndarray,
+        thresholds: np.ndarray,
+        cat_limits: Mapping[int, int | None],
+        hard_cap: int,
+    ) -> np.ndarray:
+        """Return threshold-hit candidates without discarding minority categories."""
+
+        hit_mask = scores >= thresholds
+        if not bool(np.any(hit_mask)):
+            return np.empty((0,), dtype=np.int64)
+
+        cat_to_idx: Mapping[int, np.ndarray] = getattr(self, "_pixai_cat_to_idx", {})
+        candidate_parts: list[np.ndarray] = []
+        for cat_value in np.unique(cats):
+            cat_key = int(cat_value)
+            idx_for_cat = cat_to_idx.get(cat_key)
+            if idx_for_cat is None:
+                idx_for_cat = np.nonzero(cats == cat_key)[0]
+            idx_for_cat = idx_for_cat[hit_mask[idx_for_cat]]
+            if idx_for_cat.size == 0:
+                continue
+
+            limit = cat_limits.get(cat_key)
+            category_cap = hard_cap if limit is None else min(max(0, int(limit)), hard_cap)
+            if category_cap <= 0:
+                continue
+            take = min(int(idx_for_cat.size), category_cap)
+            if idx_for_cat.size > take:
+                local_scores = scores[idx_for_cat]
+                local_idx = np.argpartition(-local_scores, take - 1)[:take]
+                idx_for_cat = idx_for_cat[local_idx]
+            candidate_parts.append(idx_for_cat)
+
+        if not candidate_parts:
+            return np.empty((0,), dtype=np.int64)
+        return np.concatenate(candidate_parts)
 
     def _merge_candidate_copyrights(
         self,

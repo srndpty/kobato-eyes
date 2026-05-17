@@ -124,3 +124,33 @@ def test_pixai_postprocess_reports_output_label_mismatch() -> None:
             thresholds=None,
             max_tags=None,
         )
+
+
+def test_pixai_postprocess_collects_candidates_per_category_before_limits() -> None:
+    tagger = PixaiOnnxTagger.__new__(PixaiOnnxTagger)
+    names = [f"general_{idx}" for idx in range(128)] + ["character_a"]
+    cats = [int(TagCategory.GENERAL)] * 128 + [int(TagCategory.CHARACTER)]
+    tagger._default_thresholds = {}  # type: ignore[attr-defined]
+    tagger._default_max_tags = {}  # type: ignore[attr-defined]
+    tagger._score_floor = 0.0  # type: ignore[attr-defined]
+    tagger._label_name_cache = names  # type: ignore[attr-defined]
+    tagger._effective_cats = cats  # type: ignore[attr-defined]
+    tagger._pixai_label_names = np.array(names, dtype=object)  # type: ignore[attr-defined]
+    tagger._pixai_effective_cats = np.array(cats, dtype=np.int16)  # type: ignore[attr-defined]
+    tagger._pixai_cat_to_idx = {  # type: ignore[attr-defined]
+        int(TagCategory.GENERAL): np.arange(0, 128),
+        int(TagCategory.CHARACTER): np.array([128]),
+    }
+    tagger._pixai_default_thr_vec = np.zeros((129,), dtype=np.float32)  # type: ignore[attr-defined]
+    tagger._pixai_name_to_idx = {name: idx for idx, name in enumerate(names)}  # type: ignore[attr-defined]
+    tagger._tag_meta_index = {}  # type: ignore[attr-defined]
+    tagger._topk_cap = 128  # type: ignore[attr-defined]
+
+    logits = np.linspace(1.0, 0.5, num=129, dtype=np.float32).reshape(1, 129)
+    results = tagger._postprocess_logits_topk(  # type: ignore[attr-defined]
+        logits,
+        thresholds={TagCategory.GENERAL: 0.1, TagCategory.CHARACTER: 0.1},
+        max_tags={TagCategory.GENERAL: 1, TagCategory.CHARACTER: 1},
+    )
+
+    assert [prediction.name for prediction in results[0].tags] == ["general_0", "character_a"]

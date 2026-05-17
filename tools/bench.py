@@ -380,7 +380,7 @@ def _add_tagger_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentP
     parser.add_argument("--model", type=Path, required=True, help="ONNX model path")
     parser.add_argument("--tags-csv", type=Path, default=None, help="selected_tags.csv path")
     parser.add_argument("--warmup-batches", type=int, default=2, help="Initial batches excluded from summary metrics")
-    parser.add_argument("--prefetch-batches", type=int, default=128, help="Prepared batch queue depth")
+    parser.add_argument("--prefetch-batches", type=int, default=4, help="Prepared batch queue depth")
     parser.add_argument("--io-workers", type=int, default=None, help="Image loader worker count")
     parser.add_argument(
         "--output-json",

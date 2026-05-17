@@ -65,7 +65,7 @@ def _alpha_to_white_bgr(bg_or_bgra: np.ndarray) -> np.ndarray:
     return bg_or_bgra[:, :, :3]
 
 
-def _resize_to_target_side(image: np.ndarray) -> np.ndarray:
+def _resize_to_target_side(image: np.ndarray, *, interpolation: int | None = None) -> np.ndarray:
     """Resize image so the longest side is near the tagger target size."""
 
     height, width = image.shape[:2]
@@ -73,12 +73,36 @@ def _resize_to_target_side(image: np.ndarray) -> np.ndarray:
     if side == _TARGET:
         return image
     ratio = _TARGET / max(1, side)
-    interp = cv2.INTER_AREA if side > _TARGET else cv2.INTER_CUBIC
+    interp = interpolation if interpolation is not None else (cv2.INTER_AREA if side > _TARGET else cv2.INTER_CUBIC)
     return cv2.resize(
         image,
         (max(1, int(width * ratio)), max(1, int(height * ratio))),
         interpolation=interp,
     )
+
+
+def _alpha_to_white_then_resize_bgr(bg_or_bgra: np.ndarray) -> np.ndarray:
+    """Composite alpha over white before resizing to avoid transparent-edge fringes."""
+
+    if bg_or_bgra.ndim == 2:
+        return _resize_to_target_side(cv2.cvtColor(bg_or_bgra, cv2.COLOR_GRAY2BGR))
+    if bg_or_bgra.shape[2] == 3:
+        return _resize_to_target_side(bg_or_bgra)
+    if bg_or_bgra.shape[2] != 4:
+        return _resize_to_target_side(bg_or_bgra[:, :, :3])
+
+    alpha_u8 = bg_or_bgra[:, :, 3]
+    if bool(np.all(alpha_u8 == 255)):
+        return _resize_to_target_side(bg_or_bgra[:, :, :3])
+
+    # Use uint16 arithmetic to avoid the full-size float32 allocation that can
+    # fail on large transparent images, while preserving "white composite before
+    # resize" semantics.
+    bgr = bg_or_bgra[:, :, :3].astype(np.uint16, copy=False)
+    alpha = alpha_u8[:, :, np.newaxis].astype(np.uint16, copy=False)
+    white = np.uint16(255)
+    composited = ((bgr * alpha) + (white * (white - alpha)) + np.uint16(127)) // white
+    return _resize_to_target_side(composited.astype(np.uint8, copy=False))
 
 
 class PrefetchLoaderPrepared:
@@ -154,8 +178,7 @@ class PrefetchLoaderPrepared:
             if im is None:
                 raise RuntimeError("cv2.imdecode failed")
             H0, W0 = (im.shape[0], im.shape[1]) if im.ndim >= 2 else (0, 0)
-            im = _resize_to_target_side(im)
-            bgr = _alpha_to_white_bgr(im)
+            bgr = _alpha_to_white_then_resize_bgr(im)
             rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
             # 元サイズは im の生サイズ（アルファ有無に関係なし）
             return (p, rgb, (int(W0), int(H0)))
@@ -166,11 +189,11 @@ class PrefetchLoaderPrepared:
             try:
                 with Image.open(p) as pil_image:
                     w, h = pil_image.size
-                    pil_image.thumbnail((_TARGET, _TARGET), Image.Resampling.LANCZOS)
                     rgba = pil_image.convert("RGBA")
                     bg = Image.new("RGBA", rgba.size, "WHITE")
                     bg.paste(rgba, mask=rgba.split()[-1])
                     rgb = bg.convert("RGB")
+                    rgb.thumbnail((_TARGET, _TARGET), Image.Resampling.LANCZOS)
                     # bgr = np.asarray(rgb)[:, :, ::-1]  # RGB->BGR
                     rgb_arr = np.asarray(rgb)  # ここはそのままRGB
                     return (p, rgb_arr, (w, h))
