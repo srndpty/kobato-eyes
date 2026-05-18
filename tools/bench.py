@@ -26,6 +26,8 @@ _INFER_LOG_RE = re.compile(
     r"infer_batch_prepared batch=(?P<batch>\d+) .*?"
     r"ort=(?P<ort>[0-9.]+)ms post=(?P<post>[0-9.]+)ms total=(?P<total>[0-9.]+)ms"
 )
+_BENCH_NUMBER_RE = re.compile(r"^(?P<number>\d{3,})-.*\.json$")
+_SLUG_SAFE_RE = re.compile(r"[^A-Za-z0-9_.-]+")
 
 
 @dataclass(slots=True)
@@ -68,6 +70,8 @@ class TaggerBenchmarkResult:
     failed_images: int
     batch_size: int
     warmup_batches: int
+    prefetch_batches: int
+    io_workers: int | None
     providers_available: list[str]
     providers_session: list[str]
     total_seconds: float
@@ -293,6 +297,8 @@ def _benchmark_tagger(args: argparse.Namespace) -> TaggerBenchmarkResult:
         failed_images=failed_images + max(0, len(paths) - processed_images - failed_images),
         batch_size=batch_size,
         warmup_batches=warmup_batches,
+        prefetch_batches=max(1, int(args.prefetch_batches)),
+        io_workers=args.io_workers,
         providers_available=providers_available,
         providers_session=providers_session,
         total_seconds=total_seconds,
@@ -323,6 +329,39 @@ def _write_json(path: Path, result: TaggerBenchmarkResult) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     payload: dict[str, Any] = asdict(result)
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
+def _safe_slug(value: str) -> str:
+    """Return a filesystem-friendly benchmark slug."""
+
+    slug = _SLUG_SAFE_RE.sub("-", value.strip()).strip(".-")
+    return slug or "run"
+
+
+def _next_benchmark_number(output_dir: Path) -> int:
+    """Return the next numeric prefix for benchmark JSON files."""
+
+    max_number = 0
+    if output_dir.exists():
+        for candidate in output_dir.glob("*.json"):
+            match = _BENCH_NUMBER_RE.match(candidate.name)
+            if match is None:
+                continue
+            max_number = max(max_number, int(match.group("number")))
+    return max_number + 1
+
+
+def _resolve_output_json(args: argparse.Namespace) -> Path:
+    """Resolve the benchmark output path from CLI options."""
+
+    if bool(args.auto_number):
+        output_dir = Path(args.output_dir)
+        number = _next_benchmark_number(output_dir)
+        slug = _safe_slug(str(args.run_slug))
+        return output_dir / f"{number:03d}-{args.tagger}-{slug}.json"
+    if args.output_json is not None:
+        return Path(args.output_json)
+    return Path("tmp/bench/tagging-baseline.json")
 
 
 def _fmt_optional(value: float | None, *, digits: int = 3) -> str:
@@ -383,9 +422,21 @@ def _add_tagger_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentP
     parser.add_argument("--prefetch-batches", type=int, default=4, help="Prepared batch queue depth")
     parser.add_argument("--io-workers", type=int, default=None, help="Image loader worker count")
     parser.add_argument(
+        "--output-dir",
+        type=Path,
+        default=Path("tmp/bench"),
+        help="Directory used with --auto-number",
+    )
+    parser.add_argument("--run-slug", default="tagging-baseline", help="Slug used with --auto-number")
+    parser.add_argument(
+        "--auto-number",
+        action="store_true",
+        help="Write JSON as NNN-<tagger>-<run-slug>.json under --output-dir",
+    )
+    parser.add_argument(
         "--output-json",
         type=Path,
-        default=Path("tmp/bench/tagging-baseline.json"),
+        default=None,
         help="Path to write benchmark JSON",
     )
     parser.set_defaults(func=_run_tagger_command)
@@ -395,8 +446,9 @@ def _run_tagger_command(args: argparse.Namespace) -> int:
     """Execute the tagger benchmark command."""
 
     result = _benchmark_tagger(args)
-    _write_json(args.output_json, result)
-    _print_tagger_summary(result, args.output_json)
+    output_json = _resolve_output_json(args)
+    _write_json(output_json, result)
+    _print_tagger_summary(result, output_json)
     return 0
 
 
