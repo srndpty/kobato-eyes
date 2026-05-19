@@ -246,7 +246,6 @@ def test_tag_stats_dialog_waits_for_all_tracked_worker_threads(qtbot) -> None:  
     for thread in threads:
         thread.start()
     qtbot.waitUntil(lambda: all(thread.isRunning() for thread in threads), timeout=1000)
-    dialog._load_thread = threads[-1]
     dialog._load_threads = list(threads)
 
     assert dialog._wait_for_worker_threads()

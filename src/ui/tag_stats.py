@@ -548,6 +548,8 @@ class TagStatsDialog(QDialog):
 
         if generation != self._load_generation:
             return
+        if self._close_pending:
+            return
         self._model.set_rows([])
         self._loading_label.setText(f"Failed to load tag statistics: {message}")
         self._loading_bar.hide()
@@ -632,8 +634,7 @@ class TagStatsDialog(QDialog):
 
         if not self._close_pending:
             return
-        threads = [*self._load_threads, *self._export_threads]
-        if any(thread.isRunning() for thread in threads):
+        if self._load_threads or self._export_threads:
             return
         self._close_pending = False
         QTimer.singleShot(0, self.close)
@@ -714,9 +715,9 @@ class TagStatsDialog(QDialog):
 
         if generation != self._export_generation:
             return
-        self._set_loading(False)
         if self._close_pending:
             return
+        self._set_loading(False)
         if row_count <= 0:
             QMessageBox.information(
                 self,
@@ -735,9 +736,9 @@ class TagStatsDialog(QDialog):
 
         if generation != self._export_generation:
             return
-        self._set_loading(False)
         if self._close_pending:
             return
+        self._set_loading(False)
         QMessageBox.warning(self, "Export tag stats", f"Failed to export CSV: {message}")
 
     def _csv_headers(self) -> list[str]:
