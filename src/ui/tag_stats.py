@@ -19,7 +19,7 @@ from PyQt6.QtCore import (
     pyqtSignal,
     pyqtSlot,
 )
-from PyQt6.QtGui import QKeyEvent
+from PyQt6.QtGui import QCloseEvent, QKeyEvent
 from PyQt6.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
@@ -578,6 +578,30 @@ class TagStatsDialog(QDialog):
         super().showEvent(event)
         if self._async_load and self._load_generation == 0:
             QTimer.singleShot(0, self._reload)
+
+    def closeEvent(self, event: QCloseEvent | None) -> None:  # noqa: D401 - Qt signature
+        """Wait for running worker threads before the dialog is destroyed."""
+
+        self._wait_for_worker_threads()
+        if event is not None:
+            super().closeEvent(event)
+
+    def _wait_for_worker_threads(self) -> None:
+        """Block briefly until active stats worker threads have finished."""
+
+        self._wait_for_thread(self._load_thread)
+        self._wait_for_thread(self._export_thread)
+
+    @staticmethod
+    def _wait_for_thread(thread: QThread | None) -> None:
+        """Quit and wait for a worker thread if it is still running."""
+
+        if thread is None or not thread.isRunning():
+            return
+        if QThread.currentThread() is thread:
+            return
+        thread.quit()
+        thread.wait()
 
     def _on_export_csv(self) -> None:
         """Prompt for a CSV path and export all rows matching current filters."""

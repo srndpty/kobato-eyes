@@ -10,7 +10,7 @@ from pathlib import Path
 from types import ModuleType
 
 import pytest
-from PyQt6.QtCore import QEvent, QModelIndex, Qt
+from PyQt6.QtCore import QEvent, QModelIndex, Qt, QThread
 from PyQt6.QtGui import QKeyEvent
 
 from ui.tag_stats import (
@@ -216,6 +216,17 @@ def test_tag_stats_dialog_collects_visible_rows_in_proxy_order(qtbot) -> None:  
 
     assert headers == ["Category", "Tag", "Files", "AvgScore", "MaxScore"]
     assert rows == [["character", "kobato", 1, "0.300", "0.300"]]
+
+
+@pytest.mark.gui
+def test_tag_stats_dialog_waits_for_running_worker_thread(qtbot) -> None:  # type: ignore[no-untyped-def]
+    thread = QThread()
+    thread.start()
+    qtbot.waitUntil(thread.isRunning, timeout=1000)
+
+    TagStatsDialog._wait_for_thread(thread)
+
+    assert not thread.isRunning()
 
 
 @pytest.mark.gui
