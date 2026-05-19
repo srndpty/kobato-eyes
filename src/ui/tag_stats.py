@@ -351,6 +351,8 @@ class _TagStatsModel(QAbstractTableModel):
         if role != Qt.ItemDataRole.DisplayRole:
             return None
         if orientation == Qt.Orientation.Horizontal:
+            if not 0 <= section < len(self.COLUMNS):
+                return None
             return self.COLUMNS[section]
         return section + 1
 
@@ -359,6 +361,10 @@ class _TagStatsModel(QAbstractTableModel):
             return None
         row_index = index.row()
         column_index = index.column()
+        if not 0 <= row_index < len(self._rows):
+            return None
+        if not 0 <= column_index < len(self.COLUMNS):
+            return None
         category_id, tag_name, file_count, avg_score, max_score = self._rows[row_index]
 
         if role == Qt.ItemDataRole.DisplayRole:
@@ -593,7 +599,7 @@ class TagStatsDialog(QDialog):
     def _update_export_button(self) -> None:
         """Enable export when the loaded category has data to query."""
 
-        self._export_button.setEnabled(not self._loading_widget.isVisible() and self._model.rowCount() > 0)
+        self._export_button.setEnabled(not self._loading_widget.isVisible() and self._proxy.rowCount() > 0)
 
     def showEvent(self, event) -> None:  # type: ignore[override]
         """Kick asynchronous loading after the dialog has been painted."""
@@ -657,7 +663,7 @@ class TagStatsDialog(QDialog):
         """Prompt for a CSV path and export all rows matching current filters."""
 
         headers = self._csv_headers()
-        if self._model.rowCount() <= 0:
+        if self._proxy.rowCount() <= 0:
             QMessageBox.information(
                 self,
                 "Export tag stats",

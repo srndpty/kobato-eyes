@@ -93,6 +93,7 @@ def test_tag_stats_model_loads_and_formats_rows() -> None:
     assert model.rowCount() == 2
     assert model.columnCount() == 5
     assert model.headerData(0, Qt.Orientation.Horizontal) == "Category"
+    assert model.headerData(99, Qt.Orientation.Horizontal) is None
     assert model.headerData(0, Qt.Orientation.Vertical) == 1
     assert model.rowCount(QModelIndex()) == 2
     assert model.tag_at(0) == "1girl"
@@ -105,6 +106,7 @@ def test_tag_stats_model_loads_and_formats_rows() -> None:
     assert model.data(model.index(0, 3)) == "0.700"
     assert model.data(model.index(0, 4), Qt.ItemDataRole.UserRole) == 0.9
     assert model.data(QModelIndex()) is None
+    assert model.data(model.index(0, 99)) is None
 
 
 def test_tag_stats_model_filters_category_without_thresholds() -> None:
@@ -207,7 +209,12 @@ def test_tag_stats_dialog_filters_and_ignores_selection_without_tags_parent(
     assert "1000-row display limit" in dialog._export_button.toolTip()
     dialog._filter_edit.setText("kobato")
     assert dialog._proxy.rowCount() == 1
+    assert dialog._export_button.isEnabled()
+    dialog._filter_edit.setText("missing")
+    assert dialog._proxy.rowCount() == 0
+    assert not dialog._export_button.isEnabled()
 
+    dialog._filter_edit.setText("kobato")
     dialog._table.selectRow(0)
     dialog._apply_selected_tag()
 
