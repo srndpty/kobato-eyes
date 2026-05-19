@@ -154,6 +154,26 @@ def test_load_tag_stats_rows_escapes_literal_like_wildcards() -> None:
     assert [row[1] for row in rows] == ["low_score", "under_score"]
 
 
+def test_load_tag_stats_rows_can_export_beyond_display_limit() -> None:
+    conn = sqlite3.connect(":memory:")
+    conn.executescript(
+        """
+        CREATE TABLE tags (id INTEGER PRIMARY KEY, name TEXT NOT NULL, category INTEGER NOT NULL);
+        CREATE TABLE files (id INTEGER PRIMARY KEY, path TEXT NOT NULL, is_present INTEGER NOT NULL);
+        CREATE TABLE file_tags (file_id INTEGER NOT NULL, tag_id INTEGER NOT NULL, score REAL NOT NULL);
+        INSERT INTO files VALUES (1, 'a.png', 1);
+        """
+    )
+    conn.executemany("INSERT INTO tags VALUES (?, ?, 0)", ((idx, f"tag_{idx:04d}") for idx in range(1, 1002)))
+    conn.executemany("INSERT INTO file_tags VALUES (1, ?, 0.80)", ((idx,) for idx in range(1, 1002)))
+
+    visible_rows = load_tag_stats_rows(conn, category=None, respect_thresholds=False)
+    export_rows = load_tag_stats_rows(conn, category=None, respect_thresholds=False, limit=None)
+
+    assert len(visible_rows) == 1000
+    assert len(export_rows) == 1001
+
+
 def test_write_tag_stats_csv_adds_suffix_and_writes_utf8_sig(tmp_path: Path) -> None:
     output = write_tag_stats_csv(
         ["Category", "Tag"],
@@ -205,20 +225,6 @@ def test_tag_stats_dialog_enter_with_no_selection_is_noop(qtbot) -> None:  # typ
 
 
 @pytest.mark.gui
-def test_tag_stats_dialog_collects_visible_rows_in_proxy_order(qtbot) -> None:  # type: ignore[no-untyped-def]
-    conn = _make_stats_conn()
-    dialog = TagStatsDialog(lambda: conn)
-    qtbot.addWidget(dialog)
-
-    dialog._filter_edit.setText("o")
-    dialog._table.sortByColumn(1, Qt.SortOrder.DescendingOrder)
-    headers, rows = dialog._collect_visible_csv_rows()
-
-    assert headers == ["Category", "Tag", "Files", "AvgScore", "MaxScore"]
-    assert rows == [["character", "kobato", 1, "0.300", "0.300"]]
-
-
-@pytest.mark.gui
 def test_tag_stats_dialog_waits_for_running_worker_thread(qtbot) -> None:  # type: ignore[no-untyped-def]
     thread = QThread()
     thread.start()
@@ -257,9 +263,10 @@ def test_tag_stats_dialog_async_loads_rows_after_show(qtbot, tmp_path: Path) -> 
 
     dialog = TagStatsDialog(conn_factory, async_load=True)
     qtbot.addWidget(dialog)
+    assert dialog._load_generation == 0
     dialog.show()
 
-    assert dialog._loading_widget.isVisible()
+    qtbot.waitUntil(lambda: dialog._loading_widget.isVisible(), timeout=1000)
     qtbot.waitUntil(lambda: dialog._model.rowCount() == 2, timeout=3000)
 
     assert not dialog._loading_widget.isVisible()
