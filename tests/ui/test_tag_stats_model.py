@@ -203,6 +203,8 @@ def test_tag_stats_dialog_filters_and_ignores_selection_without_tags_parent(
     monkeypatch.setitem(sys.modules, "ui.tags_tab", fake_tags_tab)
 
     assert dialog._model.rowCount() == 2
+    assert dialog._filter_edit.placeholderText() == "type to filter tags..."
+    assert "1000-row display limit" in dialog._export_button.toolTip()
     dialog._filter_edit.setText("kobato")
     assert dialog._proxy.rowCount() == 1
 
@@ -267,7 +269,9 @@ def test_tag_stats_dialog_close_ignores_when_worker_does_not_stop(
 
     assert not event.isAccepted()
     assert not dialog._loading_widget.isHidden()
-    assert dialog._loading_label.text() == "Finishing tag statistics task..."
+    assert dialog._close_pending
+    assert dialog._loading_label.text() == "Finishing tag statistics task. This window will close when it completes."
+    assert not dialog._loading_bar.isVisible()
 
 
 @pytest.mark.gui

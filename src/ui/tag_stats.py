@@ -418,6 +418,7 @@ class TagStatsDialog(QDialog):
         self._export_thread: QThread | None = None
         self._export_worker: _StatsExportWorker | None = None
         self._export_threads: list[QThread] = []
+        self._close_pending = False
 
         top_bar = QHBoxLayout()
         top_bar.addWidget(QLabel("Category:"))
@@ -435,10 +436,10 @@ class TagStatsDialog(QDialog):
         top_bar.addStretch(1)
         top_bar.addWidget(QLabel("Filter:"))
         self._filter_edit = QLineEdit(self)
-        self._filter_edit.setPlaceholderText("type to filter tags…")
+        self._filter_edit.setPlaceholderText("type to filter tags...")
         top_bar.addWidget(self._filter_edit)
         self._export_button = QPushButton("Export CSV", self)
-        self._export_button.setToolTip("Export all tag statistics matching the current filters")
+        self._export_button.setToolTip("Export all matching rows, including rows beyond the 1000-row display limit")
         top_bar.addWidget(self._export_button)
 
         self._model = _TagStatsModel()
@@ -564,6 +565,7 @@ class TagStatsDialog(QDialog):
             self._load_worker = None
         with suppress(ValueError):
             self._load_threads.remove(thread)
+        self._maybe_finish_pending_close()
 
     def _clear_export_refs(self, thread: QThread) -> None:
         """Drop completed export worker references."""
@@ -573,12 +575,13 @@ class TagStatsDialog(QDialog):
             self._export_worker = None
         with suppress(ValueError):
             self._export_threads.remove(thread)
+        self._maybe_finish_pending_close()
 
-    def _set_loading(self, loading: bool, message: str = "") -> None:
+    def _set_loading(self, loading: bool, message: str = "", *, show_progress: bool = True) -> None:
         """Update loading controls for asynchronous statistics reads."""
 
         self._loading_label.setText(message)
-        self._loading_bar.setVisible(loading and (message.startswith("Loading") or message.startswith("Exporting")))
+        self._loading_bar.setVisible(loading and show_progress)
         self._loading_widget.setVisible(loading)
         self._category_combo.setEnabled(not loading)
         self._threshold_check.setEnabled(not loading)
@@ -603,8 +606,14 @@ class TagStatsDialog(QDialog):
         if not self._wait_for_worker_threads():
             if event is not None:
                 event.ignore()
-            self._set_loading(True, "Finishing tag statistics task...")
+            self._close_pending = True
+            self._set_loading(
+                True,
+                "Finishing tag statistics task. This window will close when it completes.",
+                show_progress=False,
+            )
             return
+        self._close_pending = False
         if event is not None:
             super().closeEvent(event)
 
@@ -612,13 +621,22 @@ class TagStatsDialog(QDialog):
         """Return whether active stats worker threads finished before close."""
 
         finished = True
-        finished = self._wait_for_thread(self._load_thread) and finished
-        finished = self._wait_for_thread(self._export_thread) and finished
         for thread in list(self._load_threads):
             finished = self._wait_for_thread(thread) and finished
         for thread in list(self._export_threads):
             finished = self._wait_for_thread(thread) and finished
         return finished
+
+    def _maybe_finish_pending_close(self) -> None:
+        """Close automatically once all pending worker threads have finished."""
+
+        if not self._close_pending:
+            return
+        threads = [*self._load_threads, *self._export_threads]
+        if any(thread.isRunning() for thread in threads):
+            return
+        self._close_pending = False
+        QTimer.singleShot(0, self.close)
 
     @staticmethod
     def _wait_for_thread(thread: QThread | None) -> bool:
@@ -639,7 +657,11 @@ class TagStatsDialog(QDialog):
 
         headers = self._csv_headers()
         if self._model.rowCount() <= 0:
-            QMessageBox.information(self, "Export tag stats", "No tag statistics to export.")
+            QMessageBox.information(
+                self,
+                "Export tag stats",
+                "No tag statistics match the current category and threshold settings.",
+            )
             return
 
         file_path, _ = QFileDialog.getSaveFileName(
@@ -693,8 +715,14 @@ class TagStatsDialog(QDialog):
         if generation != self._export_generation:
             return
         self._set_loading(False)
+        if self._close_pending:
+            return
         if row_count <= 0:
-            QMessageBox.information(self, "Export tag stats", "No tag statistics match the current filters.")
+            QMessageBox.information(
+                self,
+                "Export tag stats",
+                "No tag statistics match the current filters. No CSV file was created.",
+            )
             return
         QMessageBox.information(
             self,
@@ -708,6 +736,8 @@ class TagStatsDialog(QDialog):
         if generation != self._export_generation:
             return
         self._set_loading(False)
+        if self._close_pending:
+            return
         QMessageBox.warning(self, "Export tag stats", f"Failed to export CSV: {message}")
 
     def _csv_headers(self) -> list[str]:
