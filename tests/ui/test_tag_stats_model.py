@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import sqlite3
 import sys
+import time
+from pathlib import Path
 from types import ModuleType
 
 import pytest
@@ -33,6 +35,21 @@ def _make_stats_conn() -> sqlite3.Connection:
         """
     )
     return conn
+
+
+def _make_stats_db(path: Path) -> None:
+    """Create a file-backed stats database for worker-thread tests."""
+
+    source = _make_stats_conn()
+    try:
+        target = sqlite3.connect(path)
+        try:
+            source.backup(target)
+            target.commit()
+        finally:
+            target.close()
+    finally:
+        source.close()
 
 
 def test_load_thresholds_merges_fallbacks_and_database_values() -> None:
@@ -122,3 +139,22 @@ def test_tag_stats_dialog_enter_with_no_selection_is_noop(qtbot) -> None:  # typ
     dialog.keyPressEvent(event)
 
     assert event.isAccepted()
+
+
+@pytest.mark.gui
+def test_tag_stats_dialog_async_loads_rows_after_show(qtbot, tmp_path: Path) -> None:  # type: ignore[no-untyped-def]
+    db_path = tmp_path / "stats.db"
+    _make_stats_db(db_path)
+
+    def conn_factory() -> sqlite3.Connection:
+        time.sleep(0.05)
+        return sqlite3.connect(db_path)
+
+    dialog = TagStatsDialog(conn_factory, async_load=True)
+    qtbot.addWidget(dialog)
+    dialog.show()
+
+    assert dialog._loading_widget.isVisible()
+    qtbot.waitUntil(lambda: dialog._model.rowCount() == 2, timeout=3000)
+
+    assert not dialog._loading_widget.isVisible()

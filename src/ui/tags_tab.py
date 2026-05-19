@@ -1280,7 +1280,7 @@ class TagsTab(QWidget):
         def _conn_factory() -> sqlite3.Connection:
             return self._view_model.open_connection(db_path)
 
-        dialog = TagStatsDialog(_conn_factory, parent=self)
+        dialog = TagStatsDialog(_conn_factory, parent=self, async_load=True)
         dialog.setModal(True)
         dialog.exec()
 
