@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import csv
 import sqlite3
 from contextlib import suppress
+from pathlib import Path
 from typing import Any, Callable, cast
 
 from PyQt6.QtCore import (
@@ -23,10 +25,13 @@ from PyQt6.QtWidgets import (
     QCheckBox,
     QComboBox,
     QDialog,
+    QFileDialog,
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QMessageBox,
     QProgressBar,
+    QPushButton,
     QTableView,
     QVBoxLayout,
     QWidget,
@@ -43,6 +48,15 @@ _CATEGORY_NAMES: dict[int, str] = {
 
 _FALLBACK_THRESHOLDS: dict[int, float] = {0: 0.35, 4: 0.25, 3: 0.25}
 _TagStatsRow = tuple[int, str, int, float, float]
+_CsvRow = list[object]
+_DISPLAY_ROW_LIMIT = 1000
+_SORT_EXPRESSIONS = {
+    0: "t.category",
+    1: "t.name",
+    2: "files",
+    3: "avg_score",
+    4: "max_score",
+}
 
 
 def category_name(category_id: int) -> str:
@@ -83,10 +97,53 @@ def _load_thresholds(conn: sqlite3.Connection) -> dict[int, float]:
     return merge_thresholds(rows)
 
 
+def _escape_like_pattern(text: str) -> str:
+    """Escape a literal value for a SQLite LIKE pattern."""
+
+    return text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
+def _sort_clause(column: int, order: Qt.SortOrder) -> str:
+    """Return a safe SQL ORDER BY clause matching a table sort column."""
+
+    expression = _SORT_EXPRESSIONS.get(column, "files")
+    direction = "ASC" if order == Qt.SortOrder.AscendingOrder else "DESC"
+    tie_breaker = ", t.name ASC" if expression != "t.name" else ""
+    return f"ORDER BY {expression} {direction}{tie_breaker}"
+
+
+def tag_stats_csv_rows(rows: list[_TagStatsRow]) -> list[_CsvRow]:
+    """Convert raw statistics rows to the display-like CSV representation."""
+
+    return [
+        [category_name(category_id), tag_name, file_count, format_score(avg_score), format_score(max_score)]
+        for category_id, tag_name, file_count, avg_score, max_score in rows
+    ]
+
+
+def write_tag_stats_csv(headers: list[str], rows: list[_CsvRow], file_path: str | Path) -> Path:
+    """Write tag statistics rows to a UTF-8 CSV file and return its path."""
+
+    path = Path(file_path)
+    if path.suffix.lower() != ".csv":
+        path = path.with_suffix(".csv")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8-sig", newline="") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(headers)
+        writer.writerows(rows)
+    return path
+
+
 def load_tag_stats_rows(
     conn: sqlite3.Connection,
     category: int | None,
     respect_thresholds: bool,
+    *,
+    filter_text: str = "",
+    limit: int | None = _DISPLAY_ROW_LIMIT,
+    sort_column: int = 2,
+    sort_order: Qt.SortOrder = Qt.SortOrder.DescendingOrder,
 ) -> list[_TagStatsRow]:
     """Return aggregated tag statistics rows for the requested filters."""
 
@@ -96,6 +153,9 @@ def load_tag_stats_rows(
     if category is not None:
         where_conditions.append("t.category = ?")
         params.append(int(category))
+    if filter_text:
+        where_conditions.append("LOWER(t.name) LIKE ? ESCAPE '\\'")
+        params.append(f"%{_escape_like_pattern(filter_text.lower())}%")
     if respect_thresholds:
         thresholds = _load_thresholds(conn)
 
@@ -114,6 +174,11 @@ def load_tag_stats_rows(
         where_conditions.append(score_condition)
 
     where_sql = "WHERE " + " AND ".join(where_conditions)
+    order_sql = _sort_clause(sort_column, sort_order)
+    limit_sql = "" if limit is None else "LIMIT ?"
+    if limit is not None:
+        params.append(max(0, int(limit)))
+
     sql = (
         "SELECT t.category, t.name, COUNT(DISTINCT ft.file_id) AS files, "
         "AVG(ft.score) AS avg_score, MAX(ft.score) AS max_score "
@@ -122,8 +187,8 @@ def load_tag_stats_rows(
         "JOIN files f ON f.id = ft.file_id "
         f"{where_sql} "
         "GROUP BY t.id "
-        "ORDER BY files DESC, t.name ASC "
-        "LIMIT 1000"
+        f"{order_sql} "
+        f"{limit_sql}"
     )
 
     rows: list[_TagStatsRow] = []
@@ -168,6 +233,66 @@ class _StatsLoadWorker(QObject):
             self.error.emit(self._generation, str(exc))
         else:
             self.loaded.emit(self._generation, rows)
+        finally:
+            if conn is not None:
+                with suppress(Exception):
+                    conn.close()
+            thread = QThread.currentThread()
+            if thread is not None:
+                thread.quit()
+
+
+class _StatsExportWorker(QObject):
+    """Export complete tag statistics on a worker thread."""
+
+    exported = pyqtSignal(int, str, int)
+    error = pyqtSignal(int, str)
+
+    def __init__(
+        self,
+        generation: int,
+        conn_factory: Callable[[], sqlite3.Connection],
+        file_path: str | Path,
+        category: int | None,
+        respect_thresholds: bool,
+        filter_text: str,
+        sort_column: int,
+        sort_order: Qt.SortOrder,
+        headers: list[str],
+    ) -> None:
+        super().__init__()
+        self._generation = generation
+        self._conn_factory = conn_factory
+        self._file_path = file_path
+        self._category = category
+        self._respect_thresholds = respect_thresholds
+        self._filter_text = filter_text
+        self._sort_column = sort_column
+        self._sort_order = sort_order
+        self._headers = headers
+
+    @pyqtSlot()
+    def run(self) -> None:
+        """Query all matching rows and write them to CSV."""
+
+        conn: sqlite3.Connection | None = None
+        try:
+            conn = self._conn_factory()
+            rows = load_tag_stats_rows(
+                conn,
+                self._category,
+                self._respect_thresholds,
+                filter_text=self._filter_text,
+                limit=None,
+                sort_column=self._sort_column,
+                sort_order=self._sort_order,
+            )
+            csv_rows = tag_stats_csv_rows(rows)
+            path = write_tag_stats_csv(self._headers, csv_rows, self._file_path)
+        except Exception as exc:  # pragma: no cover - UI surfaces the message
+            self.error.emit(self._generation, str(exc))
+        else:
+            self.exported.emit(self._generation, str(path), len(rows))
         finally:
             if conn is not None:
                 with suppress(Exception):
@@ -280,6 +405,9 @@ class TagStatsDialog(QDialog):
         self._load_generation = 0
         self._load_thread: QThread | None = None
         self._load_worker: _StatsLoadWorker | None = None
+        self._export_generation = 0
+        self._export_thread: QThread | None = None
+        self._export_worker: _StatsExportWorker | None = None
 
         top_bar = QHBoxLayout()
         top_bar.addWidget(QLabel("Category:"))
@@ -299,6 +427,9 @@ class TagStatsDialog(QDialog):
         self._filter_edit = QLineEdit(self)
         self._filter_edit.setPlaceholderText("type to filter tags…")
         top_bar.addWidget(self._filter_edit)
+        self._export_button = QPushButton("Export CSV", self)
+        self._export_button.setToolTip("Export the currently visible tag statistics")
+        top_bar.addWidget(self._export_button)
 
         self._model = _TagStatsModel()
         self._proxy = QSortFilterProxyModel(self)
@@ -340,6 +471,8 @@ class TagStatsDialog(QDialog):
         self._category_combo.currentIndexChanged.connect(self._reload)
         self._threshold_check.toggled.connect(self._reload)
         self._filter_edit.textChanged.connect(self._proxy.setFilterFixedString)
+        self._filter_edit.textChanged.connect(lambda: self._update_export_button())
+        self._export_button.clicked.connect(self._on_export_csv)
 
         self._reload()
 
@@ -361,6 +494,7 @@ class TagStatsDialog(QDialog):
             respect = self._threshold_check.isChecked()
             self._model.load(conn, category, respect)
         self._table.resizeColumnsToContents()
+        self._update_export_button()
 
     def _reload_async(self) -> None:
         """Start a background statistics load for the current filters."""
@@ -375,8 +509,8 @@ class TagStatsDialog(QDialog):
         worker = _StatsLoadWorker(generation, self._conn_factory, category, respect)
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
-        worker.loaded.connect(self._handle_async_loaded)
-        worker.error.connect(self._handle_async_error)
+        worker.loaded.connect(self._handle_load_finished)
+        worker.error.connect(self._handle_load_error)
         thread.finished.connect(worker.deleteLater)
         thread.finished.connect(thread.deleteLater)
         thread.finished.connect(lambda: self._clear_async_refs(thread))
@@ -384,7 +518,7 @@ class TagStatsDialog(QDialog):
         self._load_worker = worker
         thread.start()
 
-    def _handle_async_loaded(self, generation: int, rows: list[_TagStatsRow]) -> None:
+    def _handle_load_finished(self, generation: int, rows: list[_TagStatsRow]) -> None:
         """Apply asynchronously loaded rows if they match the latest request."""
 
         if generation != self._load_generation:
@@ -392,8 +526,9 @@ class TagStatsDialog(QDialog):
         self._model.set_rows(rows)
         self._table.resizeColumnsToContents()
         self._set_loading(False)
+        self._update_export_button()
 
-    def _handle_async_error(self, generation: int, message: str) -> None:
+    def _handle_load_error(self, generation: int, message: str) -> None:
         """Show asynchronous load errors without closing the dialog."""
 
         if generation != self._load_generation:
@@ -404,6 +539,8 @@ class TagStatsDialog(QDialog):
         self._loading_widget.show()
         self._category_combo.setEnabled(True)
         self._threshold_check.setEnabled(True)
+        self._filter_edit.setEnabled(True)
+        self._export_button.setEnabled(False)
 
     def _clear_async_refs(self, thread: QThread) -> None:
         """Drop completed worker references."""
@@ -412,14 +549,28 @@ class TagStatsDialog(QDialog):
             self._load_thread = None
             self._load_worker = None
 
+    def _clear_export_refs(self, thread: QThread) -> None:
+        """Drop completed export worker references."""
+
+        if self._export_thread is thread:
+            self._export_thread = None
+            self._export_worker = None
+
     def _set_loading(self, loading: bool, message: str = "") -> None:
         """Update loading controls for asynchronous statistics reads."""
 
         self._loading_label.setText(message)
-        self._loading_bar.setVisible(loading and message.startswith("Loading"))
+        self._loading_bar.setVisible(loading and (message.startswith("Loading") or message.startswith("Exporting")))
         self._loading_widget.setVisible(loading)
         self._category_combo.setEnabled(not loading)
         self._threshold_check.setEnabled(not loading)
+        self._filter_edit.setEnabled(not loading)
+        self._export_button.setEnabled(not loading and self._model.rowCount() > 0)
+
+    def _update_export_button(self) -> None:
+        """Enable export only when rows are currently visible."""
+
+        self._export_button.setEnabled(not self._loading_widget.isVisible() and self._model.rowCount() > 0)
 
     def showEvent(self, event) -> None:  # type: ignore[override]
         """Kick asynchronous loading after the dialog has been painted."""
@@ -427,6 +578,106 @@ class TagStatsDialog(QDialog):
         super().showEvent(event)
         if self._async_load and self._load_generation == 0:
             QTimer.singleShot(0, self._reload)
+
+    def _on_export_csv(self) -> None:
+        """Prompt for a CSV path and export all rows matching current filters."""
+
+        headers = self._csv_headers()
+        if self._model.rowCount() <= 0:
+            QMessageBox.information(self, "Export tag stats", "No tag statistics to export.")
+            return
+
+        file_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Export tag statistics",
+            self._default_export_name(),
+            "CSV Files (*.csv)",
+        )
+        if not file_path:
+            return
+
+        self._start_csv_export(file_path, headers)
+
+    def _start_csv_export(self, file_path: str, headers: list[str]) -> None:
+        """Start a background export using the current UI filters."""
+
+        self._export_generation += 1
+        generation = self._export_generation
+        header = self._table.horizontalHeader()
+        sort_column = header.sortIndicatorSection() if header is not None else 2
+        sort_order = header.sortIndicatorOrder() if header is not None else Qt.SortOrder.DescendingOrder
+
+        thread = QThread(self)
+        worker = _StatsExportWorker(
+            generation,
+            self._conn_factory,
+            file_path,
+            self._category_combo.currentData(),
+            self._threshold_check.isChecked(),
+            self._filter_edit.text(),
+            sort_column,
+            sort_order,
+            headers,
+        )
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.exported.connect(self._handle_export_finished)
+        worker.error.connect(self._handle_export_error)
+        thread.finished.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+        thread.finished.connect(lambda: self._clear_export_refs(thread))
+        self._export_thread = thread
+        self._export_worker = worker
+        self._set_loading(True, "Exporting tag statistics...")
+        thread.start()
+
+    def _handle_export_finished(self, generation: int, file_path: str, row_count: int) -> None:
+        """Show the export completion message."""
+
+        if generation != self._export_generation:
+            return
+        self._set_loading(False)
+        QMessageBox.information(
+            self,
+            "Export tag stats",
+            f"Exported {row_count} tag statistics row(s) to {file_path}.",
+        )
+
+    def _handle_export_error(self, generation: int, message: str) -> None:
+        """Show export errors and restore controls."""
+
+        if generation != self._export_generation:
+            return
+        self._set_loading(False)
+        QMessageBox.warning(self, "Export tag stats", f"Failed to export CSV: {message}")
+
+    def _collect_visible_csv_rows(self) -> tuple[list[str], list[_CsvRow]]:
+        """Return table headers and rows in the current proxy order."""
+
+        headers = self._csv_headers()
+        rows: list[_CsvRow] = []
+        for row in range(self._proxy.rowCount()):
+            values: _CsvRow = []
+            for column in range(self._proxy.columnCount()):
+                index = self._proxy.index(row, column)
+                values.append(index.data(Qt.ItemDataRole.DisplayRole))
+            rows.append(values)
+        return headers, rows
+
+    def _csv_headers(self) -> list[str]:
+        """Return CSV headers matching the stats table."""
+
+        return [
+            str(self._model.headerData(column, Qt.Orientation.Horizontal))
+            for column in range(self._model.columnCount())
+        ]
+
+    def _default_export_name(self) -> str:
+        """Return a useful default CSV file name for the selected category."""
+
+        category = self._category_combo.currentData()
+        category_part = "all" if category is None else category_name(int(category))
+        return f"tag_stats_{category_part}.csv"
 
     def _apply_selected_tag(self) -> None:
         index = self._table.currentIndex()

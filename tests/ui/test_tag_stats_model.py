@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import csv
 import sqlite3
 import sys
 import time
@@ -12,7 +13,17 @@ import pytest
 from PyQt6.QtCore import QEvent, QModelIndex, Qt
 from PyQt6.QtGui import QKeyEvent
 
-from ui.tag_stats import TagStatsDialog, _load_thresholds, _TagStatsModel, category_name, format_score, merge_thresholds
+from ui.tag_stats import (
+    TagStatsDialog,
+    _load_thresholds,
+    _TagStatsModel,
+    category_name,
+    format_score,
+    load_tag_stats_rows,
+    merge_thresholds,
+    tag_stats_csv_rows,
+    write_tag_stats_csv,
+)
 
 
 def _make_stats_conn() -> sqlite3.Connection:
@@ -107,6 +118,58 @@ def test_tag_stats_model_filters_category_without_thresholds() -> None:
     assert model.data(model.index(0, 1)) == "kobato"
 
 
+def test_load_tag_stats_rows_supports_unlimited_filter_and_sort() -> None:
+    conn = _make_stats_conn()
+
+    rows = load_tag_stats_rows(
+        conn,
+        category=None,
+        respect_thresholds=False,
+        filter_text="o",
+        limit=None,
+        sort_column=1,
+        sort_order=Qt.SortOrder.DescendingOrder,
+    )
+
+    assert [row[1] for row in rows] == ["low_score", "kobato"]
+    assert tag_stats_csv_rows(rows) == [
+        ["general", "low_score", 1, "0.100", "0.100"],
+        ["character", "kobato", 1, "0.300", "0.300"],
+    ]
+
+
+def test_load_tag_stats_rows_escapes_literal_like_wildcards() -> None:
+    conn = _make_stats_conn()
+    conn.execute("INSERT INTO tags VALUES (4, 'under_score', 0)")
+    conn.execute("INSERT INTO file_tags VALUES (10, 4, 0.80)")
+
+    rows = load_tag_stats_rows(
+        conn,
+        category=None,
+        respect_thresholds=False,
+        filter_text="_",
+        limit=None,
+    )
+
+    assert [row[1] for row in rows] == ["low_score", "under_score"]
+
+
+def test_write_tag_stats_csv_adds_suffix_and_writes_utf8_sig(tmp_path: Path) -> None:
+    output = write_tag_stats_csv(
+        ["Category", "Tag"],
+        [["general", "1girl"], ["character", "kobato"]],
+        tmp_path / "stats",
+    )
+
+    assert output == tmp_path / "stats.csv"
+    with output.open("r", encoding="utf-8-sig", newline="") as handle:
+        assert list(csv.reader(handle)) == [
+            ["Category", "Tag"],
+            ["general", "1girl"],
+            ["character", "kobato"],
+        ]
+
+
 @pytest.mark.gui
 def test_tag_stats_dialog_filters_and_ignores_selection_without_tags_parent(
     qtbot,
@@ -139,6 +202,20 @@ def test_tag_stats_dialog_enter_with_no_selection_is_noop(qtbot) -> None:  # typ
     dialog.keyPressEvent(event)
 
     assert event.isAccepted()
+
+
+@pytest.mark.gui
+def test_tag_stats_dialog_collects_visible_rows_in_proxy_order(qtbot) -> None:  # type: ignore[no-untyped-def]
+    conn = _make_stats_conn()
+    dialog = TagStatsDialog(lambda: conn)
+    qtbot.addWidget(dialog)
+
+    dialog._filter_edit.setText("o")
+    dialog._table.sortByColumn(1, Qt.SortOrder.DescendingOrder)
+    headers, rows = dialog._collect_visible_csv_rows()
+
+    assert headers == ["Category", "Tag", "Files", "AvgScore", "MaxScore"]
+    assert rows == [["character", "kobato", 1, "0.300", "0.300"]]
 
 
 @pytest.mark.gui
