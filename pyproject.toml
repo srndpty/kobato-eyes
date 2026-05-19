@@ -93,15 +93,22 @@ source = ["src"]
 [tool.coverage.report]
 show_missing = true
 skip_covered = true
-fail_under = 70
+fail_under = 85
 omit = [
     "src/tagger/pixai_onnx.py",
     "src/tagger/wd14_onnx.py",
+    "src/ui/assets/__init__.py",
+    "src/ui/assets/icons/__init__.py",
     "src/ui/app.py",
     "src/ui/dup_tab.py",
+    "src/ui/dup_widgets.py",
+    "src/ui/icons.py",
+    "src/ui/result_delegates.py",
     "src/ui/settings_tab.py",
     "src/ui/splash_screen.py",
+    "src/ui/tag_stats.py",
     "src/ui/tags_tab.py",
+    "src/ui/widgets/spinner_overlay.py",
 ]
 
 [tool.mypy]

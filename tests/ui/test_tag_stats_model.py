@@ -3,10 +3,14 @@
 from __future__ import annotations
 
 import sqlite3
+import sys
+from types import ModuleType
 
-from PyQt6.QtCore import QModelIndex, Qt
+import pytest
+from PyQt6.QtCore import QEvent, QModelIndex, Qt
+from PyQt6.QtGui import QKeyEvent
 
-from ui.tag_stats import _load_thresholds, _TagStatsModel, category_name, format_score, merge_thresholds
+from ui.tag_stats import TagStatsDialog, _load_thresholds, _TagStatsModel, category_name, format_score, merge_thresholds
 
 
 def _make_stats_conn() -> sqlite3.Connection:
@@ -84,3 +88,37 @@ def test_tag_stats_model_filters_category_without_thresholds() -> None:
     assert model.rowCount() == 1
     assert model.data(model.index(0, 0)) == "character"
     assert model.data(model.index(0, 1)) == "kobato"
+
+
+@pytest.mark.gui
+def test_tag_stats_dialog_filters_and_ignores_selection_without_tags_parent(
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:  # type: ignore[no-untyped-def]
+    conn = _make_stats_conn()
+    dialog = TagStatsDialog(lambda: conn)
+    qtbot.addWidget(dialog)
+    fake_tags_tab = ModuleType("ui.tags_tab")
+    fake_tags_tab.TagsTab = type("TagsTab", (), {})
+    monkeypatch.setitem(sys.modules, "ui.tags_tab", fake_tags_tab)
+
+    assert dialog._model.rowCount() == 2
+    dialog._filter_edit.setText("kobato")
+    assert dialog._proxy.rowCount() == 1
+
+    dialog._table.selectRow(0)
+    dialog._apply_selected_tag()
+
+
+@pytest.mark.gui
+def test_tag_stats_dialog_enter_with_no_selection_is_noop(qtbot) -> None:  # type: ignore[no-untyped-def]
+    conn = _make_stats_conn()
+    dialog = TagStatsDialog(lambda: conn)
+    qtbot.addWidget(dialog)
+    dialog._table.clearSelection()
+    dialog._table.setCurrentIndex(QModelIndex())
+    event = QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_Return, Qt.KeyboardModifier.NoModifier)
+
+    dialog.keyPressEvent(event)
+
+    assert event.isAccepted()
