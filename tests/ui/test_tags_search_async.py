@@ -113,6 +113,26 @@ def test_async_search_returns_first_page_and_loads_more(tags_tab: TagsTab, qapp:
     assert tags_tab._can_load_more  # type: ignore[attr-defined]
 
 
+def test_new_search_scrolls_results_to_top_but_load_more_keeps_position(
+    tags_tab: TagsTab,
+    qapp: QApplication,
+) -> None:
+    _await_idle(tags_tab, qapp)
+    scroll_spy = mock.MagicMock(wraps=tags_tab._scroll_results_to_top)  # type: ignore[attr-defined]
+    tags_tab._scroll_results_to_top = scroll_spy  # type: ignore[attr-defined]
+
+    tags_tab._on_load_more_clicked()
+    _await_idle(tags_tab, qapp)
+
+    scroll_spy.assert_not_called()
+
+    tags_tab._query_edit.setText("fresh")  # type: ignore[attr-defined]
+    tags_tab._on_search_clicked()
+    _await_idle(tags_tab, qapp)
+
+    scroll_spy.assert_called_once_with()
+
+
 def test_async_search_cancel(tags_tab: TagsTab, qapp: QApplication) -> None:
     _await_idle(tags_tab, qapp)
     tags_tab._query_edit.setText("again")  # type: ignore[attr-defined]

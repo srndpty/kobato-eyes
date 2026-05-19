@@ -1430,12 +1430,15 @@ class TagsTab(QWidget):
     def _handle_search_chunk(self, rows: list[dict[str, object]], generation: int) -> None:
         if generation != self._search_state.generation:
             return
+        reset_results = self._search_state.reset_pending
         if self._search_state.reset_pending:
             self._clear_results_for_new_search()
             self._search_state.reset_pending = False
         if not rows:
             return
         self._append_rows(rows)
+        if reset_results:
+            self._scroll_results_to_top()
         self._search_state.consume_rows(len(rows), chunk_size=self._search_chunk_size)
         query_label = self._current_query or "*"
         self._status_label.setText(f"Showing {self._offset} result(s) for '{query_label}'")
@@ -1492,6 +1495,14 @@ class TagsTab(QWidget):
         self._grid_model.removeRows(0, self._grid_model.rowCount())
         self._table_view.viewport().update()
         self._grid_view.viewport().update()
+
+    def _scroll_results_to_top(self) -> None:
+        """Reset both result views to the first item after replacing results."""
+
+        self._table_view.scrollToTop()
+        self._grid_view.scrollToTop()
+        self._table_view.verticalScrollBar().setValue(0)
+        self._grid_view.verticalScrollBar().setValue(0)
 
     def _append_rows(self, rows: Iterable[dict[str, object]]) -> None:
         for record in rows:
