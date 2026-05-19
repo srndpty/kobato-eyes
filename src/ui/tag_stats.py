@@ -599,7 +599,7 @@ class TagStatsDialog(QDialog):
     def _update_export_button(self) -> None:
         """Enable export when the loaded category has data to query."""
 
-        self._export_button.setEnabled(not self._loading_widget.isVisible() and self._proxy.rowCount() > 0)
+        self._export_button.setEnabled(not self._loading_widget.isVisible() and self._model.rowCount() > 0)
 
     def showEvent(self, event) -> None:  # type: ignore[override]
         """Kick asynchronous loading after the dialog has been painted."""
@@ -663,7 +663,7 @@ class TagStatsDialog(QDialog):
         """Prompt for a CSV path and export all rows matching current filters."""
 
         headers = self._csv_headers()
-        if self._proxy.rowCount() <= 0:
+        if self._model.rowCount() <= 0:
             QMessageBox.information(
                 self,
                 "Export tag stats",
