@@ -351,6 +351,8 @@ class _TagStatsModel(QAbstractTableModel):
         if role != Qt.ItemDataRole.DisplayRole:
             return None
         if orientation == Qt.Orientation.Horizontal:
+            if not 0 <= section < len(self.COLUMNS):
+                return None
             return self.COLUMNS[section]
         return section + 1
 
@@ -359,6 +361,10 @@ class _TagStatsModel(QAbstractTableModel):
             return None
         row_index = index.row()
         column_index = index.column()
+        if not 0 <= row_index < len(self._rows):
+            return None
+        if not 0 <= column_index < len(self.COLUMNS):
+            return None
         category_id, tag_name, file_count, avg_score, max_score = self._rows[row_index]
 
         if role == Qt.ItemDataRole.DisplayRole:

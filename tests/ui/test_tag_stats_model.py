@@ -93,6 +93,7 @@ def test_tag_stats_model_loads_and_formats_rows() -> None:
     assert model.rowCount() == 2
     assert model.columnCount() == 5
     assert model.headerData(0, Qt.Orientation.Horizontal) == "Category"
+    assert model.headerData(99, Qt.Orientation.Horizontal) is None
     assert model.headerData(0, Qt.Orientation.Vertical) == 1
     assert model.rowCount(QModelIndex()) == 2
     assert model.tag_at(0) == "1girl"
@@ -105,6 +106,7 @@ def test_tag_stats_model_loads_and_formats_rows() -> None:
     assert model.data(model.index(0, 3)) == "0.700"
     assert model.data(model.index(0, 4), Qt.ItemDataRole.UserRole) == 0.9
     assert model.data(QModelIndex()) is None
+    assert model.data(model.index(0, 99)) is None
 
 
 def test_tag_stats_model_filters_category_without_thresholds() -> None:
