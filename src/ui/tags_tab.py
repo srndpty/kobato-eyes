@@ -657,7 +657,8 @@ class TagsTab(QWidget):
         self._on_search_clicked()
 
     def eventFilter(self, obj, event):
-        if obj is self._query_edit and event.type() == QEvent.Type.KeyPress:
+        query_edit = getattr(self, "_query_edit", None)
+        if query_edit is not None and obj is query_edit and event.type() == QEvent.Type.KeyPress:
             e: QKeyEvent = event  # type: ignore[assignment]
 
             key = e.key()
@@ -1280,7 +1281,7 @@ class TagsTab(QWidget):
         def _conn_factory() -> sqlite3.Connection:
             return self._view_model.open_connection(db_path)
 
-        dialog = TagStatsDialog(_conn_factory, parent=self)
+        dialog = TagStatsDialog(_conn_factory, parent=self, async_load=True)
         dialog.setModal(True)
         dialog.exec()
 
