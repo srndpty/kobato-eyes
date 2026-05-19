@@ -230,6 +230,23 @@ def test_tag_stats_dialog_waits_for_running_worker_thread(qtbot) -> None:  # typ
 
 
 @pytest.mark.gui
+def test_tag_stats_dialog_waits_for_all_tracked_worker_threads(qtbot) -> None:  # type: ignore[no-untyped-def]
+    conn = _make_stats_conn()
+    dialog = TagStatsDialog(lambda: conn)
+    qtbot.addWidget(dialog)
+    threads = [QThread(), QThread()]
+    for thread in threads:
+        thread.start()
+    qtbot.waitUntil(lambda: all(thread.isRunning() for thread in threads), timeout=1000)
+    dialog._load_thread = threads[-1]
+    dialog._load_threads = list(threads)
+
+    dialog._wait_for_worker_threads()
+
+    assert all(not thread.isRunning() for thread in threads)
+
+
+@pytest.mark.gui
 def test_tag_stats_dialog_async_loads_rows_after_show(qtbot, tmp_path: Path) -> None:  # type: ignore[no-untyped-def]
     db_path = tmp_path / "stats.db"
     _make_stats_db(db_path)

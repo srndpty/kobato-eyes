@@ -405,9 +405,11 @@ class TagStatsDialog(QDialog):
         self._load_generation = 0
         self._load_thread: QThread | None = None
         self._load_worker: _StatsLoadWorker | None = None
+        self._load_threads: list[QThread] = []
         self._export_generation = 0
         self._export_thread: QThread | None = None
         self._export_worker: _StatsExportWorker | None = None
+        self._export_threads: list[QThread] = []
 
         top_bar = QHBoxLayout()
         top_bar.addWidget(QLabel("Category:"))
@@ -516,6 +518,7 @@ class TagStatsDialog(QDialog):
         thread.finished.connect(lambda: self._clear_async_refs(thread))
         self._load_thread = thread
         self._load_worker = worker
+        self._load_threads.append(thread)
         thread.start()
 
     def _handle_load_finished(self, generation: int, rows: list[_TagStatsRow]) -> None:
@@ -548,6 +551,8 @@ class TagStatsDialog(QDialog):
         if self._load_thread is thread:
             self._load_thread = None
             self._load_worker = None
+        with suppress(ValueError):
+            self._load_threads.remove(thread)
 
     def _clear_export_refs(self, thread: QThread) -> None:
         """Drop completed export worker references."""
@@ -555,6 +560,8 @@ class TagStatsDialog(QDialog):
         if self._export_thread is thread:
             self._export_thread = None
             self._export_worker = None
+        with suppress(ValueError):
+            self._export_threads.remove(thread)
 
     def _set_loading(self, loading: bool, message: str = "") -> None:
         """Update loading controls for asynchronous statistics reads."""
@@ -591,6 +598,10 @@ class TagStatsDialog(QDialog):
 
         self._wait_for_thread(self._load_thread)
         self._wait_for_thread(self._export_thread)
+        for thread in list(self._load_threads):
+            self._wait_for_thread(thread)
+        for thread in list(self._export_threads):
+            self._wait_for_thread(thread)
 
     @staticmethod
     def _wait_for_thread(thread: QThread | None) -> None:
@@ -652,6 +663,7 @@ class TagStatsDialog(QDialog):
         thread.finished.connect(lambda: self._clear_export_refs(thread))
         self._export_thread = thread
         self._export_worker = worker
+        self._export_threads.append(thread)
         self._set_loading(True, "Exporting tag statistics...")
         thread.start()
 
