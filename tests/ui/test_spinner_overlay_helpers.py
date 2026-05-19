@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import pytest
 from PyQt6.QtCore import QEvent, QRect
 
 from ui.widgets.spinner_overlay import DEFAULT_OVERLAY_MESSAGE, SpinnerOverlay, overlay_geometry, overlay_message
@@ -17,6 +18,7 @@ def test_overlay_geometry_handles_missing_parent() -> None:
     assert overlay_geometry(None) == QRect()
 
 
+@pytest.mark.gui
 def test_spinner_overlay_updates_message_and_tracks_parent(qtbot) -> None:  # type: ignore[no-untyped-def]
     from PyQt6.QtWidgets import QWidget
 

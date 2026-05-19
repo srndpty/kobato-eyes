@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
 from PyQt6.QtCore import QRect, QSize
 from PyQt6.QtGui import QColor, QIcon, QPixmap
 from PyQt6.QtWidgets import QWidget
@@ -41,6 +42,7 @@ def test_thumb_panel_layout_helpers_clamp_to_valid_grid() -> None:
     assert thumb_panel_content_height(5, 3, 120, 12) == 264
 
 
+@pytest.mark.gui
 def test_thumb_tile_state_and_pixmap_handling(qtbot, tmp_path: Path) -> None:  # type: ignore[no-untyped-def]
     parent = QWidget()
     parent.setProperty("keeper_id", 1)
@@ -65,6 +67,7 @@ def test_thumb_tile_state_and_pixmap_handling(qtbot, tmp_path: Path) -> None:  #
     assert tile.thumb.pixmap() is not None
 
 
+@pytest.mark.gui
 def test_thumb_panel_relayout_and_visible_tiles(qtbot, tmp_path: Path) -> None:  # type: ignore[no-untyped-def]
     entries = [
         _entry(size=100, width=20, height=10, hamming=1),

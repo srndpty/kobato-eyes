@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import sqlite3
+import sys
+from types import ModuleType
 
+import pytest
 from PyQt6.QtCore import QEvent, QModelIndex, Qt
 from PyQt6.QtGui import QKeyEvent
 
@@ -87,10 +90,17 @@ def test_tag_stats_model_filters_category_without_thresholds() -> None:
     assert model.data(model.index(0, 1)) == "kobato"
 
 
-def test_tag_stats_dialog_filters_and_ignores_selection_without_tags_parent(qtbot) -> None:  # type: ignore[no-untyped-def]
+@pytest.mark.gui
+def test_tag_stats_dialog_filters_and_ignores_selection_without_tags_parent(
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:  # type: ignore[no-untyped-def]
     conn = _make_stats_conn()
     dialog = TagStatsDialog(lambda: conn)
     qtbot.addWidget(dialog)
+    fake_tags_tab = ModuleType("ui.tags_tab")
+    fake_tags_tab.TagsTab = type("TagsTab", (), {})
+    monkeypatch.setitem(sys.modules, "ui.tags_tab", fake_tags_tab)
 
     assert dialog._model.rowCount() == 2
     dialog._filter_edit.setText("kobato")
@@ -100,6 +110,7 @@ def test_tag_stats_dialog_filters_and_ignores_selection_without_tags_parent(qtbo
     dialog._apply_selected_tag()
 
 
+@pytest.mark.gui
 def test_tag_stats_dialog_enter_with_no_selection_is_noop(qtbot) -> None:  # type: ignore[no-untyped-def]
     conn = _make_stats_conn()
     dialog = TagStatsDialog(lambda: conn)
