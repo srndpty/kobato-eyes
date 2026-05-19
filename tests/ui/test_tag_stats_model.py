@@ -11,7 +11,7 @@ from types import ModuleType
 
 import pytest
 from PyQt6.QtCore import QEvent, QModelIndex, Qt, QThread
-from PyQt6.QtGui import QKeyEvent
+from PyQt6.QtGui import QCloseEvent, QKeyEvent
 
 from ui.tag_stats import (
     TagStatsDialog,
@@ -230,7 +230,7 @@ def test_tag_stats_dialog_waits_for_running_worker_thread(qtbot) -> None:  # typ
     thread.start()
     qtbot.waitUntil(thread.isRunning, timeout=1000)
 
-    TagStatsDialog._wait_for_thread(thread)
+    assert TagStatsDialog._wait_for_thread(thread)
 
     assert not thread.isRunning()
 
@@ -247,9 +247,27 @@ def test_tag_stats_dialog_waits_for_all_tracked_worker_threads(qtbot) -> None:  
     dialog._load_thread = threads[-1]
     dialog._load_threads = list(threads)
 
-    dialog._wait_for_worker_threads()
+    assert dialog._wait_for_worker_threads()
 
     assert all(not thread.isRunning() for thread in threads)
+
+
+@pytest.mark.gui
+def test_tag_stats_dialog_close_ignores_when_worker_does_not_stop(
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:  # type: ignore[no-untyped-def]
+    conn = _make_stats_conn()
+    dialog = TagStatsDialog(lambda: conn)
+    qtbot.addWidget(dialog)
+    monkeypatch.setattr(dialog, "_wait_for_worker_threads", lambda: False)
+    event = QCloseEvent()
+
+    dialog.closeEvent(event)
+
+    assert not event.isAccepted()
+    assert not dialog._loading_widget.isHidden()
+    assert dialog._loading_label.text() == "Finishing tag statistics task..."
 
 
 @pytest.mark.gui

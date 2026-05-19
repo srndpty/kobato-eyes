@@ -600,31 +600,39 @@ class TagStatsDialog(QDialog):
     def closeEvent(self, event: QCloseEvent | None) -> None:  # noqa: D401 - Qt signature
         """Wait for running worker threads before the dialog is destroyed."""
 
-        self._wait_for_worker_threads()
+        if not self._wait_for_worker_threads():
+            if event is not None:
+                event.ignore()
+            self._set_loading(True, "Finishing tag statistics task...")
+            return
         if event is not None:
             super().closeEvent(event)
 
-    def _wait_for_worker_threads(self) -> None:
-        """Block briefly until active stats worker threads have finished."""
+    def _wait_for_worker_threads(self) -> bool:
+        """Return whether active stats worker threads finished before close."""
 
-        self._wait_for_thread(self._load_thread)
-        self._wait_for_thread(self._export_thread)
+        finished = True
+        finished = self._wait_for_thread(self._load_thread) and finished
+        finished = self._wait_for_thread(self._export_thread) and finished
         for thread in list(self._load_threads):
-            self._wait_for_thread(thread)
+            finished = self._wait_for_thread(thread) and finished
         for thread in list(self._export_threads):
-            self._wait_for_thread(thread)
+            finished = self._wait_for_thread(thread) and finished
+        return finished
 
     @staticmethod
-    def _wait_for_thread(thread: QThread | None) -> None:
-        """Quit and wait for a worker thread if it is still running."""
+    def _wait_for_thread(thread: QThread | None) -> bool:
+        """Return whether a worker thread is stopped or stopped before timeout."""
 
         if thread is None or not thread.isRunning():
-            return
+            return True
         if QThread.currentThread() is thread:
-            return
+            return False
         thread.quit()
         if not thread.wait(_THREAD_WAIT_TIMEOUT_MS):
             logger.warning("Timed out waiting for tag stats worker thread to finish")
+            return False
+        return True
 
     def _on_export_csv(self) -> None:
         """Prompt for a CSV path and export all rows matching current filters."""
