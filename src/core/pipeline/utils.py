@@ -8,6 +8,7 @@ from typing import Mapping
 from core.config import PipelineSettings
 from tagger.base import TagCategory
 from tagger.labels_util import discover_labels_csv, load_selected_tags
+from tagger.model_inspection import detect_provider_from_model_outputs
 
 # 既定値（必要に応じて調整）
 WD14_DEFAULT_THRESHOLDS = {
@@ -125,19 +126,26 @@ def detect_tagger_provider(settings: PipelineSettings) -> str:
         return "wd14"
 
     csv_candidate = discover_labels_csv(settings.tagger.model_path, settings.tagger.tags_csv)
+    label_count: int | None = None
     if csv_candidate is None:
-        return "wd14"
-    try:
-        tags = load_selected_tags(csv_candidate)
-        logger.info(
-            "Loaded %d tags from %s (first=%r, last=%r)",
-            len(tags),
-            csv_candidate,
-            tags[0].name if tags else None,
-            tags[-1].name if tags else None,
-        )
-    except Exception:
-        return "wd14"
+        tags = []
+    else:
+        try:
+            tags = load_selected_tags(csv_candidate)
+            label_count = len(tags)
+            logger.info(
+                "Loaded %d tags from %s (first=%r, last=%r)",
+                len(tags),
+                csv_candidate,
+                tags[0].name if tags else None,
+                tags[-1].name if tags else None,
+            )
+        except Exception:
+            tags = []
+
+    output_provider = detect_provider_from_model_outputs(settings.tagger.model_path, label_count=label_count)
+    if output_provider is not None:
+        return output_provider
     return "pixai" if any(tag.ips for tag in tags) else "wd14"
 
 
