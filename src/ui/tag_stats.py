@@ -445,6 +445,7 @@ class TagStatsDialog(QDialog):
         self._load_thread: QThread | None = None
         self._load_worker: _StatsLoadWorker | None = None
         self._load_threads: list[QThread] = []
+        self._load_reload_pending = False
         self._export_generation = 0
         self._export_thread: QThread | None = None
         self._export_worker: _StatsExportWorker | None = None
@@ -561,6 +562,12 @@ class TagStatsDialog(QDialog):
     def _reload_async(self) -> None:
         """Start a background statistics load for the current filters."""
 
+        if self._load_threads:
+            self._load_generation += 1
+            self._load_reload_pending = True
+            self._set_loading(True, "Loading tag statistics...")
+            return
+
         self._load_generation += 1
         generation = self._load_generation
         category = self._category_combo.currentData()
@@ -625,6 +632,10 @@ class TagStatsDialog(QDialog):
             self._load_worker = None
         with suppress(ValueError):
             self._load_threads.remove(thread)
+        if self._load_reload_pending and not self._load_threads and not self._close_pending:
+            self._load_reload_pending = False
+            self._reload_async()
+            return
         self._maybe_finish_pending_close()
 
     def _clear_export_refs(self, thread: QThread) -> None:
