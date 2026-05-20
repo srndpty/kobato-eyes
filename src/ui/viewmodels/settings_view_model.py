@@ -68,6 +68,12 @@ class SettingsViewModel(QObject):
 
         self._current_settings = settings
 
+    @property
+    def provider_loader(self) -> Callable[[], Iterable[str]]:
+        """Return the provider loader used by tagger diagnostics."""
+
+        return self._provider_loader
+
     def build_settings(
         self,
         *,

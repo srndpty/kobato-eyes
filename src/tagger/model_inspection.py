@@ -3,13 +3,16 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Callable, Iterable, Protocol
 
 from tagger.labels_util import TagMeta, discover_labels_csv, load_selected_tags
 from tagger.onnx_backend import CPU_PROVIDER, validate_label_count
 
-_PIXAI_OUTPUT_NAMES: tuple[str, ...] = ("prediction", "logits")
+_PIXAI_STRONG_OUTPUT_NAMES: frozenset[str] = frozenset({"prediction"})
+_PIXAI_WEAK_OUTPUT_NAMES: frozenset[str] = frozenset({"logits"})
+_PIXAI_EXPECTED_LABEL_COUNT = 13461
 
 _CATEGORY_LABELS: dict[int, str] = {
     0: "general",
@@ -94,38 +97,50 @@ def _category_counts(labels: Iterable[TagMeta]) -> dict[str, int]:
     return dict(sorted(counts.items()))
 
 
-def _output_dim(session: _OnnxSession) -> int | None:
-    outputs = session.get_outputs()
-    if not outputs:
-        raise RuntimeError("ONNX model has no outputs")
-    shape = list(getattr(outputs[0], "shape", []) or [])
+def _output_dim(output: _OnnxOutput) -> int | None:
+    shape = list(getattr(output, "shape", []) or [])
     if not shape:
         return None
     last = shape[-1]
     return int(last) if isinstance(last, int) else None
 
 
-def _prediction_output(session: _OnnxSession) -> tuple[str | None, int | None, str]:
+def _looks_like_pixai_output(output_name: str, output_dim: int | None) -> bool:
+    if output_name in _PIXAI_STRONG_OUTPUT_NAMES:
+        return output_dim in {_PIXAI_EXPECTED_LABEL_COUNT, None}
+    if output_name in _PIXAI_WEAK_OUTPUT_NAMES:
+        return output_dim == _PIXAI_EXPECTED_LABEL_COUNT
+    return False
+
+
+def _prediction_output(session: _OnnxSession, *, label_count: int | None) -> tuple[str | None, int | None, str]:
     outputs = session.get_outputs()
     if not outputs:
         raise RuntimeError("ONNX model has no outputs")
 
     by_name = {str(getattr(output, "name", "")): output for output in outputs}
-    selected = outputs[0]
-    provider = "wd14"
-    for name in _PIXAI_OUTPUT_NAMES:
+    for name in sorted(_PIXAI_STRONG_OUTPUT_NAMES):
         candidate = by_name.get(name)
         if candidate is not None:
-            selected = candidate
-            provider = "pixai"
-            break
+            output_dim = _output_dim(candidate)
+            if _looks_like_pixai_output(name, output_dim) or output_dim == label_count:
+                return name, output_dim, "pixai"
 
-    shape = list(getattr(selected, "shape", []) or [])
-    if not shape:
-        return str(getattr(selected, "name", "") or ""), None, provider
-    last = shape[-1]
-    output_dim = int(last) if isinstance(last, int) else None
-    return str(getattr(selected, "name", "") or ""), output_dim, provider
+    for name in sorted(_PIXAI_WEAK_OUTPUT_NAMES):
+        candidate = by_name.get(name)
+        if candidate is not None:
+            output_dim = _output_dim(candidate)
+            provider = "pixai" if _looks_like_pixai_output(name, output_dim) else "wd14"
+            return name, output_dim, provider
+
+    if label_count is not None:
+        for output in outputs:
+            output_dim = _output_dim(output)
+            if output_dim == label_count:
+                return str(getattr(output, "name", "") or ""), output_dim, "wd14"
+
+    selected = outputs[0]
+    return str(getattr(selected, "name", "") or ""), _output_dim(selected), "wd14"
 
 
 def _metadata_from_session(session: _OnnxSession) -> dict[str, str]:
@@ -146,6 +161,27 @@ def _metadata_from_session(session: _OnnxSession) -> dict[str, str]:
     return values
 
 
+@lru_cache(maxsize=16)
+def _detect_provider_from_model_outputs_cached(path_str: str, mtime_ns: int, size: int) -> str | None:
+    del mtime_ns, size
+    try:
+        import onnxruntime as ort
+    except ImportError:
+        return None
+
+    available = set(ort.get_available_providers())
+    providers = [CPU_PROVIDER] if CPU_PROVIDER in available else None
+    try:
+        session = ort.InferenceSession(path_str, providers=providers)
+        output_dims = {str(output.name): _output_dim(output) for output in session.get_outputs()}
+    except Exception:
+        return None
+    for name, output_dim in output_dims.items():
+        if _looks_like_pixai_output(name, output_dim):
+            return "pixai"
+    return None
+
+
 def detect_provider_from_model_outputs(model_path: str | Path | None) -> str | None:
     """Return ``pixai`` when ONNX outputs expose PixAI prediction tensors."""
 
@@ -155,18 +191,11 @@ def detect_provider_from_model_outputs(model_path: str | Path | None) -> str | N
     if not path.is_file():
         return None
     try:
-        import onnxruntime as ort
-    except ImportError:
+        resolved = path.resolve(strict=True)
+        stat = resolved.stat()
+    except OSError:
         return None
-
-    available = set(ort.get_available_providers())
-    providers = [CPU_PROVIDER] if CPU_PROVIDER in available else None
-    try:
-        session = ort.InferenceSession(str(path), providers=providers)
-        output_names = {str(output.name) for output in session.get_outputs()}
-    except Exception:
-        return None
-    return "pixai" if any(name in output_names for name in _PIXAI_OUTPUT_NAMES) else None
+    return _detect_provider_from_model_outputs_cached(str(resolved), int(stat.st_mtime_ns), int(stat.st_size))
 
 
 def inspect_model(
@@ -225,7 +254,10 @@ def inspect_model(
         errors.append(f"Failed to load ONNX model: {exc}")
     if session is not None:
         try:
-            output_name, output_dim, provider = _prediction_output(session)
+            output_name, output_dim, provider = _prediction_output(
+                session,
+                label_count=len(labels) if labels else None,
+            )
             if output_dim is None:
                 warnings.append("Model output dimension is dynamic; label count could not be compared.")
             elif labels:
@@ -275,7 +307,7 @@ def format_inspection(inspection: ModelInspection) -> str:
             lines.append(f"Prediction output: {inspection.output_name}")
         lines.append(f"Output dimension: {inspection.output_dim}")
     if inspection.provider:
-        lines.append(f"Detected provider: {inspection.provider}")
+        lines.append(f"Detected tagger backend: {inspection.provider}")
     if inspection.providers:
         lines.append(f"ONNX providers: {', '.join(inspection.providers)}")
     for warning in inspection.warnings:

@@ -94,7 +94,7 @@ def test_inspect_model_reports_output_label_mismatch(tmp_path: Path) -> None:
     assert "Model status: Error" in format_inspection(inspection)
 
 
-def test_inspect_model_reports_missing_csv_without_loading_session(tmp_path: Path) -> None:
+def test_inspect_model_reports_missing_csv_but_still_inspects_model_output(tmp_path: Path) -> None:
     model_path = tmp_path / "model.onnx"
     model_path.write_bytes(b"onnx")
 
@@ -129,4 +129,25 @@ def test_inspect_model_selects_pixai_prediction_output(tmp_path: Path) -> None:
     assert inspection.provider == "pixai"
     assert inspection.output_name == "prediction"
     assert inspection.output_dim == 13461
-    assert "Detected provider: pixai" in format_inspection(inspection)
+    assert "Detected tagger backend: pixai" in format_inspection(inspection)
+
+
+def test_inspect_model_does_not_treat_generic_logits_as_pixai(tmp_path: Path) -> None:
+    model_path = tmp_path / "model.onnx"
+    labels_path = tmp_path / "selected_tags.csv"
+    model_path.write_bytes(b"onnx")
+    labels_path.write_text("tag_id,name,category,count\n1,tag_a,0,1\n2,tag_b,0,1\n", encoding="utf-8")
+
+    inspection = inspect_model(
+        tagger_name="wd14-onnx",
+        model_path=model_path,
+        tags_csv=labels_path,
+        provider_loader=lambda: ["CPUExecutionProvider"],
+        session_factory=lambda _model_path, _providers: _Session(
+            [SimpleNamespace(name="logits", shape=["batch_size", 2])]
+        ),
+    )
+
+    assert inspection.ok is True
+    assert inspection.provider == "wd14"
+    assert inspection.output_name == "logits"

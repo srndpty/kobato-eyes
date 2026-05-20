@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import TYPE_CHECKING, Iterable
+from typing import TYPE_CHECKING, Callable, Iterable
 
 from PyQt6.QtCore import QObject, QRunnable, QThreadPool, QTimer, pyqtSignal
 from PyQt6.QtWidgets import (
@@ -26,6 +26,7 @@ from PyQt6.QtWidgets import (
 )
 
 from core.config import PipelineSettings, TaggerSettings
+from tagger.model_inspection import format_inspection, inspect_model
 from ui.viewmodels import SettingsViewModel
 
 if TYPE_CHECKING:
@@ -48,30 +49,31 @@ class _ModelInspectionRunnable(QRunnable):
     def __init__(
         self,
         generation: int,
-        view_model: SettingsViewModel,
         *,
         tagger_name: str,
         model_path: str | None,
         tags_csv: str | None,
+        provider_loader: Callable[[], Iterable[str]],
     ) -> None:
         super().__init__()
         self._generation = generation
-        self._view_model = view_model
         self._tagger_name = tagger_name
         self._model_path = model_path
         self._tags_csv = tags_csv
+        self._provider_loader = provider_loader
         self.signals = _ModelInspectionSignals()
 
     def run(self) -> None:
         """Inspect model settings and emit a formatted summary."""
 
         try:
-            inspection = self._view_model.inspect_tagger_model(
+            inspection = inspect_model(
                 tagger_name=self._tagger_name,
                 model_path=self._model_path,
                 tags_csv=self._tags_csv,
+                provider_loader=self._provider_loader,
             )
-            message = self._view_model.format_model_inspection(inspection)
+            message = format_inspection(inspection)
             ok = inspection.ok
         except Exception as exc:  # pragma: no cover - defensive UI fallback
             logger.exception("Failed to inspect tagger model")
@@ -189,6 +191,7 @@ class SettingsTab(QWidget):
         self._inspection_timer.setSingleShot(True)
         self._inspection_timer.setInterval(350)
         self._inspection_timer.timeout.connect(self._start_model_inspection)
+        self._inspection_runnables: set[_ModelInspectionRunnable] = set()
 
         self._roots_edit = QPlainTextEdit(self)
         self._roots_edit.setPlaceholderText("One path per line")
@@ -385,12 +388,14 @@ class SettingsTab(QWidget):
         model_path = self._tagger_model_edit.text().strip() or None
         runnable = _ModelInspectionRunnable(
             generation,
-            self._view_model,
             tagger_name=tagger_name,
             model_path=model_path,
             tags_csv=tags_csv,
+            provider_loader=self._view_model.provider_loader,
         )
         runnable.signals.finished.connect(self._on_model_inspection_finished)
+        runnable.signals.finished.connect(lambda *_args, task=runnable: self._inspection_runnables.discard(task))
+        self._inspection_runnables.add(runnable)
         self._thread_pool.start(runnable)
 
     def _on_model_inspection_finished(self, generation: int, message: str, ok: bool) -> None:
