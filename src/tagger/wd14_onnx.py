@@ -639,7 +639,7 @@ class WD14Tagger(ITagger):
         return self._with_score_floor(self._build_threshold_vector(resolved))
 
     @staticmethod
-    def _build_remaining_template(resolved_limits: Mapping[TagCategory, int]) -> np.ndarray:
+    def _build_remaining_template(resolved_limits: Mapping[TagCategory, int | None]) -> np.ndarray:
         """Return a category remaining-count template for postprocess loops."""
 
         remaining = np.full(8, np.iinfo(np.int32).max, dtype=np.int32)

@@ -45,6 +45,18 @@ def test_load_selected_tags_wd14_tag_id_name_category_count(tmp_path: Path) -> N
     ]
 
 
+def test_load_selected_tags_legacy_id_tag_id_name_category_count_ips(tmp_path: Path) -> None:
+    csv_path = tmp_path / "selected_tags_legacy.csv"
+    csv_path.write_text(
+        'id,tag_id,name,category,count,ips\n1,470575,1girl,0,4225150,"[""pokemon""]"\n',
+        encoding="utf-8",
+    )
+
+    tags = load_selected_tags(csv_path)
+
+    assert tags == [TagMeta(name="1girl", category=0, count=4225150, ips=("pokemon",))]
+
+
 def test_sort_by_popularity_orders_by_count_then_name() -> None:
     tags = [
         TagMeta(name="a", category=0, count=100),

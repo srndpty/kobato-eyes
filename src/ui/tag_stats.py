@@ -517,6 +517,9 @@ class TagStatsDialog(QDialog):
         self._filter_edit.textChanged.connect(self._schedule_filter_reload)
         self._filter_edit.textChanged.connect(lambda: self._update_export_button())
         self._export_button.clicked.connect(self._on_export_csv)
+        horizontal_header = self._table.horizontalHeader()
+        if horizontal_header is not None:
+            horizontal_header.sortIndicatorChanged.connect(self._reload)
 
         if not self._async_load:
             self._reload()

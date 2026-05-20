@@ -201,6 +201,31 @@ def test_tag_stats_dialog_filter_reloads_beyond_display_limit(qtbot) -> None:  #
     assert dialog._model.tag_at(0) == "tag_1001"
 
 
+@pytest.mark.gui
+def test_tag_stats_dialog_sort_reloads_beyond_display_limit(qtbot) -> None:  # type: ignore[no-untyped-def]
+    conn = sqlite3.connect(":memory:")
+    conn.executescript(
+        """
+        CREATE TABLE tags (id INTEGER PRIMARY KEY, name TEXT NOT NULL, category INTEGER NOT NULL);
+        CREATE TABLE files (id INTEGER PRIMARY KEY, path TEXT NOT NULL, is_present INTEGER NOT NULL);
+        CREATE TABLE file_tags (file_id INTEGER NOT NULL, tag_id INTEGER NOT NULL, score REAL NOT NULL);
+        INSERT INTO files VALUES (1, 'a.png', 1);
+        """
+    )
+    conn.executemany("INSERT INTO tags VALUES (?, ?, 0)", ((idx, f"tag_{idx:04d}") for idx in range(1, 1002)))
+    conn.executemany("INSERT INTO file_tags VALUES (1, ?, 0.80)", ((idx,) for idx in range(1, 1002)))
+
+    dialog = TagStatsDialog(lambda: conn)
+    qtbot.addWidget(dialog)
+    assert dialog._model.rowCount() == 1000
+    assert dialog._model.tag_at(0) == "tag_0001"
+
+    dialog._table.horizontalHeader().setSortIndicator(1, Qt.SortOrder.DescendingOrder)
+
+    assert dialog._model.rowCount() == 1000
+    assert dialog._model.tag_at(0) == "tag_1001"
+
+
 def test_write_tag_stats_csv_adds_suffix_and_writes_utf8_sig(tmp_path: Path) -> None:
     output = write_tag_stats_csv(
         ["Category", "Tag"],
