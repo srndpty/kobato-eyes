@@ -29,6 +29,43 @@ def test_load_selected_tags_four_columns(tmp_path: Path) -> None:
     assert TagMeta(name="artist:name", category=4, count=50) in tags
 
 
+def test_load_selected_tags_wd14_tag_id_name_category_count(tmp_path: Path) -> None:
+    csv_path = tmp_path / "selected_tags_wd14.csv"
+    csv_path.write_text(
+        "tag_id,name,category,count\n9999999,general,9,807858\n470575,1girl,0,4225150\n212816,solo,0,3515897\n",
+        encoding="utf-8",
+    )
+
+    tags = load_selected_tags(csv_path)
+
+    assert tags == [
+        TagMeta(name="general", category=9, count=807858),
+        TagMeta(name="1girl", category=0, count=4225150),
+        TagMeta(name="solo", category=0, count=3515897),
+    ]
+
+
+def test_load_selected_tags_wd14_numeric_name_uses_header(tmp_path: Path) -> None:
+    csv_path = tmp_path / "selected_tags_numeric_name.csv"
+    csv_path.write_text("tag_id,name,category,count\n123456,2024,0,42\n", encoding="utf-8")
+
+    tags = load_selected_tags(csv_path)
+
+    assert tags == [TagMeta(name="2024", category=0, count=42)]
+
+
+def test_load_selected_tags_legacy_id_tag_id_name_category_count_ips(tmp_path: Path) -> None:
+    csv_path = tmp_path / "selected_tags_legacy.csv"
+    csv_path.write_text(
+        'id,tag_id,name,category,count,ips\n1,470575,1girl,0,4225150,"[""pokemon""]"\n',
+        encoding="utf-8",
+    )
+
+    tags = load_selected_tags(csv_path)
+
+    assert tags == [TagMeta(name="1girl", category=0, count=4225150, ips=("pokemon",))]
+
+
 def test_sort_by_popularity_orders_by_count_then_name() -> None:
     tags = [
         TagMeta(name="a", category=0, count=100),

@@ -52,6 +52,7 @@ _TagStatsRow = tuple[int, str, int, float, float]
 _CsvRow = list[object]
 _DISPLAY_ROW_LIMIT = 1000
 _THREAD_WAIT_TIMEOUT_MS = 3000
+_FILTER_RELOAD_DELAY_MS = 250
 _SORT_EXPRESSIONS = {
     0: "t.category",
     1: "t.name",
@@ -218,12 +219,18 @@ class _StatsLoadWorker(QObject):
         conn_factory: Callable[[], sqlite3.Connection],
         category: int | None,
         respect_thresholds: bool,
+        filter_text: str,
+        sort_column: int,
+        sort_order: Qt.SortOrder,
     ) -> None:
         super().__init__()
         self._generation = generation
         self._conn_factory = conn_factory
         self._category = category
         self._respect_thresholds = respect_thresholds
+        self._filter_text = filter_text
+        self._sort_column = sort_column
+        self._sort_order = sort_order
 
     @pyqtSlot()
     def run(self) -> None:
@@ -232,7 +239,14 @@ class _StatsLoadWorker(QObject):
         conn: sqlite3.Connection | None = None
         try:
             conn = self._conn_factory()
-            rows = load_tag_stats_rows(conn, self._category, self._respect_thresholds)
+            rows = load_tag_stats_rows(
+                conn,
+                self._category,
+                self._respect_thresholds,
+                filter_text=self._filter_text,
+                sort_column=self._sort_column,
+                sort_order=self._sort_order,
+            )
         except Exception as exc:  # pragma: no cover - UI surfaces the message
             self.error.emit(self._generation, str(exc))
         else:
@@ -323,11 +337,22 @@ class _TagStatsModel(QAbstractTableModel):
         conn: sqlite3.Connection,
         category: int | None,
         respect_thresholds: bool,
-        # limit: int,
+        filter_text: str = "",
+        sort_column: int = 2,
+        sort_order: Qt.SortOrder = Qt.SortOrder.DescendingOrder,
     ) -> None:
         """Populate the model using the provided filters."""
 
-        self.set_rows(load_tag_stats_rows(conn, category, respect_thresholds))
+        self.set_rows(
+            load_tag_stats_rows(
+                conn,
+                category,
+                respect_thresholds,
+                filter_text=filter_text,
+                sort_column=sort_column,
+                sort_order=sort_order,
+            )
+        )
 
     def set_rows(self, rows: list[_TagStatsRow]) -> None:
         """Replace the model rows on the GUI thread."""
@@ -420,11 +445,16 @@ class TagStatsDialog(QDialog):
         self._load_thread: QThread | None = None
         self._load_worker: _StatsLoadWorker | None = None
         self._load_threads: list[QThread] = []
+        self._load_reload_pending = False
         self._export_generation = 0
         self._export_thread: QThread | None = None
         self._export_worker: _StatsExportWorker | None = None
         self._export_threads: list[QThread] = []
         self._close_pending = False
+        self._filter_reload_timer = QTimer(self)
+        self._filter_reload_timer.setSingleShot(True)
+        self._filter_reload_timer.setInterval(_FILTER_RELOAD_DELAY_MS)
+        self._filter_reload_timer.timeout.connect(self._reload)
 
         top_bar = QHBoxLayout()
         top_bar.addWidget(QLabel("Category:"))
@@ -451,8 +481,8 @@ class TagStatsDialog(QDialog):
         self._model = _TagStatsModel()
         self._proxy = QSortFilterProxyModel(self)
         self._proxy.setSourceModel(self._model)
-        self._proxy.setFilterCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
-        self._proxy.setFilterKeyColumn(1)
+        # Filtering and ordering are applied by SQL before the display limit.
+        # The proxy is retained only for table index indirection/future extension.
         self._proxy.setSortRole(Qt.ItemDataRole.UserRole)
 
         self._table = QTableView(self)
@@ -487,9 +517,12 @@ class TagStatsDialog(QDialog):
 
         self._category_combo.currentIndexChanged.connect(self._reload)
         self._threshold_check.toggled.connect(self._reload)
-        self._filter_edit.textChanged.connect(self._proxy.setFilterFixedString)
+        self._filter_edit.textChanged.connect(self._schedule_filter_reload)
         self._filter_edit.textChanged.connect(lambda: self._update_export_button())
         self._export_button.clicked.connect(self._on_export_csv)
+        horizontal_header = self._table.horizontalHeader()
+        if horizontal_header is not None:
+            horizontal_header.sortIndicatorChanged.connect(self._reload)
 
         if not self._async_load:
             self._reload()
@@ -506,27 +539,53 @@ class TagStatsDialog(QDialog):
         super().keyPressEvent(event)
 
     def _reload(self) -> None:
+        self._filter_reload_timer.stop()
         if self._async_load:
             self._reload_async()
             return
         with self._conn_factory() as conn:
             category = self._category_combo.currentData()
             respect = self._threshold_check.isChecked()
-            self._model.load(conn, category, respect)
+            sort_column, sort_order = self._current_sort()
+            self._model.load(conn, category, respect, self._filter_edit.text(), sort_column, sort_order)
         self._table.resizeColumnsToContents()
         self._update_export_button()
 
+    def _schedule_filter_reload(self) -> None:
+        """Reload filtered rows after user text settles briefly."""
+
+        if self._async_load:
+            self._filter_reload_timer.start()
+            return
+        self._reload()
+
     def _reload_async(self) -> None:
         """Start a background statistics load for the current filters."""
+
+        if self._load_threads:
+            self._load_generation += 1
+            self._load_reload_pending = True
+            self._set_loading(True, "Loading tag statistics...")
+            return
 
         self._load_generation += 1
         generation = self._load_generation
         category = self._category_combo.currentData()
         respect = self._threshold_check.isChecked()
+        filter_text = self._filter_edit.text()
+        sort_column, sort_order = self._current_sort()
         self._set_loading(True, "Loading tag statistics...")
 
         thread = QThread(self)
-        worker = _StatsLoadWorker(generation, self._conn_factory, category, respect)
+        worker = _StatsLoadWorker(
+            generation,
+            self._conn_factory,
+            category,
+            respect,
+            filter_text,
+            sort_column,
+            sort_order,
+        )
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
         worker.loaded.connect(self._handle_load_finished)
@@ -573,6 +632,10 @@ class TagStatsDialog(QDialog):
             self._load_worker = None
         with suppress(ValueError):
             self._load_threads.remove(thread)
+        if self._load_reload_pending and not self._load_threads and not self._close_pending:
+            self._load_reload_pending = False
+            self._reload_async()
+            return
         self._maybe_finish_pending_close()
 
     def _clear_export_refs(self, thread: QThread) -> None:
@@ -585,7 +648,14 @@ class TagStatsDialog(QDialog):
             self._export_threads.remove(thread)
         self._maybe_finish_pending_close()
 
-    def _set_loading(self, loading: bool, message: str = "", *, show_progress: bool = True) -> None:
+    def _set_loading(
+        self,
+        loading: bool,
+        message: str = "",
+        *,
+        show_progress: bool = True,
+        allow_filter: bool = True,
+    ) -> None:
         """Update loading controls for asynchronous statistics reads."""
 
         self._loading_label.setText(message)
@@ -593,13 +663,21 @@ class TagStatsDialog(QDialog):
         self._loading_widget.setVisible(loading)
         self._category_combo.setEnabled(not loading)
         self._threshold_check.setEnabled(not loading)
-        self._filter_edit.setEnabled(not loading)
-        self._export_button.setEnabled(not loading and self._model.rowCount() > 0)
+        self._filter_edit.setEnabled((not loading) or allow_filter)
+        self._export_button.setEnabled(not loading and self._proxy.rowCount() > 0)
 
     def _update_export_button(self) -> None:
-        """Enable export when the loaded category has data to query."""
+        """Enable export when the current filtered result has rows."""
 
-        self._export_button.setEnabled(not self._loading_widget.isVisible() and self._model.rowCount() > 0)
+        self._export_button.setEnabled(not self._loading_widget.isVisible() and self._proxy.rowCount() > 0)
+
+    def _current_sort(self) -> tuple[int, Qt.SortOrder]:
+        """Return the current table sort column and order."""
+
+        header = self._table.horizontalHeader()
+        if header is None:
+            return 2, Qt.SortOrder.DescendingOrder
+        return header.sortIndicatorSection(), header.sortIndicatorOrder()
 
     def showEvent(self, event) -> None:  # type: ignore[override]
         """Kick asynchronous loading after the dialog has been painted."""
@@ -619,6 +697,7 @@ class TagStatsDialog(QDialog):
                 True,
                 "Finishing tag statistics task. This window will close when it completes.",
                 show_progress=False,
+                allow_filter=False,
             )
             return
         self._close_pending = False
@@ -687,9 +766,7 @@ class TagStatsDialog(QDialog):
 
         self._export_generation += 1
         generation = self._export_generation
-        header = self._table.horizontalHeader()
-        sort_column = header.sortIndicatorSection() if header is not None else 2
-        sort_order = header.sortIndicatorOrder() if header is not None else Qt.SortOrder.DescendingOrder
+        sort_column, sort_order = self._current_sort()
 
         thread = QThread(self)
         worker = _StatsExportWorker(
@@ -713,7 +790,7 @@ class TagStatsDialog(QDialog):
         self._export_thread = thread
         self._export_worker = worker
         self._export_threads.append(thread)
-        self._set_loading(True, "Exporting tag statistics...")
+        self._set_loading(True, "Exporting tag statistics...", allow_filter=False)
         thread.start()
 
     def _handle_export_finished(self, generation: int, file_path: str, row_count: int) -> None:

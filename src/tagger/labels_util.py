@@ -7,7 +7,7 @@ import json
 import logging
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, Iterator
+from typing import Iterable
 
 logger = logging.getLogger(__name__)
 
@@ -79,21 +79,30 @@ def _parse_count(value: str | None) -> int:
         return 0
 
 
-def _iter_csv_rows(csv_path: Path) -> Iterator[list[str]]:
-    with csv_path.open("r", encoding="utf-8-sig", newline="") as handle:
-        reader = csv.reader(handle)
-        for row in reader:
-            if not row:
-                continue
-            cells = [cell.strip() for cell in row]
-            if not any(cells):
-                continue
-            if cells[0].startswith("#"):
-                continue
-            lower_first = cells[0].lower()
-            if lower_first in {"tag_id", "tagid", "id"}:
-                continue
-            yield cells
+_HEADER_ALIASES: dict[str, str] = {
+    "id": "row_id",
+    "tag_id": "tag_id",
+    "tagid": "tag_id",
+    "tag": "name",
+    "name": "name",
+    "category": "category",
+    "count": "count",
+    "ips": "ips",
+}
+
+
+def _header_columns(cells: list[str]) -> dict[str, int] | None:
+    columns: dict[str, int] = {}
+    for index, cell in enumerate(cells):
+        key = _HEADER_ALIASES.get(cell.strip().lower())
+        if key is None:
+            continue
+        columns.setdefault(key, index)
+    if "name" not in columns:
+        return None
+    if len(columns) < 2:
+        return None
+    return columns
 
 
 def _parse_ips(value: str | None) -> tuple[str, ...]:
@@ -124,7 +133,10 @@ def _parse_ips(value: str | None) -> tuple[str, ...]:
 BROKEN_TAG_PREFIX = "__pixai_broken_"
 
 
-def _parse_row(cells: list[str]) -> TagMeta | None:
+def _parse_row(cells: list[str], columns: dict[str, int] | None = None) -> TagMeta | None:
+    if columns is not None:
+        return _parse_headered_row(cells, columns)
+
     name = ""
     category = 0
     count = 0
@@ -140,11 +152,20 @@ def _parse_row(cells: list[str]) -> TagMeta | None:
             name = first
             category = _parse_category(second)
     elif cell_count >= 3 and _looks_like_int(cells[0]):
-        name = cells[2] if cell_count > 2 else ""
-        category = _parse_category(cells[3] if cell_count > 3 else None)
-        count = _parse_count(cells[4] if cell_count > 4 else None)
-        if cell_count > 5:
-            ips = _parse_ips(cells[5])
+        if cell_count > 1 and _looks_like_int(cells[1]):
+            # Legacy/export format: id,tag_id,name,category,count,ips
+            name = cells[2] if cell_count > 2 else ""
+            category = _parse_category(cells[3] if cell_count > 3 else None)
+            count = _parse_count(cells[4] if cell_count > 4 else None)
+            if cell_count > 5:
+                ips = _parse_ips(cells[5])
+        else:
+            # Common WD14 format: tag_id,name,category,count[,ips]
+            name = cells[1] if cell_count > 1 else ""
+            category = _parse_category(cells[2] if cell_count > 2 else None)
+            count = _parse_count(cells[3] if cell_count > 3 else None)
+            if cell_count > 4:
+                ips = _parse_ips(cells[4])
     else:
         first = cells[0]
         name = first
@@ -168,6 +189,33 @@ def _parse_row(cells: list[str]) -> TagMeta | None:
     return TagMeta(name=cleaned, category=category, count=count, ips=ips)
 
 
+def _cell_at(cells: list[str], index: int | None) -> str | None:
+    if index is None:
+        return None
+    if index >= len(cells):
+        return None
+    return cells[index]
+
+
+def _parse_headered_row(cells: list[str], columns: dict[str, int]) -> TagMeta | None:
+    name = _cell_at(cells, columns.get("name")) or ""
+    category = _parse_category(_cell_at(cells, columns.get("category")))
+    count = _parse_count(_cell_at(cells, columns.get("count")))
+    ips = _parse_ips(_cell_at(cells, columns.get("ips")))
+    cleaned = name.strip()
+    if cleaned:
+        return TagMeta(name=cleaned, category=category, count=count, ips=ips)
+
+    rid: int | None = None
+    for key in ("tag_id", "row_id"):
+        value = _cell_at(cells, columns.get(key))
+        if value is not None and _looks_like_int(value):
+            rid = int(value)
+            break
+    placeholder = f"{BROKEN_TAG_PREFIX}{rid if rid is not None else 'unknown'}"
+    return TagMeta(name=placeholder, category=5, count=0, ips=())
+
+
 def load_selected_tags(csv_path: str | Path) -> list[TagMeta]:
     """Parse a WD14 ``selected_tags.csv`` file.
 
@@ -186,12 +234,27 @@ def load_selected_tags(csv_path: str | Path) -> list[TagMeta]:
     path = Path(csv_path)
     labels: list[TagMeta] = []
     missing: list[tuple[int, list[str]]] = []
-    for lineno, cells in enumerate(_iter_csv_rows(path), start=1):
-        tag = _parse_row(cells)
-        if tag is not None:
-            labels.append(tag)
-        else:
-            missing.append((lineno, cells))
+    columns: dict[str, int] | None = None
+    with path.open("r", encoding="utf-8-sig", newline="") as handle:
+        reader = csv.reader(handle)
+        for lineno, row in enumerate(reader, start=1):
+            if not row:
+                continue
+            cells = [cell.strip() for cell in row]
+            if not any(cells):
+                continue
+            if cells[0].startswith("#"):
+                continue
+            header = _header_columns(cells)
+            if header is not None:
+                columns = header
+                continue
+
+            tag = _parse_row(cells, columns)
+            if tag is not None:
+                labels.append(tag)
+            else:
+                missing.append((lineno, cells))
     if missing:
         import logging
 
