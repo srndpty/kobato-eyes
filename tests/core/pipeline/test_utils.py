@@ -18,6 +18,6 @@ def test_detect_tagger_provider_prefers_model_output_detection(monkeypatch) -> N
             }
         }
     )
-    monkeypatch.setattr(pipeline_utils, "detect_provider_from_model_outputs", lambda _path: "pixai")
+    monkeypatch.setattr(pipeline_utils, "detect_provider_from_model_outputs", lambda _path, label_count: "pixai")
 
     assert pipeline_utils.detect_tagger_provider(settings) == "pixai"

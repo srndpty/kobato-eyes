@@ -107,10 +107,14 @@ def _output_dim(output: _OnnxOutput) -> int | None:
 
 def _looks_like_pixai_output(output_name: str, output_dim: int | None) -> bool:
     if output_name in _PIXAI_STRONG_OUTPUT_NAMES:
-        return output_dim in {_PIXAI_EXPECTED_LABEL_COUNT, None}
+        return output_dim == _PIXAI_EXPECTED_LABEL_COUNT
     if output_name in _PIXAI_WEAK_OUTPUT_NAMES:
         return output_dim == _PIXAI_EXPECTED_LABEL_COUNT
     return False
+
+
+def _matches_label_count(output_dim: int | None, label_count: int | None) -> bool:
+    return output_dim is not None and label_count is not None and output_dim == label_count
 
 
 def _prediction_output(session: _OnnxSession, *, label_count: int | None) -> tuple[str | None, int | None, str]:
@@ -123,7 +127,7 @@ def _prediction_output(session: _OnnxSession, *, label_count: int | None) -> tup
         candidate = by_name.get(name)
         if candidate is not None:
             output_dim = _output_dim(candidate)
-            if _looks_like_pixai_output(name, output_dim) or output_dim == label_count:
+            if _looks_like_pixai_output(name, output_dim) or _matches_label_count(output_dim, label_count):
                 return name, output_dim, "pixai"
 
     for name in sorted(_PIXAI_WEAK_OUTPUT_NAMES):
@@ -162,7 +166,12 @@ def _metadata_from_session(session: _OnnxSession) -> dict[str, str]:
 
 
 @lru_cache(maxsize=16)
-def _detect_provider_from_model_outputs_cached(path_str: str, mtime_ns: int, size: int) -> str | None:
+def _detect_provider_from_model_outputs_cached(
+    path_str: str,
+    mtime_ns: int,
+    size: int,
+    label_count: int | None,
+) -> str | None:
     del mtime_ns, size
     try:
         import onnxruntime as ort
@@ -177,12 +186,14 @@ def _detect_provider_from_model_outputs_cached(path_str: str, mtime_ns: int, siz
     except Exception:
         return None
     for name, output_dim in output_dims.items():
-        if _looks_like_pixai_output(name, output_dim):
+        if _looks_like_pixai_output(name, output_dim) or (
+            name in _PIXAI_STRONG_OUTPUT_NAMES and _matches_label_count(output_dim, label_count)
+        ):
             return "pixai"
     return None
 
 
-def detect_provider_from_model_outputs(model_path: str | Path | None) -> str | None:
+def detect_provider_from_model_outputs(model_path: str | Path | None, *, label_count: int | None = None) -> str | None:
     """Return ``pixai`` when ONNX outputs expose PixAI prediction tensors."""
 
     if not model_path:
@@ -195,7 +206,12 @@ def detect_provider_from_model_outputs(model_path: str | Path | None) -> str | N
         stat = resolved.stat()
     except OSError:
         return None
-    return _detect_provider_from_model_outputs_cached(str(resolved), int(stat.st_mtime_ns), int(stat.st_size))
+    return _detect_provider_from_model_outputs_cached(
+        str(resolved),
+        int(stat.st_mtime_ns),
+        int(stat.st_size),
+        label_count,
+    )
 
 
 def inspect_model(

@@ -35,12 +35,12 @@ def _session_factory(output_dim: int):
     return create_session
 
 
-def _multi_output_session_factory() -> _Session:
+def _multi_output_session_factory(output_dim: int = 13461) -> _Session:
     return _Session(
         [
             SimpleNamespace(name="embedding", shape=["batch_size", 1024]),
-            SimpleNamespace(name="logits", shape=["batch_size", 13461]),
-            SimpleNamespace(name="prediction", shape=["batch_size", 13461]),
+            SimpleNamespace(name="logits", shape=["batch_size", output_dim]),
+            SimpleNamespace(name="prediction", shape=["batch_size", output_dim]),
         ]
     )
 
@@ -130,6 +130,49 @@ def test_inspect_model_selects_pixai_prediction_output(tmp_path: Path) -> None:
     assert inspection.output_name == "prediction"
     assert inspection.output_dim == 13461
     assert "Detected tagger backend: pixai" in format_inspection(inspection)
+
+
+def test_inspect_model_selects_new_pixai_prediction_when_label_count_matches(tmp_path: Path) -> None:
+    label_count = 4
+    model_path = tmp_path / "model.onnx"
+    labels_path = tmp_path / "selected_tags.csv"
+    model_path.write_bytes(b"onnx")
+    labels_path.write_text("\n".join(f"{index},tag_{index},0,1" for index in range(label_count)), encoding="utf-8")
+
+    inspection = inspect_model(
+        tagger_name="wd14-onnx",
+        model_path=model_path,
+        tags_csv=labels_path,
+        provider_loader=lambda: ["CPUExecutionProvider"],
+        session_factory=lambda _model_path, _providers: _multi_output_session_factory(label_count),
+    )
+
+    assert inspection.ok is True
+    assert inspection.provider == "pixai"
+    assert inspection.output_dim == label_count
+
+
+def test_inspect_model_does_not_treat_dynamic_prediction_as_pixai(tmp_path: Path) -> None:
+    model_path = tmp_path / "model.onnx"
+    labels_path = tmp_path / "selected_tags.csv"
+    model_path.write_bytes(b"onnx")
+    labels_path.write_text("tag_id,name,category,count\n1,tag_a,0,1\n", encoding="utf-8")
+
+    inspection = inspect_model(
+        tagger_name="wd14-onnx",
+        model_path=model_path,
+        tags_csv=labels_path,
+        provider_loader=lambda: ["CPUExecutionProvider"],
+        session_factory=lambda _model_path, _providers: _Session(
+            [SimpleNamespace(name="prediction", shape=["batch_size", "tag_count"])]
+        ),
+    )
+
+    assert inspection.ok is True
+    assert inspection.provider == "wd14"
+    assert inspection.output_name == "prediction"
+    assert inspection.output_dim is None
+    assert inspection.warnings == ("Model output dimension is dynamic; label count could not be compared.",)
 
 
 def test_inspect_model_does_not_treat_generic_logits_as_pixai(tmp_path: Path) -> None:

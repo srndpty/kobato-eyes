@@ -125,24 +125,27 @@ def detect_tagger_provider(settings: PipelineSettings) -> str:
     if configured not in {"", "auto"}:
         return "wd14"
 
-    output_provider = detect_provider_from_model_outputs(settings.tagger.model_path)
+    csv_candidate = discover_labels_csv(settings.tagger.model_path, settings.tagger.tags_csv)
+    label_count: int | None = None
+    if csv_candidate is None:
+        tags = []
+    else:
+        try:
+            tags = load_selected_tags(csv_candidate)
+            label_count = len(tags)
+            logger.info(
+                "Loaded %d tags from %s (first=%r, last=%r)",
+                len(tags),
+                csv_candidate,
+                tags[0].name if tags else None,
+                tags[-1].name if tags else None,
+            )
+        except Exception:
+            tags = []
+
+    output_provider = detect_provider_from_model_outputs(settings.tagger.model_path, label_count=label_count)
     if output_provider is not None:
         return output_provider
-
-    csv_candidate = discover_labels_csv(settings.tagger.model_path, settings.tagger.tags_csv)
-    if csv_candidate is None:
-        return "wd14"
-    try:
-        tags = load_selected_tags(csv_candidate)
-        logger.info(
-            "Loaded %d tags from %s (first=%r, last=%r)",
-            len(tags),
-            csv_candidate,
-            tags[0].name if tags else None,
-            tags[-1].name if tags else None,
-        )
-    except Exception:
-        return "wd14"
     return "pixai" if any(tag.ips for tag in tags) else "wd14"
 
 
