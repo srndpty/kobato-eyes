@@ -45,6 +45,15 @@ def test_load_selected_tags_wd14_tag_id_name_category_count(tmp_path: Path) -> N
     ]
 
 
+def test_load_selected_tags_wd14_numeric_name_uses_header(tmp_path: Path) -> None:
+    csv_path = tmp_path / "selected_tags_numeric_name.csv"
+    csv_path.write_text("tag_id,name,category,count\n123456,2024,0,42\n", encoding="utf-8")
+
+    tags = load_selected_tags(csv_path)
+
+    assert tags == [TagMeta(name="2024", category=0, count=42)]
+
+
 def test_load_selected_tags_legacy_id_tag_id_name_category_count_ips(tmp_path: Path) -> None:
     csv_path = tmp_path / "selected_tags_legacy.csv"
     csv_path.write_text(
