@@ -176,6 +176,31 @@ def test_load_tag_stats_rows_can_export_beyond_display_limit() -> None:
     assert len(export_rows) == 1001
 
 
+@pytest.mark.gui
+def test_tag_stats_dialog_filter_reloads_beyond_display_limit(qtbot) -> None:  # type: ignore[no-untyped-def]
+    conn = sqlite3.connect(":memory:")
+    conn.executescript(
+        """
+        CREATE TABLE tags (id INTEGER PRIMARY KEY, name TEXT NOT NULL, category INTEGER NOT NULL);
+        CREATE TABLE files (id INTEGER PRIMARY KEY, path TEXT NOT NULL, is_present INTEGER NOT NULL);
+        CREATE TABLE file_tags (file_id INTEGER NOT NULL, tag_id INTEGER NOT NULL, score REAL NOT NULL);
+        INSERT INTO files VALUES (1, 'a.png', 1);
+        """
+    )
+    conn.executemany("INSERT INTO tags VALUES (?, ?, 0)", ((idx, f"tag_{idx:04d}") for idx in range(1, 1002)))
+    conn.executemany("INSERT INTO file_tags VALUES (1, ?, 0.80)", ((idx,) for idx in range(1, 1002)))
+
+    dialog = TagStatsDialog(lambda: conn)
+    qtbot.addWidget(dialog)
+    assert dialog._model.rowCount() == 1000
+
+    dialog._filter_edit.setText("tag_1001")
+
+    assert dialog._model.rowCount() == 1
+    assert dialog._proxy.rowCount() == 1
+    assert dialog._model.tag_at(0) == "tag_1001"
+
+
 def test_write_tag_stats_csv_adds_suffix_and_writes_utf8_sig(tmp_path: Path) -> None:
     output = write_tag_stats_csv(
         ["Category", "Tag"],
@@ -208,7 +233,12 @@ def test_tag_stats_dialog_filters_and_ignores_selection_without_tags_parent(
     assert dialog._filter_edit.placeholderText() == "type to filter tags..."
     assert "1000-row display limit" in dialog._export_button.toolTip()
     dialog._filter_edit.setText("kobato")
+    assert dialog._model.rowCount() == 1
     assert dialog._proxy.rowCount() == 1
+    dialog._filter_edit.setText("missing")
+    assert dialog._model.rowCount() == 0
+    assert not dialog._export_button.isEnabled()
+    dialog._filter_edit.setText("kobato")
 
     dialog._table.selectRow(0)
     dialog._apply_selected_tag()

@@ -29,6 +29,22 @@ def test_load_selected_tags_four_columns(tmp_path: Path) -> None:
     assert TagMeta(name="artist:name", category=4, count=50) in tags
 
 
+def test_load_selected_tags_wd14_tag_id_name_category_count(tmp_path: Path) -> None:
+    csv_path = tmp_path / "selected_tags_wd14.csv"
+    csv_path.write_text(
+        "tag_id,name,category,count\n9999999,general,9,807858\n470575,1girl,0,4225150\n212816,solo,0,3515897\n",
+        encoding="utf-8",
+    )
+
+    tags = load_selected_tags(csv_path)
+
+    assert tags == [
+        TagMeta(name="general", category=9, count=807858),
+        TagMeta(name="1girl", category=0, count=4225150),
+        TagMeta(name="solo", category=0, count=3515897),
+    ]
+
+
 def test_sort_by_popularity_orders_by_count_then_name() -> None:
     tags = [
         TagMeta(name="a", category=0, count=100),

@@ -193,8 +193,13 @@ class WD14Tagger(ITagger):
         self._cat_to_idx: dict[int, np.ndarray] = {
             int(cat): np.nonzero(self._label_cats == int(cat))[0] for cat in sorted(set(self._label_cats.tolist()))
         }
+        self._topk_cap = 128  # 上限256個まで
+        self._score_floor = float(os.getenv("KE_TAG_SCORE_FLOOR", "0.1"))
         # デフォルトしきい値ベクトルはキャッシュしておく（可変のときは都度生成）
         self._default_thr_vec = self._build_threshold_vector(self._default_thresholds)
+        self._default_effective_thr_vec = self._with_score_floor(self._default_thr_vec)
+        self._default_limits = self._resolve_max_tags(self._default_max_tags, None)
+        self._default_remaining_template = self._build_remaining_template(self._default_limits)
 
         _log_provider_details(self._session, chosen_providers)
         _ACTIVE_TAGGERS.add(self)
@@ -213,8 +218,6 @@ class WD14Tagger(ITagger):
             # 注意: 終了時のクリーンアップは弱参照の finalizer やプロセス終了で開放される前提
             self._pre_exec = ThreadPoolExecutor(max_workers=self._pre_workers, thread_name_prefix="ke-pre")
 
-        self._topk_cap = 128  # 上限256個まで
-        self._score_floor = float(os.getenv("KE_TAG_SCORE_FLOOR", "0.1"))
         self._batch_seq = 0
         self._last_batch_end: float | None = None
 
@@ -449,16 +452,7 @@ class WD14Tagger(ITagger):
         else:
             probs = _sigmoid(logits).astype(np.float32, copy=False)
 
-        resolved_thresholds = self._resolve_thresholds(self._default_thresholds, thresholds)
-        thr_vec = (
-            self._default_thr_vec
-            if resolved_thresholds == self._default_thresholds
-            else self._build_threshold_vector(resolved_thresholds)
-        )
-        # ★ 全カテゴリ共通の下限（例: 0.1）を合流
-        floor = getattr(self, "_score_floor", 0.0)
-        if floor > 0.0:
-            np.maximum(thr_vec, floor, out=thr_vec)  # in-place で底上げ
+        thr_vec = self._effective_threshold_vector(thresholds)
 
         mask = probs >= thr_vec
         masked = np.where(mask, probs, -np.inf)
@@ -522,15 +516,15 @@ class WD14Tagger(ITagger):
         validate_label_count(int(C), len(self._labels), backend_name="WD14")
 
         # --- 2) 閾値ベクトル（デフォルトキャッシュを再利用）
-        resolved_thr = self._resolve_thresholds(self._default_thresholds, thresholds)
-        thr_vec = (
-            self._default_thr_vec
-            if resolved_thr == self._default_thresholds
-            else self._build_threshold_vector(resolved_thr)
-        )
+        thr_vec = self._effective_threshold_vector(thresholds)
 
         # --- 3) カテゴリ上限
         resolved_limits = self._resolve_max_tags(self._default_max_tags, max_tags)
+        remaining_template = (
+            self._default_remaining_template
+            if max_tags is None and resolved_limits == self._default_limits
+            else self._build_remaining_template(resolved_limits)
+        )
 
         # unbounded（None）を含むかで、画像ごとの K を決める
         has_unbounded = any(v is None for v in resolved_limits.values())
@@ -558,24 +552,15 @@ class WD14Tagger(ITagger):
             else:
                 K = min(hit_count, base_cap, hard_cap)
 
-            # -inf でマスク（閾値未満は候補から除外）
             masked = np.where(hit_mask, scores, -np.inf)
-
-            # top-K 候補だけ取り出す（argpartition は O(C)）
-            # すべて -inf の場合に備え、kth を安全側でクリップ
             kth = max(0, min(K - 1, C - 1))
-            cand_idx = np.argpartition(-masked, kth)[:K]  # (≤K,)
+            cand_idx = np.argpartition(-masked, kth)[:K]
 
             # その小さな集合だけ降順ソート（O(K log K)）
             cand_sorted = cand_idx[np.argsort(-masked[cand_idx], kind="stable")]
 
             # カテゴリ上限の残数（0..7 あたりまで想定、足りなければ自動拡張でもOK）
-            remaining = np.full(8, np.iinfo(np.int32).max, dtype=np.int32)
-            for cat, lim in resolved_limits.items():
-                if lim is not None:
-                    c = int(cat)
-                    if 0 <= c < remaining.size:
-                        remaining[c] = max(0, int(lim))
+            remaining = remaining_template.copy()
 
             picks_idx: list[int] = []
             picks_score: list[float] = []
@@ -583,7 +568,7 @@ class WD14Tagger(ITagger):
                 c = int(cats[j])
                 if c < remaining.size and remaining[c] <= 0:
                     continue
-                s = float(scores[j])
+                s = float(masked[j])
                 if not np.isfinite(s) or s < float(thr_vec[j]):  # 念のための防御
                     continue
                 picks_idx.append(int(j))
@@ -633,6 +618,37 @@ class WD14Tagger(ITagger):
             if idx is not None and len(idx) > 0:
                 vec[idx] = float(v)
         return vec
+
+    def _with_score_floor(self, thresholds: np.ndarray) -> np.ndarray:
+        """Return a threshold vector with the global score floor applied."""
+
+        vec = np.array(thresholds, dtype=np.float32, copy=True)
+        floor = float(getattr(self, "_score_floor", 0.0))
+        if floor > 0.0:
+            np.maximum(vec, floor, out=vec)
+        return vec
+
+    def _effective_threshold_vector(self, thresholds: ThresholdMap | None) -> np.ndarray:
+        """Return the cached or per-call threshold vector used by postprocess."""
+
+        if thresholds is None:
+            return self._default_effective_thr_vec
+        resolved = self._resolve_thresholds(self._default_thresholds, thresholds)
+        if resolved == self._default_thresholds:
+            return self._default_effective_thr_vec
+        return self._with_score_floor(self._build_threshold_vector(resolved))
+
+    @staticmethod
+    def _build_remaining_template(resolved_limits: Mapping[TagCategory, int]) -> np.ndarray:
+        """Return a category remaining-count template for postprocess loops."""
+
+        remaining = np.full(8, np.iinfo(np.int32).max, dtype=np.int32)
+        for cat, lim in resolved_limits.items():
+            if lim is not None:
+                c = int(cat)
+                if 0 <= c < remaining.size:
+                    remaining[c] = max(0, int(lim))
+        return remaining
 
     def _resolve_labels_path(self, explicit: str | Path | None) -> Path:
         if explicit is not None:
@@ -799,15 +815,7 @@ class WD14Tagger(ITagger):
             probs = _sigmoid(logits).astype(np.float32, copy=False)
 
         # しきい値: 辞書を解決 → ベクトル（既定と同じならキャッシュを再利用）
-        resolved_thresholds = self._resolve_thresholds(self._default_thresholds, thresholds)
-        thr_vec = (
-            self._default_thr_vec
-            if resolved_thresholds == self._default_thresholds
-            else self._build_threshold_vector(resolved_thresholds)
-        )
-        floor = getattr(self, "_score_floor", 0.0)
-        if floor > 0.0:
-            np.maximum(thr_vec, floor, out=thr_vec)
+        thr_vec = self._effective_threshold_vector(thresholds)
         # マスク（B,C）
         mask = probs >= thr_vec  # broadcast
 

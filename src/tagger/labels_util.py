@@ -140,11 +140,20 @@ def _parse_row(cells: list[str]) -> TagMeta | None:
             name = first
             category = _parse_category(second)
     elif cell_count >= 3 and _looks_like_int(cells[0]):
-        name = cells[2] if cell_count > 2 else ""
-        category = _parse_category(cells[3] if cell_count > 3 else None)
-        count = _parse_count(cells[4] if cell_count > 4 else None)
-        if cell_count > 5:
-            ips = _parse_ips(cells[5])
+        if cell_count > 1 and _looks_like_int(cells[1]):
+            # Legacy/export format: id,tag_id,name,category,count,ips
+            name = cells[2] if cell_count > 2 else ""
+            category = _parse_category(cells[3] if cell_count > 3 else None)
+            count = _parse_count(cells[4] if cell_count > 4 else None)
+            if cell_count > 5:
+                ips = _parse_ips(cells[5])
+        else:
+            # Common WD14 format: tag_id,name,category,count[,ips]
+            name = cells[1] if cell_count > 1 else ""
+            category = _parse_category(cells[2] if cell_count > 2 else None)
+            count = _parse_count(cells[3] if cell_count > 3 else None)
+            if cell_count > 4:
+                ips = _parse_ips(cells[4])
     else:
         first = cells[0]
         name = first

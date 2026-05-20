@@ -7,6 +7,7 @@ import weakref
 from pathlib import Path
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
 
 from tagger import wd14_onnx
@@ -140,6 +141,36 @@ def test_wd14_load_labels_reports_empty_label_csv(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="No labels parsed"):
         wd14_onnx.WD14Tagger._load_labels(csv_path)
+
+
+def test_wd14_topk_applies_score_floor_without_mutating_default_vector() -> None:
+    """The prepared fast path should share the same score-floor semantics as the fallback path."""
+
+    tagger = object.__new__(wd14_onnx.WD14Tagger)
+    tagger._labels = [  # type: ignore[attr-defined]
+        wd14_onnx._Label(name="low", category=TagCategory.GENERAL),
+        wd14_onnx._Label(name="high", category=TagCategory.GENERAL),
+    ]
+    tagger._label_names = np.array(["low", "high"], dtype=object)  # type: ignore[attr-defined]
+    tagger._label_cats = np.array([int(TagCategory.GENERAL), int(TagCategory.GENERAL)], dtype=np.int16)  # type: ignore[attr-defined]
+    tagger._cat_to_idx = {int(TagCategory.GENERAL): np.array([0, 1], dtype=np.int64)}  # type: ignore[attr-defined]
+    tagger._default_thresholds = {}  # type: ignore[attr-defined]
+    tagger._default_max_tags = {}  # type: ignore[attr-defined]
+    tagger._topk_cap = 128  # type: ignore[attr-defined]
+    tagger._score_floor = 0.1  # type: ignore[attr-defined]
+    tagger._default_thr_vec = tagger._build_threshold_vector({})  # type: ignore[attr-defined]
+    tagger._default_effective_thr_vec = tagger._with_score_floor(tagger._default_thr_vec)  # type: ignore[attr-defined]
+    tagger._default_limits = tagger._resolve_max_tags({}, None)  # type: ignore[attr-defined]
+    tagger._default_remaining_template = tagger._build_remaining_template(tagger._default_limits)  # type: ignore[attr-defined]
+
+    results = tagger._postprocess_logits_topk(  # type: ignore[attr-defined]
+        np.array([[0.05, 0.2]], dtype=np.float32),
+        thresholds=None,
+        max_tags=None,
+    )
+
+    assert [prediction.name for prediction in results[0].tags] == ["high"]
+    assert tagger._default_thr_vec.tolist() == [0.0, 0.0]  # type: ignore[attr-defined]
 
 
 def test_wd14_tagger_falls_back_to_cpu_provider(
