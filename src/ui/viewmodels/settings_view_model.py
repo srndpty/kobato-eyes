@@ -10,6 +10,7 @@ from PyQt6.QtCore import QObject, pyqtSignal
 
 from core.config.schema import PipelineSettings, TaggerSettings
 from db.admin import reset_database as _reset_database
+from tagger.model_inspection import ModelInspection, format_inspection, inspect_model
 from utils.paths import get_db_path as _get_db_path
 
 logger = logging.getLogger(__name__)
@@ -116,6 +117,27 @@ class SettingsViewModel(QObject):
             logger.info("Available ONNX providers: %s", joined)
         self.tagger_environment_checked.emit(message)
         return message
+
+    def inspect_tagger_model(
+        self,
+        *,
+        tagger_name: str,
+        model_path: str | None,
+        tags_csv: str | None = None,
+    ) -> ModelInspection:
+        """Inspect the configured tagger model and labels CSV."""
+
+        return inspect_model(
+            tagger_name=tagger_name,
+            model_path=model_path,
+            tags_csv=tags_csv,
+            provider_loader=self._provider_loader,
+        )
+
+    def format_model_inspection(self, inspection: ModelInspection) -> str:
+        """Return Settings-tab text for a model inspection result."""
+
+        return format_inspection(inspection)
 
     def reset_database(self, *, backup: bool) -> dict[str, object]:
         """Reset the database via :func:`db.admin.reset_database`."""

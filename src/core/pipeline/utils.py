@@ -8,6 +8,7 @@ from typing import Mapping
 from core.config import PipelineSettings
 from tagger.base import TagCategory
 from tagger.labels_util import discover_labels_csv, load_selected_tags
+from tagger.model_inspection import detect_provider_from_model_outputs
 
 # 既定値（必要に応じて調整）
 WD14_DEFAULT_THRESHOLDS = {
@@ -123,6 +124,10 @@ def detect_tagger_provider(settings: PipelineSettings) -> str:
         return configured
     if configured not in {"", "auto"}:
         return "wd14"
+
+    output_provider = detect_provider_from_model_outputs(settings.tagger.model_path)
+    if output_provider is not None:
+        return output_provider
 
     csv_candidate = discover_labels_csv(settings.tagger.model_path, settings.tagger.tags_csv)
     if csv_candidate is None:

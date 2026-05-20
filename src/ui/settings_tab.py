@@ -6,7 +6,7 @@ import logging
 from pathlib import Path
 from typing import TYPE_CHECKING, Iterable
 
-from PyQt6.QtCore import pyqtSignal
+from PyQt6.QtCore import QObject, QRunnable, QThreadPool, QTimer, pyqtSignal
 from PyQt6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -21,7 +21,6 @@ from PyQt6.QtWidgets import (
     QPlainTextEdit,
     QPushButton,
     QSpinBox,
-    QToolTip,
     QVBoxLayout,
     QWidget,
 )
@@ -35,6 +34,50 @@ if TYPE_CHECKING:
 
 
 logger = logging.getLogger(__name__)
+
+
+class _ModelInspectionSignals(QObject):
+    """Signals emitted by the background model inspection task."""
+
+    finished = pyqtSignal(int, str, bool)
+
+
+class _ModelInspectionRunnable(QRunnable):
+    """Run model inspection outside the Qt UI thread."""
+
+    def __init__(
+        self,
+        generation: int,
+        view_model: SettingsViewModel,
+        *,
+        tagger_name: str,
+        model_path: str | None,
+        tags_csv: str | None,
+    ) -> None:
+        super().__init__()
+        self._generation = generation
+        self._view_model = view_model
+        self._tagger_name = tagger_name
+        self._model_path = model_path
+        self._tags_csv = tags_csv
+        self.signals = _ModelInspectionSignals()
+
+    def run(self) -> None:
+        """Inspect model settings and emit a formatted summary."""
+
+        try:
+            inspection = self._view_model.inspect_tagger_model(
+                tagger_name=self._tagger_name,
+                model_path=self._model_path,
+                tags_csv=self._tags_csv,
+            )
+            message = self._view_model.format_model_inspection(inspection)
+            ok = inspection.ok
+        except Exception as exc:  # pragma: no cover - defensive UI fallback
+            logger.exception("Failed to inspect tagger model")
+            message = f"Model status: Error\nError: {exc}"
+            ok = False
+        self.signals.finished.emit(self._generation, message, ok)
 
 
 def _format_size(value: int) -> str:
@@ -140,6 +183,13 @@ class SettingsTab(QWidget):
         super().__init__(parent)
         self._view_model = view_model or SettingsViewModel(self)
         self._view_model.settings_applied.connect(self.settings_applied.emit)
+        self._thread_pool = QThreadPool.globalInstance()
+        self._inspection_generation = 0
+        self._inspection_timer = QTimer(self)
+        self._inspection_timer.setSingleShot(True)
+        self._inspection_timer.setInterval(350)
+        self._inspection_timer.timeout.connect(self._start_model_inspection)
+
         self._roots_edit = QPlainTextEdit(self)
         self._roots_edit.setPlaceholderText("One path per line")
         self._excluded_edit = QPlainTextEdit(self)
@@ -161,6 +211,7 @@ class SettingsTab(QWidget):
 
         self._tagger_model_edit = QLineEdit(self)
         self._tagger_model_edit.setPlaceholderText("Path to WD14 ONNX model")
+        self._tagger_model_edit.textChanged.connect(self._schedule_model_inspection)
         self._tagger_model_button = QPushButton("Browse…", self)
         self._tagger_model_button.clicked.connect(self._on_browse_model)
         tagger_model_row = QWidget(self)
@@ -169,14 +220,11 @@ class SettingsTab(QWidget):
         tagger_layout.addWidget(self._tagger_model_edit)
         tagger_layout.addWidget(self._tagger_model_button)
 
-        self._tagger_env_button = QPushButton("Check environment", self)
-        self._tagger_env_button.setToolTip("Log and display available ONNX providers")
-        self._tagger_env_button.clicked.connect(self._on_check_tagger_env)
-        tagger_env_row = QWidget(self)
-        tagger_env_layout = QHBoxLayout(tagger_env_row)
-        tagger_env_layout.setContentsMargins(0, 0, 0, 0)
-        tagger_env_layout.addWidget(self._tagger_env_button)
-        tagger_env_layout.addStretch()
+        self._model_info_edit = QPlainTextEdit(self)
+        self._model_info_edit.setReadOnly(True)
+        self._model_info_edit.setMinimumHeight(118)
+        self._model_info_edit.setMaximumHeight(180)
+        self._model_info_edit.setPlaceholderText("Model diagnostics will appear here.")
 
         apply_button = QPushButton("Apply", self)
         apply_button.clicked.connect(self._emit_settings)
@@ -191,11 +239,12 @@ class SettingsTab(QWidget):
         form.addRow("Device", self._device_combo)
         form.addRow("Tagger", self._tagger_combo)
         form.addRow("Model path", tagger_model_row)
-        form.addRow("", tagger_env_row)
 
         layout = QVBoxLayout(self)
         layout.addLayout(form)
         layout.addStretch()
+        layout.addWidget(QLabel("Model diagnostics", self))
+        layout.addWidget(self._model_info_edit)
         buttons = QHBoxLayout()
         buttons.addWidget(self._reset_button)
         buttons.addStretch()
@@ -248,7 +297,7 @@ class SettingsTab(QWidget):
         is_wd14 = name.lower() == "wd14-onnx"
         self._tagger_model_edit.setEnabled(is_wd14)
         self._tagger_model_button.setEnabled(is_wd14)
-        self._tagger_env_button.setEnabled(is_wd14)
+        self._schedule_model_inspection()
 
     def set_pipeline(self, pipeline: ProcessingPipeline | None) -> None:
         self._pipeline = pipeline
@@ -322,14 +371,36 @@ class SettingsTab(QWidget):
         if file_path:
             self._tagger_model_edit.setText(file_path)
 
-    def _on_check_tagger_env(self) -> None:
-        message = self._view_model.check_tagger_environment()
-        self._show_environment_message(message)
+    def _schedule_model_inspection(self) -> None:
+        self._inspection_generation += 1
+        self._model_info_edit.setPlainText("Inspecting model configuration...")
+        self._model_info_edit.setStyleSheet("")
+        self._inspection_timer.start()
 
-    def _show_environment_message(self, message: str) -> None:
-        rect = self._tagger_env_button.rect()
-        global_pos = self._tagger_env_button.mapToGlobal(rect.center())
-        QToolTip.showText(global_pos, message, self._tagger_env_button, rect, 4000)
+    def _start_model_inspection(self) -> None:
+        generation = self._inspection_generation
+        tagger_name = self._tagger_combo.currentText()
+        current = self._current_settings or PipelineSettings()
+        tags_csv = current.tagger.tags_csv if tagger_name.lower() == "wd14-onnx" else None
+        model_path = self._tagger_model_edit.text().strip() or None
+        runnable = _ModelInspectionRunnable(
+            generation,
+            self._view_model,
+            tagger_name=tagger_name,
+            model_path=model_path,
+            tags_csv=tags_csv,
+        )
+        runnable.signals.finished.connect(self._on_model_inspection_finished)
+        self._thread_pool.start(runnable)
+
+    def _on_model_inspection_finished(self, generation: int, message: str, ok: bool) -> None:
+        if generation != self._inspection_generation:
+            return
+        self._model_info_edit.setPlainText(message)
+        if ok:
+            self._model_info_edit.setStyleSheet("QPlainTextEdit { border: 1px solid #2e7d32; }")
+        else:
+            self._model_info_edit.setStyleSheet("QPlainTextEdit { border: 1px solid #c62828; }")
 
 
 __all__ = ["SettingsTab"]
