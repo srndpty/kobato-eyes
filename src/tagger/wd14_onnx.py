@@ -629,7 +629,10 @@ class WD14Tagger(ITagger):
         return vec
 
     def _effective_threshold_vector(self, thresholds: ThresholdMap | None) -> np.ndarray:
-        """Return the cached or per-call threshold vector used by postprocess."""
+        """Return the cached or per-call threshold vector used by postprocess.
+
+        Cached vectors must be treated as read-only by callers.
+        """
 
         if thresholds is None:
             return self._default_effective_thr_vec

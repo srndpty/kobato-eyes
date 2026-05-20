@@ -480,6 +480,8 @@ class TagStatsDialog(QDialog):
         self._model = _TagStatsModel()
         self._proxy = QSortFilterProxyModel(self)
         self._proxy.setSourceModel(self._model)
+        # Filtering and ordering are applied by SQL before the display limit.
+        # The proxy is retained only for table index indirection/future extension.
         self._proxy.setSortRole(Qt.ItemDataRole.UserRole)
 
         self._table = QTableView(self)
@@ -654,7 +656,7 @@ class TagStatsDialog(QDialog):
         self._export_button.setEnabled(not loading and self._proxy.rowCount() > 0)
 
     def _update_export_button(self) -> None:
-        """Enable export when the loaded category has data to query."""
+        """Enable export when the current filtered result has rows."""
 
         self._export_button.setEnabled(not self._loading_widget.isVisible() and self._proxy.rowCount() > 0)
 
