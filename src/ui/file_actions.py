@@ -36,6 +36,12 @@ def reveal_in_file_manager(path: Path) -> None:
         subprocess.Popen(["xdg-open", str(path.parent)])
 
 
+def trash_path(path: Path) -> None:
+    """Move a single filesystem path to the operating system trash."""
+
+    send2trash(str(path))
+
+
 def trash_duplicate_entries(
     entries: Sequence[DuplicateClusterEntry],
 ) -> tuple[list[DuplicateClusterEntry], list[tuple[DuplicateClusterEntry, str]]]:
@@ -45,7 +51,7 @@ def trash_duplicate_entries(
     failures: list[tuple[DuplicateClusterEntry, str]] = []
     for entry in entries:
         try:
-            send2trash(str(entry.file.path))
+            trash_path(entry.file.path)
             successes.append(entry)
         except Exception as exc:
             failures.append((entry, str(exc)))
@@ -74,4 +80,10 @@ def export_duplicate_clusters_csv(clusters: Sequence[DuplicateCluster], file_pat
                 )
 
 
-__all__ = ["export_duplicate_clusters_csv", "open_path", "reveal_in_file_manager", "trash_duplicate_entries"]
+__all__ = [
+    "export_duplicate_clusters_csv",
+    "open_path",
+    "reveal_in_file_manager",
+    "trash_duplicate_entries",
+    "trash_path",
+]

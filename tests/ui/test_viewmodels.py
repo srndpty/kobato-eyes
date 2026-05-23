@@ -48,6 +48,7 @@ def test_tags_view_model_wraps_dependencies(tmp_path: Path) -> None:
         load_settings=lambda: PipelineSettings(),
         load_thresholds=lambda conn: {"general": 0.5},
         list_tag_names=lambda conn: ["foo"],
+        mark_files_absent=lambda conn, ids: calls.setdefault("marked_absent", (conn, list(ids))),
         search_files=lambda conn, where, params, **kwargs: [{"id": 1}],
         iter_paths_for_search=lambda conn, query: ["/a", "/b"],
         ensure_directories=lambda: calls.setdefault("ensured", True),
@@ -74,6 +75,8 @@ def test_tags_view_model_wraps_dependencies(tmp_path: Path) -> None:
     assert rows == [{"id": 1}]
     paths = view_model.iter_paths_for_search(conn, "*")
     assert paths == ["/a", "/b"]
+    view_model.mark_files_absent(conn, [10, 11])
+    assert calls["marked_absent"] == (conn, [10, 11])
 
     retagged = view_model.retag_query(view_model.db_path, "predicate", [1, 2])
     assert isinstance(retagged, RetagResult)

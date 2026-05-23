@@ -10,8 +10,8 @@ from unittest import mock
 import pytest
 
 pytest.importorskip("PyQt6.QtWidgets", reason="PyQt6 widgets required", exc_type=ImportError)
-from PyQt6.QtCore import Qt
-from PyQt6.QtWidgets import QApplication
+from PyQt6.QtCore import QItemSelectionModel, Qt
+from PyQt6.QtWidgets import QApplication, QMessageBox
 
 from core.config import PipelineSettings
 from db.schema import apply_schema
@@ -187,3 +187,70 @@ def test_logical_operators_are_not_autocomplete_candidates(tags_tab: TagsTab, qa
     tags_tab._refresh_completions()  # type: ignore[attr-defined]
 
     assert tags_tab._tag_model.rowCount() == 0  # type: ignore[attr-defined]
+
+
+def test_delete_selected_result_trashes_file_and_marks_db_absent(
+    tags_tab: TagsTab,
+    qapp: QApplication,
+    populated_db: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _await_idle(tags_tab, qapp)
+    trashed: list[str] = []
+
+    monkeypatch.setattr("ui.tags_tab.trash_path", lambda path: trashed.append(str(path)))
+    monkeypatch.setattr(QMessageBox, "question", lambda *args, **kwargs: QMessageBox.StandardButton.Yes)
+
+    first_record = dict(tags_tab._results_cache[0])  # type: ignore[attr-defined]
+    file_id = int(first_record["id"])
+    path = str(first_record["path"])
+    tags_tab._table_view.selectRow(0)  # type: ignore[attr-defined]
+    tags_tab._on_delete_selected_result()  # type: ignore[attr-defined]
+
+    assert _wait_for(lambda: not tags_tab._delete_active, qapp, timeout=3.0)  # type: ignore[attr-defined]
+    assert trashed == [str(Path(path))]
+    assert all(int(row["id"]) != file_id for row in tags_tab._results_cache)  # type: ignore[attr-defined]
+    assert tags_tab._table_model.rowCount() == tags_tab._search_chunk_size - 1  # type: ignore[attr-defined]
+
+    with sqlite3.connect(populated_db) as conn:
+        row = conn.execute("SELECT is_present, deleted_at FROM files WHERE id = ?", (file_id,)).fetchone()
+    assert row is not None
+    assert row[0] == 0
+    assert row[1] is not None
+
+
+def test_delete_multiple_selected_results_trashes_files_and_marks_db_absent(
+    tags_tab: TagsTab,
+    qapp: QApplication,
+    populated_db: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _await_idle(tags_tab, qapp)
+    tags_tab._on_load_more_clicked()  # type: ignore[attr-defined]
+    _await_idle(tags_tab, qapp)
+    assert tags_tab._table_model.rowCount() >= 2  # type: ignore[attr-defined]
+    trashed: list[str] = []
+
+    monkeypatch.setattr("ui.tags_tab.trash_path", lambda path: trashed.append(str(path)))
+    monkeypatch.setattr(QMessageBox, "question", lambda *args, **kwargs: QMessageBox.StandardButton.Yes)
+
+    selected_records = [dict(tags_tab._results_cache[row]) for row in (0, 1)]  # type: ignore[attr-defined]
+    file_ids = {int(record["id"]) for record in selected_records}
+    expected_paths = [str(Path(str(record["path"]))) for record in selected_records]
+    selection_model = tags_tab._table_view.selectionModel()  # type: ignore[attr-defined]
+    flags = QItemSelectionModel.SelectionFlag.Select | QItemSelectionModel.SelectionFlag.Rows
+    selection_model.select(tags_tab._table_model.index(0, 0), flags)  # type: ignore[attr-defined]
+    selection_model.select(tags_tab._table_model.index(1, 0), flags)  # type: ignore[attr-defined]
+    tags_tab._on_delete_selected_result()  # type: ignore[attr-defined]
+
+    assert _wait_for(lambda: not tags_tab._delete_active, qapp, timeout=3.0)  # type: ignore[attr-defined]
+    assert trashed == expected_paths
+    assert file_ids.isdisjoint({int(row["id"]) for row in tags_tab._results_cache})  # type: ignore[attr-defined]
+
+    with sqlite3.connect(populated_db) as conn:
+        rows = conn.execute(
+            f"SELECT id, is_present, deleted_at FROM files WHERE id IN ({', '.join('?' for _ in file_ids)})",
+            tuple(file_ids),
+        ).fetchall()
+    assert len(rows) == 2
+    assert all(row[1] == 0 and row[2] is not None for row in rows)
