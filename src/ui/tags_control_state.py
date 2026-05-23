@@ -14,6 +14,7 @@ class TagsActivityState:
     refresh_active: bool
     has_current_query: bool
     can_load_more: bool
+    delete_active: bool = False
 
 
 @dataclass(frozen=True)
@@ -35,10 +36,12 @@ class TagsControlAvailability:
 def compute_tags_control_availability(state: TagsActivityState) -> TagsControlAvailability:
     """Return enabled states for tag tab controls from activity flags."""
 
-    idle_for_index = not state.indexing_active
-    idle_for_search_action = not state.indexing_active and not state.search_busy
+    idle_for_index = not state.indexing_active and not state.delete_active
+    idle_for_search_action = not state.indexing_active and not state.search_busy and not state.delete_active
     refresh = not state.refresh_active and idle_for_search_action
-    copy_results = state.has_current_query and not (state.search_busy or state.indexing_active or state.refresh_active)
+    copy_results = state.has_current_query and not (
+        state.search_busy or state.indexing_active or state.refresh_active or state.delete_active
+    )
     return TagsControlAvailability(
         search=idle_for_index,
         query_input=idle_for_index,

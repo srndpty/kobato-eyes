@@ -16,15 +16,16 @@ logger = logging.getLogger(__name__)
 class ThumbnailSignal(QObject):
     """Signal object shared by thumbnail workers."""
 
-    finished = pyqtSignal(int, QPixmap)
+    finished = pyqtSignal(int, int, QPixmap)
 
 
 class ThumbnailTask(QRunnable):
     """Load one thumbnail in a worker thread and emit it to the UI."""
 
-    def __init__(self, row: int, path: Path, width: int, height: int, signal: ThumbnailSignal) -> None:
+    def __init__(self, row: int, file_id: int, path: Path, width: int, height: int, signal: ThumbnailSignal) -> None:
         super().__init__()
         self._row = row
+        self._file_id = int(file_id)
         self._path = path
         self._width = width
         self._height = height
@@ -48,7 +49,7 @@ class ThumbnailTask(QRunnable):
             pixmap = QPixmap()
         if self._cancelled:
             return
-        self._signal.finished.emit(self._row, pixmap)
+        self._signal.finished.emit(self._row, self._file_id, pixmap)
 
 
 __all__ = ["ThumbnailSignal", "ThumbnailTask"]

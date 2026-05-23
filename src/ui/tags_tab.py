@@ -10,7 +10,7 @@ import shutil
 import sqlite3
 import subprocess
 import sys
-from contextlib import AbstractContextManager, nullcontext
+from contextlib import AbstractContextManager, closing, nullcontext
 from datetime import datetime
 from pathlib import Path
 from typing import Callable, Iterable, List, Optional, Sequence
@@ -65,6 +65,7 @@ from ui.autocomplete import (
     extract_completion_token,
     replace_completion_token,
 )
+from ui.file_actions import trash_path
 from ui.index_lifecycle import (
     connection_retry_action,
     index_cancel_status,
@@ -136,6 +137,105 @@ class _CopySignals(QObject):
     progress = pyqtSignal(int, int)  # current, total
     finished = pyqtSignal(str, int, int)  # dest_dir, ok_count, ng_count
     error = pyqtSignal(str)
+
+
+class _DeleteResultSignals(QObject):
+    """Signals emitted by a background search-result deletion task."""
+
+    finished = pyqtSignal(list, list, list)
+
+
+class _DeleteResultRunnable(QRunnable):
+    """Move result files to trash and mark their DB rows absent."""
+
+    def __init__(
+        self,
+        view_model: TagsViewModel,
+        db_path: Path,
+        *,
+        entries: Sequence[tuple[int, Path]],
+    ) -> None:
+        super().__init__()
+        self._view_model = view_model
+        self._db_path = Path(db_path)
+        self._entries = [(int(file_id), Path(path)) for file_id, path in entries]
+        self.signals = _DeleteResultSignals()
+
+    def run(self) -> None:
+        """Execute the delete workflow off the GUI thread."""
+
+        trashed: list[tuple[int, str]] = []
+        failures: list[tuple[str, int, str, str]] = []
+        for file_id, path in self._entries:
+            try:
+                if not path.is_file():
+                    raise FileNotFoundError("Path is not a file")
+                trash_path(path)
+                trashed.append((file_id, str(path)))
+            except Exception as exc:
+                failures.append(("trash", file_id, str(path), str(exc)))
+
+        db_updated_ids: list[int] = []
+        if trashed:
+            trashed_ids = [file_id for file_id, _ in trashed]
+            trashed_paths = {file_id: path for file_id, path in trashed}
+            try:
+                with closing(self._view_model.open_connection(self._db_path)) as conn:
+                    self._view_model.mark_files_absent(conn, trashed_ids)
+                db_updated_ids = trashed_ids
+            except Exception as exc:
+                message = str(exc)
+                failures.extend(("db", file_id, trashed_paths[file_id], message) for file_id in trashed_ids)
+
+        self.signals.finished.emit(trashed, db_updated_ids, failures)
+
+
+def _format_delete_confirmation(paths: Sequence[Path]) -> str:
+    """Return confirmation text for deleting selected search results."""
+
+    if len(paths) == 1:
+        return f"Move this image to the trash and remove it from search results?\n\n{paths[0]}"
+    preview = "\n".join(str(path) for path in paths[:5])
+    suffix = "" if len(paths) <= 5 else f"\n... and {len(paths) - 5} more"
+    return f"Move {len(paths)} images to the trash and remove them from search results?\n\n{preview}{suffix}"
+
+
+def _format_deleting_status(paths: Sequence[Path]) -> str:
+    """Return status text for an active delete operation."""
+
+    if len(paths) == 1:
+        return f"Deleting {paths[0].name}…"
+    return f"Deleting {len(paths)} images…"
+
+
+def _format_delete_result_status(
+    removed: Sequence[tuple[int, str]],
+    failures: Sequence[tuple[str, int, str, str]],
+    total: int,
+    remaining: int,
+    query_label: str,
+) -> str:
+    """Return status text after a delete operation finishes."""
+
+    if not removed:
+        return f"Delete failed. Showing {remaining} result(s) for '{query_label}'"
+    if len(removed) == 1 and total == 1:
+        try:
+            name = Path(removed[0][1]).name
+        except IndexError:
+            name = "image"
+        return f"Deleted {name}. Showing {remaining} result(s) for '{query_label}'"
+    if failures:
+        return f"Deleted {len(removed)}/{total} image(s). Showing {remaining} result(s) for '{query_label}'"
+    return f"Deleted {len(removed)} image(s). Showing {remaining} result(s) for '{query_label}'"
+
+
+def _format_delete_failure_reason(kind: str, reason: str) -> str:
+    """Return a user-facing reason for a delete failure kind."""
+
+    if kind == "db":
+        return f"moved to trash, but DB update failed: {reason}"
+    return reason
 
 
 # --- バックグラウンドコピー ---------------------------------------------
@@ -410,6 +510,7 @@ class TagsTab(QWidget):
         self._table_model.setHorizontalHeaderLabels(headers)
         self._table_view = QTableView(self)
         self._table_view.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self._table_view.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self._table_view.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self._table_view.doubleClicked.connect(self._on_table_double_clicked)
         # self._table_view.activated.connect(self._on_table_double_clicked)
@@ -425,6 +526,9 @@ class TagsTab(QWidget):
         self._table_view.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self._table_view.customContextMenuRequested.connect(self._on_table_context_menu)
         self._table_view.setStyleSheet(f"QTableView, QTableView::item {{color: {_SCORE_COLOR};}}")
+        self._delete_table_shortcut = QShortcut(QKeySequence(Qt.Key.Key_Delete), self._table_view)
+        self._delete_table_shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        self._delete_table_shortcut.activated.connect(self._on_delete_selected_result)
 
         self._grid_model = QStandardItemModel(self)
         self._grid_view = QListView(self)
@@ -433,7 +537,7 @@ class TagsTab(QWidget):
         self._grid_view.setMovement(QListView.Movement.Static)
         self._grid_view.setSpacing(16)
         self._grid_view.setWrapping(True)
-        self._grid_view.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self._grid_view.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self._grid_view.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self._grid_view.setIconSize(QSize(self._THUMB_SIZE, self._THUMB_SIZE))
         self._grid_view.setGridSize(QSize(self._THUMB_SIZE + 48, self._THUMB_SIZE + 72))
@@ -446,6 +550,9 @@ class TagsTab(QWidget):
         self._grid_view.setModel(self._grid_model)
         self._grid_view.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self._grid_view.customContextMenuRequested.connect(self._on_grid_context_menu)
+        self._delete_grid_shortcut = QShortcut(QKeySequence(Qt.Key.Key_Delete), self._grid_view)
+        self._delete_grid_shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        self._delete_grid_shortcut.activated.connect(self._on_delete_selected_result)
 
         self._highlight_terms: list[str] = []
         self._positive_terms: list[str] = []
@@ -529,17 +636,21 @@ class TagsTab(QWidget):
         self._thumb_pool.setMaxThreadCount(min(4, self._thumb_pool.maxThreadCount()))
         self._thumb_signal = _ThumbnailSignal()
         self._thumb_signal.finished.connect(self._apply_thumbnail)
-        self._pending_thumbs: set[int] = set()
+        self._pending_thumbs: set[tuple[int, int]] = set()
 
         self._index_pool = QThreadPool(self)
         self._index_pool.setMaxThreadCount(1)
         self._indexing_active = False
         self._retag_active = False
         self._refresh_active = False
+        self._delete_active = False
         self._progress_dialog: QProgressDialog | None = None
         self._current_index_task: IndexRunnable | None = None
+        self._current_delete_task: _DeleteResultRunnable | None = None
         self._active_refresh_folder: Sequence[Path] | None = None
         self._quiesce_guard: AbstractContextManager[None] = nullcontext()
+        self._delete_pool = QThreadPool(self)
+        self._delete_pool.setMaxThreadCount(1)
 
         self._toast_label = QLabel("", self)
         self._toast_label.setObjectName("toastLabel")
@@ -1547,18 +1658,22 @@ class TagsTab(QWidget):
             grid_item.setToolTip(tags_text)
             self._grid_model.appendRow(grid_item)
 
-            if path_obj.exists():
-                self._queue_thumbnail(row_index, path_obj)
+            file_id = self._coerce_file_id(record.get("id"))
+            if path_obj.exists() and file_id is not None:
+                self._queue_thumbnail(row_index, file_id, path_obj)
 
-    def _queue_thumbnail(self, row: int, path: Path) -> None:
-        if row in self._pending_thumbs:
+    def _queue_thumbnail(self, row: int, file_id: int, path: Path) -> None:
+        key = (int(row), int(file_id))
+        if key in self._pending_thumbs:
             return
-        self._pending_thumbs.add(row)
-        task = _ThumbnailTask(row, path, self._THUMB_SIZE, self._THUMB_SIZE, self._thumb_signal)
+        self._pending_thumbs.add(key)
+        task = _ThumbnailTask(row, file_id, path, self._THUMB_SIZE, self._THUMB_SIZE, self._thumb_signal)
         self._thumb_pool.start(task)
 
-    def _apply_thumbnail(self, row: int, pixmap: QPixmap) -> None:
-        self._pending_thumbs.discard(row)
+    def _apply_thumbnail(self, row: int, file_id: int, pixmap: QPixmap) -> None:
+        self._pending_thumbs.discard((int(row), int(file_id)))
+        if not self._thumbnail_matches_current_result(row, file_id):
+            return
         if row < self._table_model.rowCount():
             table_item = self._table_model.item(row, 0)
             if table_item is not None:
@@ -1569,6 +1684,14 @@ class TagsTab(QWidget):
             grid_item = self._grid_model.item(row)
             if grid_item is not None:
                 grid_item.setData(pixmap, Qt.ItemDataRole.DecorationRole)
+
+    def _thumbnail_matches_current_result(self, row: int, file_id: int) -> bool:
+        """Return whether a thumbnail result still belongs to the visible row."""
+
+        if not (0 <= row < len(self._results_cache)):
+            return False
+        current_id = self._coerce_file_id(self._results_cache[row].get("id"))
+        return current_id == int(file_id)
 
     def _on_table_context_menu(self, pos: QPoint) -> None:
         """Show context menu for a table result."""
@@ -1610,6 +1733,193 @@ class TagsTab(QWidget):
             self._copy_tags_to_clipboard(row, include_scores=False)
         elif chosen == copy_scored_action:
             self._copy_tags_to_clipboard(row, include_scores=True)
+
+    def _selected_result_rows(self) -> list[int]:
+        """Return currently selected search-result rows."""
+
+        if self._stack.currentWidget() is self._grid_view or self._grid_view.hasFocus():
+            indexes = self._grid_view.selectionModel().selectedIndexes()
+            if not indexes:
+                indexes = [self._grid_view.currentIndex()]
+            rows = []
+            for index in indexes:
+                if not index.isValid():
+                    continue
+                stored_row = index.data(Qt.ItemDataRole.UserRole)
+                rows.append(int(stored_row) if stored_row is not None else index.row())
+        else:
+            selected = self._table_view.selectionModel().selectedRows()
+            if not selected:
+                index = self._table_view.currentIndex()
+                selected = [index] if index.isValid() else []
+            rows = [index.row() for index in selected if index.isValid()]
+        return sorted({row for row in rows if 0 <= row < len(self._results_cache)})
+
+    def _on_delete_selected_result(self) -> None:
+        """Confirm and start deletion for the selected search result."""
+
+        if self._delete_active or self._search_busy or self._indexing_active or self._refresh_active:
+            return
+        rows = self._selected_result_rows()
+        if not rows:
+            return
+        entries: list[tuple[int, Path]] = []
+        for row in rows:
+            record = self._results_cache[row]
+            file_id = self._coerce_file_id(record.get("id"))
+            if file_id is None:
+                continue
+            path = self._coerce_result_path(record.get("path"))
+            if path is None:
+                continue
+            entries.append((file_id, path))
+        if not entries:
+            QMessageBox.warning(self, "Delete image", "Selected results do not have valid database ids or file paths.")
+            return
+        paths = [path for _, path in entries]
+
+        answer = QMessageBox.question(
+            self,
+            "Delete image",
+            _format_delete_confirmation(paths),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+
+        self._delete_active = True
+        self._status_label.setText(_format_deleting_status(paths))
+        self._update_control_states()
+        runnable = _DeleteResultRunnable(self._view_model, self._db_path, entries=entries)
+        total_entries = len(entries)
+        runnable.signals.finished.connect(
+            lambda removed, db_updated_ids, failures: self._handle_delete_finished(
+                removed,
+                db_updated_ids,
+                failures,
+                total_entries,
+            )
+        )
+        self._current_delete_task = runnable
+        self._delete_pool.start(runnable)
+
+    def _handle_delete_finished(
+        self,
+        removed: list[tuple[int, str]],
+        db_updated_ids: list[int],
+        failures: list[tuple[str, int, str, str]],
+        total: int,
+    ) -> None:
+        """Remove deleted files from the current result models."""
+
+        self._delete_active = False
+        self._current_delete_task = None
+        removed_from_view = self._remove_results_by_file_ids(
+            [file_id for file_id, _ in removed],
+            offset_file_ids=db_updated_ids,
+        )
+        query_label = self._current_query or "*"
+        self._status_label.setText(
+            _format_delete_result_status(removed, failures, total, len(self._results_cache), query_label)
+        )
+        if removed_from_view and not self._results_cache and not self._can_load_more:
+            self._show_placeholder(True)
+        if failures:
+            message = "\n".join(
+                f"{path}: {_format_delete_failure_reason(kind, reason)}" for kind, _, path, reason in failures
+            )
+            QMessageBox.warning(self, "Delete image", f"Some images could not be deleted:\n{message}")
+        self._update_control_states()
+
+    def _remove_results_by_file_ids(self, file_ids: Sequence[int], *, offset_file_ids: Sequence[int]) -> bool:
+        """Remove result rows matching *file_ids* from table, grid, and cache."""
+
+        id_set = {int(file_id) for file_id in file_ids}
+        if not id_set:
+            return False
+        rows = [
+            index
+            for index, record in enumerate(self._results_cache)
+            if (file_id := self._coerce_file_id(record.get("id"))) is not None and file_id in id_set
+        ]
+        if not rows:
+            return False
+        try:
+            self._thumb_pool.clear()
+        except Exception:
+            pass
+        self._pending_thumbs.clear()
+        next_selection = min(rows[0], max(0, len(self._results_cache) - len(rows) - 1))
+        offset_id_set = {int(file_id) for file_id in offset_file_ids}
+        offset_removed = sum(
+            1
+            for row in rows
+            if (file_id := self._coerce_file_id(self._results_cache[row].get("id"))) is not None
+            and file_id in offset_id_set
+        )
+        for row in reversed(rows):
+            self._results_cache.pop(row)
+            self._table_model.removeRow(row)
+            self._grid_model.removeRow(row)
+        self._offset = max(0, self._offset - offset_removed)
+        self._sync_grid_row_roles()
+        if self._results_cache:
+            self._table_view.selectRow(next_selection)
+            self._grid_view.setCurrentIndex(self._grid_model.index(next_selection, 0))
+        self._requeue_missing_thumbnails()
+        self._table_view.viewport().update()
+        self._grid_view.viewport().update()
+        return True
+
+    def _requeue_missing_thumbnails(self) -> None:
+        """Queue thumbnails for visible result rows that lost pending work."""
+
+        for row, record in enumerate(self._results_cache):
+            if self._row_has_thumbnail(row):
+                continue
+            file_id = self._coerce_file_id(record.get("id"))
+            path = self._coerce_result_path(record.get("path"))
+            if file_id is None or path is None or not path.exists():
+                continue
+            self._queue_thumbnail(row, file_id, path)
+
+    def _row_has_thumbnail(self, row: int) -> bool:
+        """Return whether a table or grid item already has a thumbnail."""
+
+        table_item = self._table_model.item(row, 0) if row < self._table_model.rowCount() else None
+        if table_item is not None and table_item.data(Qt.ItemDataRole.DecorationRole) is not None:
+            return True
+        grid_item = self._grid_model.item(row) if row < self._grid_model.rowCount() else None
+        return bool(grid_item is not None and grid_item.data(Qt.ItemDataRole.DecorationRole) is not None)
+
+    def _sync_grid_row_roles(self) -> None:
+        """Keep grid items pointing at their current result-cache row."""
+
+        for row in range(self._grid_model.rowCount()):
+            item = self._grid_model.item(row)
+            if item is not None:
+                item.setData(row, Qt.ItemDataRole.UserRole)
+
+    @staticmethod
+    def _coerce_file_id(value: object) -> int | None:
+        """Return *value* as an integer file id when possible."""
+
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _coerce_result_path(value: object) -> Path | None:
+        """Return *value* as a non-empty result path when possible."""
+
+        if not isinstance(value, str):
+            return None
+        cleaned = value.strip()
+        if not cleaned:
+            return None
+        return Path(cleaned)
 
     def _copy_tags_to_clipboard(self, row: int, *, include_scores: bool) -> None:
         """Copy filtered tags for *row* to the clipboard."""
@@ -1792,6 +2102,7 @@ class TagsTab(QWidget):
                 refresh_active=self._refresh_active,
                 has_current_query=bool(self._current_where),
                 can_load_more=self._can_load_more,
+                delete_active=self._delete_active,
             )
         )
         self._search_button.setEnabled(availability.search)

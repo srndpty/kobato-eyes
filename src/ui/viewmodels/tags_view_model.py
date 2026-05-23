@@ -21,6 +21,7 @@ from db.connection import get_conn as _get_conn
 from db.repository import _load_tag_thresholds as _load_tag_thresholds
 from db.repository import iter_paths_for_search as _iter_paths_for_search
 from db.repository import list_tag_names as _list_tag_names
+from db.repository import mark_files_absent as _mark_files_absent
 from db.repository import search_files as _search_files
 from utils.paths import ensure_dirs as _ensure_dirs
 from utils.paths import get_db_path as _get_db_path
@@ -44,6 +45,7 @@ class TagsViewModel(QObject):
         load_settings: Callable[[], PipelineSettings] = _load_settings,
         load_thresholds: Callable[[object], dict[str, float]] = _load_tag_thresholds,
         list_tag_names: Callable[[object], Iterable[str]] = _list_tag_names,
+        mark_files_absent: Callable[[object, Sequence[int]], object] = _mark_files_absent,
         search_files: Callable[..., Iterable] = _search_files,
         iter_paths_for_search: Callable[[object, str], Iterable[str]] = _iter_paths_for_search,
         ensure_directories: Callable[[], None] = _ensure_dirs,
@@ -62,6 +64,7 @@ class TagsViewModel(QObject):
         self._load_settings = load_settings
         self._load_thresholds = load_thresholds
         self._list_tag_names = list_tag_names
+        self._mark_files_absent = mark_files_absent
         self._search_files = search_files
         self._iter_paths_for_search = iter_paths_for_search
         self._ensure_directories = ensure_directories
@@ -105,6 +108,11 @@ class TagsViewModel(QObject):
         """Return known tag names from the database."""
 
         return list(self._list_tag_names(connection))
+
+    def mark_files_absent(self, connection: object, file_ids: Sequence[int]) -> None:
+        """Mark files as absent in the repository."""
+
+        self._mark_files_absent(connection, list(file_ids))
 
     def search_files(
         self,
