@@ -75,3 +75,24 @@ def test_tags_controls_disable_result_actions_while_searching_or_refreshing() ->
     assert searching.copy_results is False
     assert refreshing.refresh is False
     assert refreshing.copy_results is False
+
+
+def test_tags_controls_disable_actions_while_deleting() -> None:
+    availability = compute_tags_control_availability(
+        TagsActivityState(
+            indexing_active=False,
+            search_busy=False,
+            refresh_active=False,
+            has_current_query=True,
+            can_load_more=True,
+            delete_active=True,
+        )
+    )
+
+    assert availability.search is False
+    assert availability.query_input is False
+    assert availability.load_more is False
+    assert availability.retag is False
+    assert availability.retag_results is False
+    assert availability.refresh is False
+    assert availability.copy_results is False

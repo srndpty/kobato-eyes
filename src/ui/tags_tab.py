@@ -142,7 +142,7 @@ class _CopySignals(QObject):
 class _DeleteResultSignals(QObject):
     """Signals emitted by a background search-result deletion task."""
 
-    finished = pyqtSignal(list, list)
+    finished = pyqtSignal(list, list, list)
 
 
 class _DeleteResultRunnable(QRunnable):
@@ -164,31 +164,30 @@ class _DeleteResultRunnable(QRunnable):
     def run(self) -> None:
         """Execute the delete workflow off the GUI thread."""
 
-        successes: list[tuple[int, str]] = []
-        failures: list[tuple[int, str, str]] = []
+        trashed: list[tuple[int, str]] = []
+        failures: list[tuple[str, int, str, str]] = []
         for file_id, path in self._entries:
             try:
+                if not path.is_file():
+                    raise FileNotFoundError("Path is not a file")
                 trash_path(path)
-                successes.append((file_id, str(path)))
+                trashed.append((file_id, str(path)))
             except Exception as exc:
-                failures.append((file_id, str(path), str(exc)))
+                failures.append(("trash", file_id, str(path), str(exc)))
 
-        if successes:
-            success_ids = [file_id for file_id, _ in successes]
-            success_paths = {file_id: path for file_id, path in successes}
-            db_successes: list[tuple[int, str]] = []
-            db_failures: list[tuple[int, str, str]] = []
+        db_updated_ids: list[int] = []
+        if trashed:
+            trashed_ids = [file_id for file_id, _ in trashed]
+            trashed_paths = {file_id: path for file_id, path in trashed}
             try:
                 with closing(self._view_model.open_connection(self._db_path)) as conn:
-                    self._view_model.mark_files_absent(conn, success_ids)
-                db_successes = successes
+                    self._view_model.mark_files_absent(conn, trashed_ids)
+                db_updated_ids = trashed_ids
             except Exception as exc:
                 message = str(exc)
-                db_failures = [(file_id, success_paths[file_id], message) for file_id in success_ids]
-            successes = db_successes
-            failures.extend(db_failures)
+                failures.extend(("db", file_id, trashed_paths[file_id], message) for file_id in trashed_ids)
 
-        self.signals.finished.emit(successes, failures)
+        self.signals.finished.emit(trashed, db_updated_ids, failures)
 
 
 def _format_delete_confirmation(paths: Sequence[Path]) -> str:
@@ -209,16 +208,34 @@ def _format_deleting_status(paths: Sequence[Path]) -> str:
     return f"Deleting {len(paths)} images…"
 
 
-def _format_delete_success(successes: Sequence[tuple[int, str]], total: int, remaining: int, query_label: str) -> str:
+def _format_delete_result_status(
+    removed: Sequence[tuple[int, str]],
+    failures: Sequence[tuple[str, int, str, str]],
+    total: int,
+    remaining: int,
+    query_label: str,
+) -> str:
     """Return status text after a delete operation finishes."""
 
-    if len(successes) == 1 and total == 1:
+    if not removed:
+        return f"Delete failed. Showing {remaining} result(s) for '{query_label}'"
+    if len(removed) == 1 and total == 1:
         try:
-            name = Path(successes[0][1]).name
+            name = Path(removed[0][1]).name
         except IndexError:
             name = "image"
         return f"Deleted {name}. Showing {remaining} result(s) for '{query_label}'"
-    return f"Deleted {len(successes)}/{total} image(s). Showing {remaining} result(s) for '{query_label}'"
+    if failures:
+        return f"Deleted {len(removed)}/{total} image(s). Showing {remaining} result(s) for '{query_label}'"
+    return f"Deleted {len(removed)} image(s). Showing {remaining} result(s) for '{query_label}'"
+
+
+def _format_delete_failure_reason(kind: str, reason: str) -> str:
+    """Return a user-facing reason for a delete failure kind."""
+
+    if kind == "db":
+        return f"moved to trash, but DB update failed: {reason}"
+    return reason
 
 
 # --- バックグラウンドコピー ---------------------------------------------
@@ -629,6 +646,7 @@ class TagsTab(QWidget):
         self._delete_active = False
         self._progress_dialog: QProgressDialog | None = None
         self._current_index_task: IndexRunnable | None = None
+        self._current_delete_task: _DeleteResultRunnable | None = None
         self._active_refresh_folder: Sequence[Path] | None = None
         self._quiesce_guard: AbstractContextManager[None] = nullcontext()
         self._delete_pool = QThreadPool(self)
@@ -1739,9 +1757,12 @@ class TagsTab(QWidget):
             file_id = self._coerce_file_id(record.get("id"))
             if file_id is None:
                 continue
-            entries.append((file_id, Path(str(record.get("path", "")))))
+            path = self._coerce_result_path(record.get("path"))
+            if path is None:
+                continue
+            entries.append((file_id, path))
         if not entries:
-            QMessageBox.warning(self, "Delete image", "Selected results do not have valid database ids.")
+            QMessageBox.warning(self, "Delete image", "Selected results do not have valid database ids or file paths.")
             return
         paths = [path for _, path in entries]
 
@@ -1757,33 +1778,49 @@ class TagsTab(QWidget):
 
         self._delete_active = True
         self._status_label.setText(_format_deleting_status(paths))
+        self._update_control_states()
         runnable = _DeleteResultRunnable(self._view_model, self._db_path, entries=entries)
         total_entries = len(entries)
         runnable.signals.finished.connect(
-            lambda successes, failures: self._handle_delete_finished(successes, failures, total_entries)
+            lambda removed, db_updated_ids, failures: self._handle_delete_finished(
+                removed,
+                db_updated_ids,
+                failures,
+                total_entries,
+            )
         )
+        self._current_delete_task = runnable
         self._delete_pool.start(runnable)
 
     def _handle_delete_finished(
         self,
-        successes: list[tuple[int, str]],
-        failures: list[tuple[int, str, str]],
+        removed: list[tuple[int, str]],
+        db_updated_ids: list[int],
+        failures: list[tuple[str, int, str, str]],
         total: int,
     ) -> None:
         """Remove deleted files from the current result models."""
 
         self._delete_active = False
-        removed = self._remove_results_by_file_ids([file_id for file_id, _ in successes])
+        self._current_delete_task = None
+        removed_from_view = self._remove_results_by_file_ids(
+            [file_id for file_id, _ in removed],
+            offset_file_ids=db_updated_ids,
+        )
         query_label = self._current_query or "*"
-        self._status_label.setText(_format_delete_success(successes, total, self._offset, query_label))
-        if removed and not self._results_cache and not self._can_load_more:
+        self._status_label.setText(
+            _format_delete_result_status(removed, failures, total, len(self._results_cache), query_label)
+        )
+        if removed_from_view and not self._results_cache and not self._can_load_more:
             self._show_placeholder(True)
         if failures:
-            message = "\n".join(f"{path}: {reason}" for _, path, reason in failures)
+            message = "\n".join(
+                f"{path}: {_format_delete_failure_reason(kind, reason)}" for kind, _, path, reason in failures
+            )
             QMessageBox.warning(self, "Delete image", f"Some images could not be deleted:\n{message}")
         self._update_control_states()
 
-    def _remove_results_by_file_ids(self, file_ids: Sequence[int]) -> bool:
+    def _remove_results_by_file_ids(self, file_ids: Sequence[int], *, offset_file_ids: Sequence[int]) -> bool:
         """Remove result rows matching *file_ids* from table, grid, and cache."""
 
         id_set = {int(file_id) for file_id in file_ids}
@@ -1802,11 +1839,18 @@ class TagsTab(QWidget):
             pass
         self._pending_thumbs.clear()
         next_selection = min(rows[0], max(0, len(self._results_cache) - len(rows) - 1))
+        offset_id_set = {int(file_id) for file_id in offset_file_ids}
+        offset_removed = sum(
+            1
+            for row in rows
+            if (file_id := self._coerce_file_id(self._results_cache[row].get("id"))) is not None
+            and file_id in offset_id_set
+        )
         for row in reversed(rows):
             self._results_cache.pop(row)
             self._table_model.removeRow(row)
             self._grid_model.removeRow(row)
-        self._offset = max(0, self._offset - len(rows))
+        self._offset = max(0, self._offset - offset_removed)
         self._sync_grid_row_roles()
         if self._results_cache:
             self._table_view.selectRow(next_selection)
@@ -1831,6 +1875,17 @@ class TagsTab(QWidget):
             return int(value)
         except (TypeError, ValueError):
             return None
+
+    @staticmethod
+    def _coerce_result_path(value: object) -> Path | None:
+        """Return *value* as a non-empty result path when possible."""
+
+        if not isinstance(value, str):
+            return None
+        cleaned = value.strip()
+        if not cleaned:
+            return None
+        return Path(cleaned)
 
     def _copy_tags_to_clipboard(self, row: int, *, include_scores: bool) -> None:
         """Copy filtered tags for *row* to the clipboard."""
@@ -2013,6 +2068,7 @@ class TagsTab(QWidget):
                 refresh_active=self._refresh_active,
                 has_current_query=bool(self._current_where),
                 can_load_more=self._can_load_more,
+                delete_active=self._delete_active,
             )
         )
         self._search_button.setEnabled(availability.search)

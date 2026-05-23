@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 
 from tagger.base import TagCategory
-from ui.tags_tab import _filter_tags_by_threshold
+from ui.tags_tab import TagsTab, _filter_tags_by_threshold
 
 
 @pytest.mark.parametrize(
@@ -50,3 +50,10 @@ from ui.tags_tab import _filter_tags_by_threshold
 )
 def test_filter_tags_by_threshold(rows, expected) -> None:
     assert _filter_tags_by_threshold(rows) == expected
+
+
+def test_coerce_result_path_rejects_empty_or_non_string_values() -> None:
+    assert TagsTab._coerce_result_path("") is None
+    assert TagsTab._coerce_result_path("   ") is None
+    assert TagsTab._coerce_result_path(None) is None
+    assert str(TagsTab._coerce_result_path("C:/images/a.png")) == "C:\\images\\a.png"
