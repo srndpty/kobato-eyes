@@ -13,12 +13,12 @@ from ui import thumbnail_tasks
 
 class _Emitter:
     def __init__(self) -> None:
-        self.emitted: list[tuple[int, object]] = []
+        self.emitted: list[tuple[int, int, object]] = []
 
-    def emit(self, row: int, pixmap: object) -> None:
+    def emit(self, row: int, file_id: int, pixmap: object) -> None:
         """Collect emitted thumbnail payloads."""
 
-        self.emitted.append((row, pixmap))
+        self.emitted.append((row, file_id, pixmap))
 
 
 class _Signal:
@@ -38,11 +38,11 @@ def test_thumbnail_task_loads_thumbnail_and_emits_row(monkeypatch, tmp_path: Pat
 
     monkeypatch.setattr(thumbnail_tasks, "get_thumbnail", fake_get_thumbnail)
 
-    task = thumbnail_tasks.ThumbnailTask(3, path, 128, 96, signal)  # type: ignore[arg-type]
+    task = thumbnail_tasks.ThumbnailTask(3, 42, path, 128, 96, signal)  # type: ignore[arg-type]
     task.run()
 
     assert calls == [(path, 128, 96)]
-    assert signal.finished.emitted == [(3, pixmap)]
+    assert signal.finished.emitted == [(3, 42, pixmap)]
 
 
 def test_thumbnail_task_cancel_skips_load_and_emit(monkeypatch, tmp_path: Path) -> None:
@@ -56,7 +56,7 @@ def test_thumbnail_task_cancel_skips_load_and_emit(monkeypatch, tmp_path: Path) 
 
     monkeypatch.setattr(thumbnail_tasks, "get_thumbnail", fake_get_thumbnail)
 
-    task = thumbnail_tasks.ThumbnailTask(3, path, 128, 96, signal)  # type: ignore[arg-type]
+    task = thumbnail_tasks.ThumbnailTask(3, 42, path, 128, 96, signal)  # type: ignore[arg-type]
     task.cancel()
     task.run()
 
@@ -75,7 +75,7 @@ def test_thumbnail_task_broken_image_emits_empty_pixmap(monkeypatch, tmp_path: P
     monkeypatch.setattr(thumbnail_tasks, "get_thumbnail", fake_get_thumbnail)
     monkeypatch.setattr(thumbnail_tasks, "QPixmap", lambda: empty_pixmap)
 
-    task = thumbnail_tasks.ThumbnailTask(4, path, 64, 64, signal)  # type: ignore[arg-type]
+    task = thumbnail_tasks.ThumbnailTask(4, 99, path, 64, 64, signal)  # type: ignore[arg-type]
     task.run()
 
-    assert signal.finished.emitted == [(4, empty_pixmap)]
+    assert signal.finished.emitted == [(4, 99, empty_pixmap)]

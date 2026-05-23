@@ -11,6 +11,7 @@ import pytest
 
 pytest.importorskip("PyQt6.QtWidgets", reason="PyQt6 widgets required", exc_type=ImportError)
 from PyQt6.QtCore import QItemSelectionModel, Qt
+from PyQt6.QtGui import QPixmap
 from PyQt6.QtWidgets import QApplication, QMessageBox
 
 from core.config import PipelineSettings
@@ -349,3 +350,27 @@ def test_delete_grid_selection_resyncs_grid_row_roles(
         for row in range(tags_tab._grid_model.rowCount())  # type: ignore[attr-defined]
     ]
     assert roles == list(range(tags_tab._grid_model.rowCount()))  # type: ignore[attr-defined]
+
+
+def test_stale_thumbnail_result_is_ignored_after_result_row_removal(
+    tags_tab: TagsTab,
+    qapp: QApplication,
+) -> None:
+    _await_idle(tags_tab, qapp)
+    tags_tab._on_load_more_clicked()  # type: ignore[attr-defined]
+    _await_idle(tags_tab, qapp)
+    first_id = int(tags_tab._results_cache[0]["id"])  # type: ignore[attr-defined]
+    second_id = int(tags_tab._results_cache[1]["id"])  # type: ignore[attr-defined]
+
+    assert tags_tab._remove_results_by_file_ids([first_id], offset_file_ids=[first_id])  # type: ignore[attr-defined]
+    table_item = tags_tab._table_model.item(0, 0)  # type: ignore[attr-defined]
+    assert table_item is not None
+    table_item.setData(None, Qt.ItemDataRole.DecorationRole)
+
+    stale_pixmap = QPixmap(1, 1)
+    tags_tab._apply_thumbnail(0, first_id, stale_pixmap)  # type: ignore[attr-defined]
+    assert table_item.data(Qt.ItemDataRole.DecorationRole) is None
+
+    current_pixmap = QPixmap(1, 1)
+    tags_tab._apply_thumbnail(0, second_id, current_pixmap)  # type: ignore[attr-defined]
+    assert table_item.data(Qt.ItemDataRole.DecorationRole) is not None

@@ -636,7 +636,7 @@ class TagsTab(QWidget):
         self._thumb_pool.setMaxThreadCount(min(4, self._thumb_pool.maxThreadCount()))
         self._thumb_signal = _ThumbnailSignal()
         self._thumb_signal.finished.connect(self._apply_thumbnail)
-        self._pending_thumbs: set[int] = set()
+        self._pending_thumbs: set[tuple[int, int]] = set()
 
         self._index_pool = QThreadPool(self)
         self._index_pool.setMaxThreadCount(1)
@@ -1658,18 +1658,22 @@ class TagsTab(QWidget):
             grid_item.setToolTip(tags_text)
             self._grid_model.appendRow(grid_item)
 
-            if path_obj.exists():
-                self._queue_thumbnail(row_index, path_obj)
+            file_id = self._coerce_file_id(record.get("id"))
+            if path_obj.exists() and file_id is not None:
+                self._queue_thumbnail(row_index, file_id, path_obj)
 
-    def _queue_thumbnail(self, row: int, path: Path) -> None:
-        if row in self._pending_thumbs:
+    def _queue_thumbnail(self, row: int, file_id: int, path: Path) -> None:
+        key = (int(row), int(file_id))
+        if key in self._pending_thumbs:
             return
-        self._pending_thumbs.add(row)
-        task = _ThumbnailTask(row, path, self._THUMB_SIZE, self._THUMB_SIZE, self._thumb_signal)
+        self._pending_thumbs.add(key)
+        task = _ThumbnailTask(row, file_id, path, self._THUMB_SIZE, self._THUMB_SIZE, self._thumb_signal)
         self._thumb_pool.start(task)
 
-    def _apply_thumbnail(self, row: int, pixmap: QPixmap) -> None:
-        self._pending_thumbs.discard(row)
+    def _apply_thumbnail(self, row: int, file_id: int, pixmap: QPixmap) -> None:
+        self._pending_thumbs.discard((int(row), int(file_id)))
+        if not self._thumbnail_matches_current_result(row, file_id):
+            return
         if row < self._table_model.rowCount():
             table_item = self._table_model.item(row, 0)
             if table_item is not None:
@@ -1680,6 +1684,14 @@ class TagsTab(QWidget):
             grid_item = self._grid_model.item(row)
             if grid_item is not None:
                 grid_item.setData(pixmap, Qt.ItemDataRole.DecorationRole)
+
+    def _thumbnail_matches_current_result(self, row: int, file_id: int) -> bool:
+        """Return whether a thumbnail result still belongs to the visible row."""
+
+        if not (0 <= row < len(self._results_cache)):
+            return False
+        current_id = self._coerce_file_id(self._results_cache[row].get("id"))
+        return current_id == int(file_id)
 
     def _on_table_context_menu(self, pos: QPoint) -> None:
         """Show context menu for a table result."""
