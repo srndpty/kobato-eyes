@@ -36,7 +36,9 @@ from ui.dup_cluster_update import rebuild_clusters_after_removal, sort_entries_f
 from ui.dup_lifecycle import (
     duplicate_action_availability,
     duplicate_export_status,
+    duplicate_refine_cancel_status,
     duplicate_refine_complete_status,
+    duplicate_refine_error_status,
     duplicate_refine_progress,
     duplicate_scan_finished_plan,
     duplicate_scan_progress,
@@ -310,15 +312,14 @@ class DupTab(QWidget):
             dlg.close()
             self._refine_dialog = None
             self._refine_task = None
-            # キャンセル時は “元の” clusters で表示するか、何もしないか選べます
-            self._status_label.setText("Refine canceled.")
+            self._status_label.setText(duplicate_refine_cancel_status())
 
         def on_error(msg):
             dlg.close()
             self._refine_dialog = None
             self._refine_task = None
             QMessageBox.warning(self, "Refine failed", msg)
-            self._status_label.setText("Refine failed.")
+            self._status_label.setText(duplicate_refine_error_status())
 
         task.signals.progress.connect(on_progress)
         task.signals.finished.connect(on_finished)

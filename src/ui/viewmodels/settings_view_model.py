@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Callable, Iterable, Protocol
+from typing import Callable, Iterable, Literal, Protocol, cast
 
 from PyQt6.QtCore import QObject, pyqtSignal
 
@@ -14,6 +14,8 @@ from tagger.model_inspection import ModelInspection, format_inspection, inspect_
 from utils.paths import get_db_path as _get_db_path
 
 logger = logging.getLogger(__name__)
+
+TaggerDevice = Literal["auto", "cuda", "cpu"]
 
 
 class _ResetDatabase(Protocol):
@@ -27,6 +29,15 @@ def _default_provider_loader() -> list[str]:
     from tagger import wd14_onnx
 
     return wd14_onnx.get_available_providers()
+
+
+def _normalise_tagger_device(value: str | None) -> TaggerDevice:
+    """Return a supported tagger execution-device setting."""
+
+    normalized = str(value or "auto").strip().lower()
+    if normalized in {"auto", "cuda", "cpu"}:
+        return cast(TaggerDevice, normalized)
+    return "auto"
 
 
 class SettingsViewModel(QObject):
@@ -83,6 +94,7 @@ class SettingsViewModel(QObject):
         tagger_name: str,
         model_path: str | None,
         previous_tagger: TaggerSettings,
+        device: str = "auto",
     ) -> PipelineSettings:
         """Construct a :class:`PipelineSettings` instance from UI inputs."""
 
@@ -90,6 +102,8 @@ class SettingsViewModel(QObject):
             name=tagger_name,
             model_path=model_path,
             tags_csv=previous_tagger.tags_csv if tagger_name.lower() == "wd14-onnx" else None,
+            provider=previous_tagger.provider,
+            device=_normalise_tagger_device(device),
             thresholds=dict(previous_tagger.thresholds),
         )
         settings = PipelineSettings(

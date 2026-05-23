@@ -62,6 +62,7 @@ class TaggerSettings(BaseModel):
     model_path: str | None = None
     tags_csv: str | None = None
     provider: Literal["auto", "wd14", "pixai"] = "auto"
+    device: Literal["auto", "cuda", "cpu"] = "auto"
     thresholds: dict[str, float] = Field(default_factory=_default_thresholds)
 
     @field_validator("model_path", "tags_csv", mode="before")

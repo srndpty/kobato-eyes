@@ -116,6 +116,18 @@ def duplicate_refine_complete_status(clusters: Sequence[_ClusterLike]) -> str:
     return f"Refine complete: {format_duplicate_summary(clusters)}"
 
 
+def duplicate_refine_cancel_status() -> str:
+    """Return status text after duplicate refinement is cancelled."""
+
+    return "Refine canceled."
+
+
+def duplicate_refine_error_status() -> str:
+    """Return status text after duplicate refinement fails."""
+
+    return "Refine failed."
+
+
 def duplicate_trash_summary(success_count: int, failure_count: int) -> str:
     """Return status text after trashing duplicate entries."""
 
@@ -138,7 +150,9 @@ __all__ = [
     "RefineProgressState",
     "duplicate_action_availability",
     "duplicate_export_status",
+    "duplicate_refine_cancel_status",
     "duplicate_refine_complete_status",
+    "duplicate_refine_error_status",
     "duplicate_refine_progress",
     "duplicate_scan_finished_plan",
     "duplicate_scan_progress",

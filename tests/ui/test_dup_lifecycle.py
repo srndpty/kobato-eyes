@@ -7,7 +7,9 @@ from types import SimpleNamespace
 from ui.dup_lifecycle import (
     duplicate_action_availability,
     duplicate_export_status,
+    duplicate_refine_cancel_status,
     duplicate_refine_complete_status,
+    duplicate_refine_error_status,
     duplicate_refine_progress,
     duplicate_scan_finished_plan,
     duplicate_scan_progress,
@@ -67,6 +69,8 @@ def test_duplicate_refine_progress_and_status_text() -> None:
     assert (
         duplicate_refine_complete_status([_Cluster([object()])]) == "Refine complete: 1 group(s), 1 file(s) detected."
     )
+    assert duplicate_refine_cancel_status() == "Refine canceled."
+    assert duplicate_refine_error_status() == "Refine failed."
 
 
 def test_duplicate_trash_and_export_status_text() -> None:

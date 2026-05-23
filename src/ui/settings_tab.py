@@ -265,6 +265,8 @@ class SettingsTab(QWidget):
         self._roots_edit.setPlainText("\n".join(str(path) for path in settings.roots))
         self._excluded_edit.setPlainText("\n".join(str(path) for path in settings.excluded))
         self._batch_size_spin.setValue(settings.batch_size)
+        device_index = self._device_combo.findData(settings.tagger.device)
+        self._device_combo.setCurrentIndex(device_index if device_index >= 0 else 0)
 
         tagger_index = self._tagger_combo.findText(settings.tagger.name)
         if tagger_index >= 0:
@@ -287,6 +289,7 @@ class SettingsTab(QWidget):
             batch_size=self._batch_size_spin.value(),
             tagger_name=tagger_name,
             model_path=model_path,
+            device=str(self._device_combo.currentData() or "auto"),
             previous_tagger=previous_tagger,
         )
         self._current_settings = settings
