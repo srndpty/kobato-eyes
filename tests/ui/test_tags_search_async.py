@@ -374,3 +374,34 @@ def test_stale_thumbnail_result_is_ignored_after_result_row_removal(
     current_pixmap = QPixmap(1, 1)
     tags_tab._apply_thumbnail(0, second_id, current_pixmap)  # type: ignore[attr-defined]
     assert table_item.data(Qt.ItemDataRole.DecorationRole) is not None
+
+
+def test_delete_requeues_missing_thumbnail_for_shifted_remaining_row(
+    tags_tab: TagsTab,
+    qapp: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _await_idle(tags_tab, qapp)
+    tags_tab._on_load_more_clicked()  # type: ignore[attr-defined]
+    _await_idle(tags_tab, qapp)
+    first_id = int(tags_tab._results_cache[0]["id"])  # type: ignore[attr-defined]
+    second_id = int(tags_tab._results_cache[1]["id"])  # type: ignore[attr-defined]
+    second_path = Path(str(tags_tab._results_cache[1]["path"]))  # type: ignore[attr-defined]
+    queued: list[tuple[int, int, Path]] = []
+
+    for row in range(tags_tab._table_model.rowCount()):  # type: ignore[attr-defined]
+        table_item = tags_tab._table_model.item(row, 0)  # type: ignore[attr-defined]
+        grid_item = tags_tab._grid_model.item(row)  # type: ignore[attr-defined]
+        if table_item is not None:
+            table_item.setData(None, Qt.ItemDataRole.DecorationRole)
+        if grid_item is not None:
+            grid_item.setData(None, Qt.ItemDataRole.DecorationRole)
+    monkeypatch.setattr(
+        tags_tab,
+        "_queue_thumbnail",
+        lambda row, file_id, path: queued.append((int(row), int(file_id), Path(path))),
+    )
+
+    assert tags_tab._remove_results_by_file_ids([first_id], offset_file_ids=[first_id])  # type: ignore[attr-defined]
+
+    assert (0, second_id, second_path) in queued

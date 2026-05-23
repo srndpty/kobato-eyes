@@ -1867,9 +1867,31 @@ class TagsTab(QWidget):
         if self._results_cache:
             self._table_view.selectRow(next_selection)
             self._grid_view.setCurrentIndex(self._grid_model.index(next_selection, 0))
+        self._requeue_missing_thumbnails()
         self._table_view.viewport().update()
         self._grid_view.viewport().update()
         return True
+
+    def _requeue_missing_thumbnails(self) -> None:
+        """Queue thumbnails for visible result rows that lost pending work."""
+
+        for row, record in enumerate(self._results_cache):
+            if self._row_has_thumbnail(row):
+                continue
+            file_id = self._coerce_file_id(record.get("id"))
+            path = self._coerce_result_path(record.get("path"))
+            if file_id is None or path is None or not path.exists():
+                continue
+            self._queue_thumbnail(row, file_id, path)
+
+    def _row_has_thumbnail(self, row: int) -> bool:
+        """Return whether a table or grid item already has a thumbnail."""
+
+        table_item = self._table_model.item(row, 0) if row < self._table_model.rowCount() else None
+        if table_item is not None and table_item.data(Qt.ItemDataRole.DecorationRole) is not None:
+            return True
+        grid_item = self._grid_model.item(row) if row < self._grid_model.rowCount() else None
+        return bool(grid_item is not None and grid_item.data(Qt.ItemDataRole.DecorationRole) is not None)
 
     def _sync_grid_row_roles(self) -> None:
         """Keep grid items pointing at their current result-cache row."""
