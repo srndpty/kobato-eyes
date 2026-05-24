@@ -18,7 +18,7 @@ def bound_path_from_bindings(bindings: Mapping[str, Sequence[T]], target: T) -> 
         if target in items:
             try:
                 return Path(key)
-            except TypeError:
+            except (TypeError, ValueError, OSError):
                 return None
     return None
 

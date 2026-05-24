@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+from threading import Event
 from typing import Iterable
 
 import pytest
@@ -65,6 +66,17 @@ class CancelledJob(BatchJob):
 
     def cleanup(self) -> None:
         self.cleaned = True
+
+
+class BlockingDummyJob(DummyJob):
+    def __init__(self, items: list[int], release: Event) -> None:
+        super().__init__(items)
+        self._release = release
+
+    def load_item(self, item: int) -> int:
+        if not self._release.wait(timeout=2.0):
+            raise TimeoutError("blocking job was not released")
+        return item
 
 
 def _wait_for(condition, app: QCoreApplication, timeout: float = 2.0) -> None:
@@ -186,12 +198,14 @@ def test_job_manager_emits_cancelled_and_finished_on_cooperative_cancel(qapp: QC
 def test_job_manager_shutdown_waits_for_queued_jobs(qapp: QCoreApplication) -> None:
     manager = JobManager(max_workers=1)
     completions: list[list[int]] = []
+    release = Event()
 
-    first = manager.submit(DummyJob([1]), priority=JobPriority.FOREGROUND)
-    second = manager.submit(DummyJob([2]), priority=JobPriority.BACKGROUND)
+    first = manager.submit(BlockingDummyJob([1], release), priority=JobPriority.FOREGROUND)
+    second = manager.submit(BlockingDummyJob([2], release), priority=JobPriority.BACKGROUND)
     first.completed.connect(lambda result: completions.append(result))
     second.completed.connect(lambda result: completions.append(result))
 
+    release.set()
     assert manager.shutdown(timeout_ms=2000)
     _wait_for(lambda: not manager.has_pending_jobs(), qapp)
 

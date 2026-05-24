@@ -16,11 +16,13 @@ def test_result_row_from_stored_accepts_valid_model_or_stored_rows() -> None:
     assert result_row_from_stored(1, None, result_count=3) == 1
     assert result_row_from_stored(1, "2", result_count=3) == 2
     assert result_row_from_stored(1, "bad", result_count=3) is None
+    assert result_row_from_stored(1, True, result_count=3) is None
+    assert result_row_from_stored(1, 1.9, result_count=3) is None
     assert result_row_from_stored(9, None, result_count=3) is None
 
 
 def test_normalize_selected_rows_filters_invalid_and_deduplicates() -> None:
-    assert normalize_selected_rows([2, "1", 2, -1, "bad", 4], result_count=3) == [1, 2]
+    assert normalize_selected_rows([2, "1", 2, -1, "bad", True, 1.9, 4], result_count=3) == [1, 2]
 
 
 def test_collect_delete_entries_uses_only_rows_with_ids_and_paths(tmp_path: Path) -> None:

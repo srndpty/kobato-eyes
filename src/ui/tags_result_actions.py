@@ -18,6 +18,19 @@ class CopyTagsPayload:
     feedback: str
 
 
+def _coerce_row(value: object) -> int | None:
+    """Return *value* as an integer row, rejecting lossy or bool coercions."""
+
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, float) and not value.is_integer():
+        return None
+    try:
+        return int(cast(Any, value))
+    except (TypeError, ValueError):
+        return None
+
+
 def result_row_from_stored(
     index_row: int,
     stored_row: object,
@@ -26,9 +39,8 @@ def result_row_from_stored(
 ) -> int | None:
     """Resolve a model index row or stored result row into a valid result row."""
 
-    try:
-        row = int(cast(Any, stored_row)) if stored_row is not None else int(index_row)
-    except (TypeError, ValueError):
+    row = _coerce_row(stored_row) if stored_row is not None else _coerce_row(index_row)
+    if row is None:
         return None
     if 0 <= row < result_count:
         return row
@@ -40,9 +52,8 @@ def normalize_selected_rows(rows: Iterable[object], *, result_count: int) -> lis
 
     normalized: set[int] = set()
     for value in rows:
-        try:
-            row = int(cast(Any, value))
-        except (TypeError, ValueError):
+        row = _coerce_row(value)
+        if row is None:
             continue
         if 0 <= row < result_count:
             normalized.add(row)

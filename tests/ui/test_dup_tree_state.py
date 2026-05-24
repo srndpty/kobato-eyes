@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any, cast
 
 from dup.scanner import DuplicateCluster, DuplicateClusterEntry, DuplicateFile
 from ui.dup_tree_state import (
@@ -33,6 +34,7 @@ def test_bound_path_from_bindings_returns_matching_path() -> None:
 
     assert bound_path_from_bindings({"C:/a.png": [target]}, target) == Path("C:/a.png")
     assert bound_path_from_bindings({"C:/a.png": []}, target) is None
+    assert bound_path_from_bindings(cast(Any, {None: [target]}), target) is None
 
 
 def test_thumbnail_queue_helpers_skip_inflight_done_and_duplicates() -> None:
