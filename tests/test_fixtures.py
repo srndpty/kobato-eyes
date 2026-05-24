@@ -2,11 +2,10 @@
 
 from __future__ import annotations
 
+import sqlite3
 from pathlib import Path
 
 from PIL import Image
-
-from db.connection import get_conn
 
 
 def test_test_rgb_image(test_rgb_image: Image.Image) -> None:
@@ -28,13 +27,11 @@ def test_test_db_path(test_db_path: Path) -> None:
     """Verify test_db_path fixture creates initialized database."""
     assert test_db_path.exists()
 
-    # Verify schema is applied (tables exist)
-    conn = get_conn(test_db_path)
+    conn = sqlite3.connect(test_db_path)
     try:
         cursor = conn.execute("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
         tables = {row[0] for row in cursor}
 
-        # Check for expected core tables
         assert "files" in tables
         assert "file_tags" in tables
         assert "fts_files" in tables

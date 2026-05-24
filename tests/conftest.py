@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sqlite3
 import tempfile
 from pathlib import Path
 from typing import Generator
@@ -9,7 +10,7 @@ from typing import Generator
 import pytest
 from PIL import Image
 
-from db.connection import end_quiesce, get_conn, is_quiesced
+from db.connection import end_quiesce, is_quiesced
 from db.schema import apply_schema
 
 
@@ -40,16 +41,16 @@ def test_image_path(tmp_path: Path, test_rgb_image: Image.Image) -> Path:
 
 
 @pytest.fixture
-def test_db_path(tmp_path: Path) -> Generator[Path, None, None]:
+def test_db_path(tmp_path: Path) -> Path:
     """Create a temporary database path with schema initialized."""
     db_path = tmp_path / "test.db"
-    conn = get_conn(db_path)
-    apply_schema(conn)
-    conn.commit()
+    conn = sqlite3.connect(db_path)
     try:
-        yield db_path
+        apply_schema(conn)
+        conn.commit()
     finally:
         conn.close()
+    return db_path
 
 
 @pytest.fixture
