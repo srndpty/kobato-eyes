@@ -299,10 +299,12 @@ class DupTab(QWidget):
         # シグナル接続
         def on_progress(cur, total, stage):
             state = duplicate_refine_progress(cur, total, stage)
+            if state.indeterminate:
+                dlg.setRange(0, 0)
+            else:
+                dlg.setRange(0, state.maximum)
+                dlg.setValue(state.value)
             dlg.setLabelText(state.label)
-            if dlg.maximum() != state.maximum:
-                dlg.setMaximum(state.maximum)
-            dlg.setValue(state.value)
 
         def on_finished(refined):
             dlg.close()
@@ -747,7 +749,7 @@ class DupTab(QWidget):
         self._progress.setValue(0)
         self._status_label.setText("Scanning duplicates…")
         runnable = DuplicateScanRunnable(self._view_model, self._db_path, request)
-        runnable.signals.progress.connect(self._on_scan_progress)
+        runnable.signals.progressState.connect(self._on_scan_progress_state)
         runnable.signals.finished.connect(self._on_scan_finished)
         runnable.signals.error.connect(self._on_scan_error)
         self._active_scan = runnable
@@ -756,8 +758,21 @@ class DupTab(QWidget):
 
     def _on_scan_progress(self, current: int, total: int) -> None:
         state = duplicate_scan_progress(current, total)
-        self._progress.setMaximum(state.maximum)
-        self._progress.setValue(state.value)
+        self._apply_scan_progress_state(state)
+
+    def _on_scan_progress_state(self, current: int, total: int, stage: str) -> None:
+        """Apply duplicate scan progress with stage context."""
+
+        state = duplicate_scan_progress(current, total, stage)
+        self._apply_scan_progress_state(state)
+
+    def _apply_scan_progress_state(self, state) -> None:
+        if state.indeterminate:
+            self._progress.setRange(0, 0)
+        else:
+            self._progress.setRange(0, state.maximum)
+            self._progress.setValue(state.value)
+        self._status_label.setText(state.label)
 
     def _on_scan_finished(self, payload: object) -> None:
         logger.info("ui: _on_scan_finished begin")

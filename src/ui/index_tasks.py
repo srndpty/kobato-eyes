@@ -23,6 +23,7 @@ class IndexRunnable(QRunnable):
         """Signals emitted by an indexing task."""
 
         progress = pyqtSignal(int, int, str)
+        progressState = pyqtSignal(object)
         finished = pyqtSignal(dict)
         error = pyqtSignal(str)
 
@@ -55,6 +56,7 @@ class IndexRunnable(QRunnable):
             label = progress.message
 
         try:
+            self.signals.progressState.emit(progress)
             self.signals.progress.emit(progress.done, progress.total, label)
         except RuntimeError:
             return

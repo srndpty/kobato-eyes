@@ -26,8 +26,11 @@ class DuplicateActionAvailability:
 class DuplicateProgressState:
     """Progress bar state for duplicate tasks."""
 
+    label: str
     maximum: int
     value: int
+    percent: int | None
+    indeterminate: bool
 
 
 @dataclass(frozen=True)
@@ -48,6 +51,8 @@ class RefineProgressState:
     label: str
     maximum: int
     value: int
+    percent: int | None
+    indeterminate: bool
 
 
 def duplicate_action_availability(*, has_clusters: bool, checked_count: int) -> DuplicateActionAvailability:
@@ -61,12 +66,27 @@ def duplicate_action_availability(*, has_clusters: bool, checked_count: int) -> 
     )
 
 
-def duplicate_scan_progress(current: int, total: int) -> DuplicateProgressState:
+def duplicate_scan_progress(current: int, total: int, stage: str = "Scanning duplicates") -> DuplicateProgressState:
     """Return progress bar state for duplicate scanning."""
 
     if total <= 0:
-        return DuplicateProgressState(maximum=1, value=0)
-    return DuplicateProgressState(maximum=total, value=current)
+        return DuplicateProgressState(
+            label=f"{stage}...",
+            maximum=0,
+            value=0,
+            percent=None,
+            indeterminate=True,
+        )
+    maximum = max(1, int(total))
+    value = max(0, min(int(current), maximum))
+    percent = min(100, (value * 100) // maximum)
+    return DuplicateProgressState(
+        label=f"{stage}: {value} / {maximum} ({percent}%)",
+        maximum=maximum,
+        value=value,
+        percent=percent,
+        indeterminate=False,
+    )
 
 
 def duplicate_scan_finished_plan(payload: object, cluster_type: type[object]) -> DuplicateScanPlan:
@@ -102,11 +122,23 @@ def duplicate_scan_finished_plan(payload: object, cluster_type: type[object]) ->
 def duplicate_refine_progress(current: int, total: int, stage: str) -> RefineProgressState:
     """Return progress dialog state for duplicate refinement."""
 
-    maximum = total if total > 0 else 1
+    if total <= 0:
+        return RefineProgressState(
+            label=f"{stage}...",
+            maximum=0,
+            value=0,
+            percent=None,
+            indeterminate=True,
+        )
+    maximum = max(1, int(total))
+    value = max(0, min(int(current), maximum))
+    percent = min(100, (value * 100) // maximum)
     return RefineProgressState(
-        label=f"{stage}  {current} / {maximum}",
+        label=f"{stage}: {value} / {maximum} ({percent}%)",
         maximum=maximum,
-        value=current,
+        value=value,
+        percent=percent,
+        indeterminate=False,
     )
 
 

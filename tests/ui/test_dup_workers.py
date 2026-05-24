@@ -20,6 +20,7 @@ class _Connection:
 def test_duplicate_scan_worker_emits_clusters(tmp_path: Path) -> None:
     emitted: list[object] = []
     progress: list[tuple[int, int]] = []
+    progress_states: list[tuple[int, int, str]] = []
     rows = [
         {
             "file_id": 1,
@@ -39,12 +40,16 @@ def test_duplicate_scan_worker_emits_clusters(tmp_path: Path) -> None:
     )
     worker = DuplicateScanRunnable(view_model, view_model.db_path, DuplicateScanRequest(None, 4, None))
     worker.signals.progress.connect(lambda current, total: progress.append((current, total)))
+    worker.signals.progressState.connect(lambda current, total, stage: progress_states.append((current, total, stage)))
     worker.signals.finished.connect(emitted.append)
 
     worker.run()
 
     assert emitted == [["cluster"]]
     assert progress[-1] == (1, 1)
+    assert "Loading files" in {stage for _, _, stage in progress_states}
+    assert "Building groups" in {stage for _, _, stage in progress_states}
+    assert "Clustering duplicates" in {stage for _, _, stage in progress_states}
 
 
 def test_duplicate_scan_worker_emits_error(tmp_path: Path) -> None:

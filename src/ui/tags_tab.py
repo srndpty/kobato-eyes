@@ -69,6 +69,7 @@ from ui.file_actions import trash_path
 from ui.index_lifecycle import (
     connection_retry_action,
     index_cancel_status,
+    index_progress_state,
     index_started_status,
     plan_index_failed,
     plan_index_finished,
@@ -1245,7 +1246,7 @@ class TagsTab(QWidget):
         self._quiesce_guard.__enter__()
 
         self._current_index_task = task
-        task.signals.progress.connect(self._handle_index_progress)
+        task.signals.progressState.connect(self._handle_index_progress_state)
         task.signals.finished.connect(self._handle_index_finished)
         task.signals.error.connect(self._handle_index_failed)
         self._handle_index_started()
@@ -1297,10 +1298,12 @@ class TagsTab(QWidget):
             index_cancel_status(refresh_active=self._refresh_active, retag_active=self._retag_active)
         )
         if self._progress_dialog is not None:
+            self._progress_dialog.setCancelButtonText("Cancelling...")
+            self._progress_dialog.setRange(0, 0)
             if self._progress_label is not None:
-                self._progress_label.set_full_text("Cancelling…")
+                self._progress_label.set_full_text("Cancelling...")
             else:
-                self._progress_dialog.setLabelText("Cancelling…")
+                self._progress_dialog.setLabelText("Cancelling...")
 
     def _handle_index_progress(self, done: int, total: int, label: str) -> None:
         dlg = self._progress_dialog
@@ -1327,6 +1330,27 @@ class TagsTab(QWidget):
             dlg.setLabelText(f"{label}: {value}/{total} ({percent}%)")
         except RuntimeError:
             # ダイアログが deleteLater 済み等で C++ 側が死んでいる場合は無視
+            pass
+
+    def _handle_index_progress_state(self, progress: IndexProgress) -> None:
+        """Apply display-ready progress state for indexing tasks."""
+
+        dlg = self._progress_dialog
+        if dlg is None:
+            return
+        state = index_progress_state(progress)
+        try:
+            if state.indeterminate:
+                dlg.setRange(0, 0)
+            else:
+                dlg.setRange(0, state.maximum)
+                dlg.setValue(state.value)
+            if self._progress_label is not None:
+                self._progress_label.set_full_text(state.label)
+            else:
+                dlg.setLabelText(state.label)
+            self._status_label.setText(state.status)
+        except RuntimeError:
             pass
 
     def _close_progress_dialog(self) -> None:
@@ -2049,7 +2073,7 @@ class TagsTab(QWidget):
         task = self._current_index_task
         if task is not None:
             try:
-                task.signals.progress.disconnect(self._handle_index_progress)
+                task.signals.progressState.disconnect(self._handle_index_progress_state)
             except TypeError:
                 pass
 
@@ -2082,7 +2106,7 @@ class TagsTab(QWidget):
         task = self._current_index_task
         if task is not None:
             try:
-                task.signals.progress.disconnect(self._handle_index_progress)
+                task.signals.progressState.disconnect(self._handle_index_progress_state)
             except TypeError:
                 pass
 

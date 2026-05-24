@@ -5,10 +5,12 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
+from core.pipeline import IndexPhase, IndexProgress
 from tagger.wd14_onnx import ONNXRUNTIME_MISSING_MESSAGE
 from ui.index_lifecycle import (
     connection_retry_action,
     index_cancel_status,
+    index_progress_state,
     index_started_status,
     plan_index_failed,
     plan_index_finished,
@@ -19,7 +21,29 @@ def test_index_started_and_cancel_status_follow_active_mode() -> None:
     assert index_started_status(refresh_active=True, retag_active=False) == "Refreshing…"
     assert index_started_status(refresh_active=False, retag_active=True) == "Retagging…"
     assert index_started_status(refresh_active=False, retag_active=False) == "Indexing…"
-    assert index_cancel_status(refresh_active=False, retag_active=True) == "Retagging cancelling…"
+    assert index_cancel_status(refresh_active=False, retag_active=True) == "Retagging cancelling..."
+
+
+def test_index_progress_state_formats_known_total_and_clamps() -> None:
+    state = index_progress_state(IndexProgress(phase=IndexPhase.TAG, done=12, total=10, message="ignored"))
+
+    assert state.label == "Tagging: 10 / 10 (100%)"
+    assert state.status == "Tagging..."
+    assert state.maximum == 10
+    assert state.value == 10
+    assert state.percent == 100
+    assert state.indeterminate is False
+
+
+def test_index_progress_state_formats_unknown_total_with_message() -> None:
+    state = index_progress_state(IndexProgress(phase=IndexPhase.SCAN, done=5, total=-1, message="C:/images/a.png"))
+
+    assert state.label == "Scanning: C:/images/a.png"
+    assert state.status == "Scanning..."
+    assert state.maximum == 0
+    assert state.value == 0
+    assert state.percent is None
+    assert state.indeterminate is True
 
 
 def test_plan_index_finished_refresh_success_uses_active_folder(tmp_path: Path) -> None:

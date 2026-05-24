@@ -77,6 +77,7 @@ def test_index_runnable_merges_pre_run_stats_and_finished(tmp_path: Path) -> Non
 
 def test_index_runnable_progress_uses_message_for_unknown_total(tmp_path: Path) -> None:
     progress: list[tuple[int, int, str]] = []
+    progress_states: list[IndexProgress] = []
 
     def runner(
         progress_cb: Callable[[IndexProgress], None],
@@ -88,10 +89,15 @@ def test_index_runnable_progress_uses_message_for_unknown_total(tmp_path: Path) 
 
     task = IndexRunnable(_ViewModel(), tmp_path / "library.db", runner=runner)  # type: ignore[arg-type]
     task.signals.progress.connect(lambda done, total, label: progress.append((done, total, label)))
+    task.signals.progressState.connect(progress_states.append)
 
     task.run()
 
     assert progress == [(0, -1, "Scanning roots"), (1, 2, "Tag")]
+    assert [(state.phase, state.done, state.total, state.message) for state in progress_states] == [
+        (IndexPhase.SCAN, 0, -1, "Scanning roots"),
+        (IndexPhase.TAG, 1, 2, "ignored"),
+    ]
 
 
 def test_index_runnable_cancel_callback_is_shared_with_runner(tmp_path: Path) -> None:
