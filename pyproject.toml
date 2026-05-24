@@ -163,6 +163,8 @@ files = [
     "src/ui/index_tasks.py",
     "src/ui/search_worker.py",
     "src/ui/autocomplete.py",
+    "src/ui/tags_delete_state.py",
+    "src/ui/tags_result_state.py",
     "src/ui/dup_status.py",
     "src/ui/dup_lifecycle.py",
     "src/ui/dup_cluster_update.py",

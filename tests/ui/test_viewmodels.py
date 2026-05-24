@@ -312,12 +312,14 @@ def test_settings_view_model_build_and_reset(tmp_path: Path) -> None:
         batch_size=16,
         tagger_name="wd14-onnx",
         model_path="/model.onnx",
+        device="cpu",
         previous_tagger=previous,
     )
     view_model.apply_settings(settings)
 
     assert [Path(p) for p in emitted[-1].roots] == [Path("/data")]
     assert Path(emitted[-1].tagger.model_path).name == "model.onnx"
+    assert emitted[-1].tagger.device == "cpu"
     assert emitted[-1].batch_size == 16
 
     message = view_model.check_tagger_environment()

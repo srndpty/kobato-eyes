@@ -38,6 +38,7 @@ def test_config_roundtrip(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> No
         roots=[tmp_path / "root"],
         excluded=[tmp_path / "skip"],
         hamming_threshold=5,
+        tagger={"name": "wd14-onnx", "device": "cpu"},
     )
     save_settings(updated)
 
@@ -45,3 +46,4 @@ def test_config_roundtrip(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> No
     assert reloaded.roots == updated.roots
     assert reloaded.excluded == updated.excluded
     assert reloaded.hamming_threshold == 5
+    assert reloaded.tagger.device == "cpu"

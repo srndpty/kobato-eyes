@@ -136,6 +136,27 @@
   - `.\scripts\check-package-smoke.ps1`
   - `.\scripts\check-gpu.ps1`
 
+## フェーズ 11: UI状態境界と Settings provider を安定化する（実装済み）
+
+- 目的: 巨大 UI controller に残る検索結果削除、thumbnail 再投入、duplicate refine 表示、Settings Device の未接続状態を小さく固定する。
+- 対象:
+  - `src/ui/tags_tab.py`
+  - `src/ui/dup_tab.py`
+  - `src/ui/settings_tab.py`
+  - `src/core/config/schema.py`
+  - `src/core/pipeline/resolver.py`
+- 実装:
+  - `src/ui/tags_delete_state.py` に検索結果削除の確認文、進行中表示、完了表示、失敗理由表示を切り出した。
+  - `src/ui/tags_result_state.py` に file id / path coercion、stale thumbnail 判定、削除後の row / offset / selection 計算、thumbnail 再投入判定を切り出した。
+  - duplicate refine の cancel / error 表示を `src/ui/dup_lifecycle.py` に寄せ、`src/ui/dup_tab.py` から直接文言を減らした。
+  - `TaggerSettings.device` を追加し、Settings の Device コンボを保存値と実際の ONNX provider 指定に接続した。
+  - 既存 DB スキーマ、検索クエリ構文、FTS 結果形式、削除 semantics は変更していない。
+- 検証対象:
+  - `.\scripts\check.ps1`
+  - `.\scripts\check-gui-smoke.ps1`
+  - `.\scripts\check-integration.ps1`
+  - `.\scripts\check-package-smoke.ps1`
+
 ## 運用ルール
 
 - Windows + Python 3.10 を主対象にする。

@@ -18,6 +18,17 @@ from .utils import (
 logger = logging.getLogger(__name__)
 
 
+def _onnx_providers_for_device(device: str | None) -> list[str] | None:
+    """Return explicit ONNX providers for a configured execution device."""
+
+    normalized = str(device or "auto").strip().lower()
+    if normalized == "cuda":
+        return ["CUDAExecutionProvider"]
+    if normalized == "cpu":
+        return ["CPUExecutionProvider"]
+    return None
+
+
 def _resolve_tagger(
     settings: PipelineSettings,
     override: ITagger | None,
@@ -59,6 +70,7 @@ def _resolve_tagger(
     lowered = tagger_name.lower()
     model_path_value = settings.tagger.model_path
     tags_csv_value = getattr(settings.tagger, "tags_csv", None)
+    execution_providers = _onnx_providers_for_device(getattr(settings.tagger, "device", "auto"))
     provider = detect_tagger_provider(settings)
 
     if lowered == "dummy":
@@ -72,11 +84,19 @@ def _resolve_tagger(
         if provider == "pixai":
             from tagger.pixai_onnx import PixaiOnnxTagger
 
-            tagger_instance = PixaiOnnxTagger(model_path_obj, tags_csv=settings.tagger.tags_csv)
+            tagger_instance = PixaiOnnxTagger(
+                model_path_obj,
+                tags_csv=settings.tagger.tags_csv,
+                providers=execution_providers,
+            )
         else:
             from tagger.wd14_onnx import WD14Tagger
 
-            tagger_instance = WD14Tagger(model_path_obj, tags_csv=settings.tagger.tags_csv)
+            tagger_instance = WD14Tagger(
+                model_path_obj,
+                tags_csv=settings.tagger.tags_csv,
+                providers=execution_providers,
+            )
         model_path_value = str(model_path_obj)
     else:
         raise ValueError(f"Unknown tagger '{settings.tagger.name}'")
@@ -93,4 +113,4 @@ def _resolve_tagger(
     return tagger_instance, thresholds, max_tags
 
 
-__all__ = ["_resolve_tagger"]
+__all__ = ["_onnx_providers_for_device", "_resolve_tagger"]

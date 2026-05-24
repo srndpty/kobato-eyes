@@ -83,6 +83,13 @@ from ui.tag_rendering import coerce_category as _coerce_category
 from ui.tag_rendering import filter_tags_by_threshold as _filter_tags_by_threshold
 from ui.tag_stats import TagStatsDialog
 from ui.tags_control_state import TagsActivityState, compute_tags_control_availability
+from ui.tags_delete_state import format_delete_confirmation as _format_delete_confirmation
+from ui.tags_delete_state import format_delete_failure_reason as _format_delete_failure_reason
+from ui.tags_delete_state import format_delete_result_status as _format_delete_result_status
+from ui.tags_delete_state import format_deleting_status as _format_deleting_status
+from ui.tags_result_state import coerce_file_id as _coerce_file_id
+from ui.tags_result_state import coerce_result_path as _coerce_result_path
+from ui.tags_result_state import plan_result_removal, should_queue_missing_thumbnail, thumbnail_matches_result
 from ui.thumbnail_tasks import ThumbnailSignal as _ThumbnailSignal
 from ui.thumbnail_tasks import ThumbnailTask as _ThumbnailTask
 from ui.viewmodels import TagsSearchState, TagsViewModel
@@ -188,54 +195,6 @@ class _DeleteResultRunnable(QRunnable):
                 failures.extend(("db", file_id, trashed_paths[file_id], message) for file_id in trashed_ids)
 
         self.signals.finished.emit(trashed, db_updated_ids, failures)
-
-
-def _format_delete_confirmation(paths: Sequence[Path]) -> str:
-    """Return confirmation text for deleting selected search results."""
-
-    if len(paths) == 1:
-        return f"Move this image to the trash and remove it from search results?\n\n{paths[0]}"
-    preview = "\n".join(str(path) for path in paths[:5])
-    suffix = "" if len(paths) <= 5 else f"\n... and {len(paths) - 5} more"
-    return f"Move {len(paths)} images to the trash and remove them from search results?\n\n{preview}{suffix}"
-
-
-def _format_deleting_status(paths: Sequence[Path]) -> str:
-    """Return status text for an active delete operation."""
-
-    if len(paths) == 1:
-        return f"Deleting {paths[0].name}…"
-    return f"Deleting {len(paths)} images…"
-
-
-def _format_delete_result_status(
-    removed: Sequence[tuple[int, str]],
-    failures: Sequence[tuple[str, int, str, str]],
-    total: int,
-    remaining: int,
-    query_label: str,
-) -> str:
-    """Return status text after a delete operation finishes."""
-
-    if not removed:
-        return f"Delete failed. Showing {remaining} result(s) for '{query_label}'"
-    if len(removed) == 1 and total == 1:
-        try:
-            name = Path(removed[0][1]).name
-        except IndexError:
-            name = "image"
-        return f"Deleted {name}. Showing {remaining} result(s) for '{query_label}'"
-    if failures:
-        return f"Deleted {len(removed)}/{total} image(s). Showing {remaining} result(s) for '{query_label}'"
-    return f"Deleted {len(removed)} image(s). Showing {remaining} result(s) for '{query_label}'"
-
-
-def _format_delete_failure_reason(kind: str, reason: str) -> str:
-    """Return a user-facing reason for a delete failure kind."""
-
-    if kind == "db":
-        return f"moved to trash, but DB update failed: {reason}"
-    return reason
 
 
 # --- バックグラウンドコピー ---------------------------------------------
@@ -1688,10 +1647,7 @@ class TagsTab(QWidget):
     def _thumbnail_matches_current_result(self, row: int, file_id: int) -> bool:
         """Return whether a thumbnail result still belongs to the visible row."""
 
-        if not (0 <= row < len(self._results_cache)):
-            return False
-        current_id = self._coerce_file_id(self._results_cache[row].get("id"))
-        return current_id == int(file_id)
+        return thumbnail_matches_result(self._results_cache, row=row, file_id=file_id)
 
     def _on_table_context_menu(self, pos: QPoint) -> None:
         """Show context menu for a table result."""
@@ -1835,38 +1791,23 @@ class TagsTab(QWidget):
     def _remove_results_by_file_ids(self, file_ids: Sequence[int], *, offset_file_ids: Sequence[int]) -> bool:
         """Remove result rows matching *file_ids* from table, grid, and cache."""
 
-        id_set = {int(file_id) for file_id in file_ids}
-        if not id_set:
-            return False
-        rows = [
-            index
-            for index, record in enumerate(self._results_cache)
-            if (file_id := self._coerce_file_id(record.get("id"))) is not None and file_id in id_set
-        ]
-        if not rows:
+        plan = plan_result_removal(self._results_cache, file_ids, offset_file_ids=offset_file_ids)
+        if plan is None:
             return False
         try:
             self._thumb_pool.clear()
         except Exception:
             pass
         self._pending_thumbs.clear()
-        next_selection = min(rows[0], max(0, len(self._results_cache) - len(rows) - 1))
-        offset_id_set = {int(file_id) for file_id in offset_file_ids}
-        offset_removed = sum(
-            1
-            for row in rows
-            if (file_id := self._coerce_file_id(self._results_cache[row].get("id"))) is not None
-            and file_id in offset_id_set
-        )
-        for row in reversed(rows):
+        for row in reversed(plan.rows):
             self._results_cache.pop(row)
             self._table_model.removeRow(row)
             self._grid_model.removeRow(row)
-        self._offset = max(0, self._offset - offset_removed)
+        self._offset = max(0, self._offset - plan.offset_removed)
         self._sync_grid_row_roles()
         if self._results_cache:
-            self._table_view.selectRow(next_selection)
-            self._grid_view.setCurrentIndex(self._grid_model.index(next_selection, 0))
+            self._table_view.selectRow(plan.next_selection)
+            self._grid_view.setCurrentIndex(self._grid_model.index(plan.next_selection, 0))
         self._requeue_missing_thumbnails()
         self._table_view.viewport().update()
         self._grid_view.viewport().update()
@@ -1876,12 +1817,10 @@ class TagsTab(QWidget):
         """Queue thumbnails for visible result rows that lost pending work."""
 
         for row, record in enumerate(self._results_cache):
-            if self._row_has_thumbnail(row):
+            work = should_queue_missing_thumbnail(record, has_thumbnail=self._row_has_thumbnail(row))
+            if work is None:
                 continue
-            file_id = self._coerce_file_id(record.get("id"))
-            path = self._coerce_result_path(record.get("path"))
-            if file_id is None or path is None or not path.exists():
-                continue
+            file_id, path = work
             self._queue_thumbnail(row, file_id, path)
 
     def _row_has_thumbnail(self, row: int) -> bool:
@@ -1905,21 +1844,13 @@ class TagsTab(QWidget):
     def _coerce_file_id(value: object) -> int | None:
         """Return *value* as an integer file id when possible."""
 
-        try:
-            return int(value)
-        except (TypeError, ValueError):
-            return None
+        return _coerce_file_id(value)
 
     @staticmethod
     def _coerce_result_path(value: object) -> Path | None:
         """Return *value* as a non-empty result path when possible."""
 
-        if not isinstance(value, str):
-            return None
-        cleaned = value.strip()
-        if not cleaned:
-            return None
-        return Path(cleaned)
+        return _coerce_result_path(value)
 
     def _copy_tags_to_clipboard(self, row: int, *, include_scores: bool) -> None:
         """Copy filtered tags for *row* to the clipboard."""
