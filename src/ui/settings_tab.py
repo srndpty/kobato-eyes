@@ -205,8 +205,8 @@ class SettingsTab(QWidget):
 
         self._device_combo = QComboBox(self)
         self._device_combo.addItem("Auto", "auto")
-        self._device_combo.addItem("CUDA", "cuda")
-        self._device_combo.addItem("CPU", "cpu")
+        self._device_combo.addItem("CUDA only", "cuda")
+        self._device_combo.addItem("CPU only", "cpu")
 
         self._tagger_combo = QComboBox(self)
         self._tagger_combo.addItems(["dummy", "wd14-onnx"])

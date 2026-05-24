@@ -20,8 +20,8 @@ def format_deleting_status(paths: Sequence[Path]) -> str:
     """Return status text for an active delete operation."""
 
     if len(paths) == 1:
-        return f"Deleting {paths[0].name}..."
-    return f"Deleting {len(paths)} images..."
+        return f"Deleting {paths[0].name}…"
+    return f"Deleting {len(paths)} images…"
 
 
 def format_delete_result_status(

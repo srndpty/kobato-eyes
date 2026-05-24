@@ -19,6 +19,8 @@ class ResultRemovalPlan:
 def coerce_file_id(value: object) -> int | None:
     """Return *value* as an integer file id when possible."""
 
+    if isinstance(value, bool):
+        return None
     try:
         return int(cast(Any, value))
     except (TypeError, ValueError):
