@@ -26,7 +26,7 @@ from PyQt6.QtWidgets import (
 )
 
 from core.config import PipelineSettings, TaggerSettings
-from core.jobs import CallableJob, JobManager, JobPriority
+from core.jobs import CallableJob, JobHandle, JobManager, JobPriority
 from tagger.model_inspection import format_inspection, inspect_model
 from ui.viewmodels import SettingsViewModel
 
@@ -187,6 +187,7 @@ class SettingsTab(QWidget):
         self._view_model = view_model or SettingsViewModel(self)
         self._view_model.settings_applied.connect(self.settings_applied.emit)
         self._inspection_jobs = JobManager(max_workers=1, parent=self)
+        self._inspection_task: JobHandle | None = None
         self._inspection_generation = 0
         self._inspection_timer = QTimer(self)
         self._inspection_timer.setSingleShot(True)
@@ -384,13 +385,19 @@ class SettingsTab(QWidget):
         self._inspection_timer.start()
 
     def _start_model_inspection(self) -> None:
+        if self._inspection_task is not None:
+            self._inspection_task.cancel()
+            self._inspection_task = None
+
         generation = self._inspection_generation
         tagger_name = self._tagger_combo.currentText()
         current = self._current_settings or PipelineSettings()
         tags_csv = current.tagger.tags_csv if tagger_name.lower() == "wd14-onnx" else None
         model_path = self._tagger_model_edit.text().strip() or None
 
-        def _inspect(_is_cancelled, _emit_progress) -> tuple[int, str, bool]:
+        def _inspect(is_cancelled, _emit_progress) -> tuple[int, str, bool]:
+            if is_cancelled():
+                return generation, "", False
             try:
                 inspection = inspect_model(
                     tagger_name=tagger_name,
@@ -407,7 +414,19 @@ class SettingsTab(QWidget):
             CallableJob(_inspect, name="model-inspection"),
             priority=JobPriority.BACKGROUND,
         )
-        handle.signals.completed.connect(lambda payload: self._on_model_inspection_finished(*payload))
+        self._inspection_task = handle
+
+        def _clear_current() -> None:
+            if self._inspection_task is handle:
+                self._inspection_task = None
+
+        def _done(payload) -> None:
+            _clear_current()
+            self._on_model_inspection_finished(*payload)
+
+        handle.signals.completed.connect(_done)
+        handle.signals.cancelled.connect(_clear_current)
+        handle.signals.error.connect(lambda *_args: _clear_current())
 
     def _on_model_inspection_finished(self, generation: int, message: str, ok: bool) -> None:
         if generation != self._inspection_generation:
