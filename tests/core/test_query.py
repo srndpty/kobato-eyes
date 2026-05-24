@@ -39,6 +39,15 @@ def test_or_expression() -> None:
     assert fragment.params == ["kobato", "azusa"]
 
 
+def test_vertical_bar_expression_matches_or() -> None:
+    left = expected_tag_exists()
+    right = left
+    expected = f"({left}) OR ({right})"
+    fragment = translate_query("kobato | azusa", file_alias=ALIAS)
+    assert fragment.where == expected
+    assert fragment.params == ["kobato", "azusa"]
+
+
 def test_not_expression_with_implicit_and() -> None:
     tag_clause = expected_tag_exists()
     expected = f"({tag_clause}) AND (NOT ({tag_clause}))"

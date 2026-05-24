@@ -14,6 +14,7 @@ from core.query import extract_positive_tag_terms
         ("haruhi", ["haruhi"]),
         ("Haruhi", ["haruhi"]),
         ("haruhi OR miku", ["haruhi", "miku"]),
+        ("haruhi | miku", ["haruhi", "miku"]),
         ("a AND (b OR NOT c)", ["a", "b"]),
         ("NOT haruhi", []),
         ("miku -rin", ["miku"]),
