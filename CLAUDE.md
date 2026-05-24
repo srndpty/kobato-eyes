@@ -306,8 +306,8 @@ pytest tests/db/ -v
 
 ```python
 # ✓ PyQt6 (正)
-from PyQt6.QtGui import QFileSystemModel, QAction, QMimeData
-from PyQt6.QtCore import Qt
+from PyQt6.QtGui import QFileSystemModel, QAction
+from PyQt6.QtCore import Qt, QMimeData
 from PyQt6.QtWidgets import QApplication
 
 # ✗ PyQt5 style (PyQt6 では NG)
