@@ -166,10 +166,14 @@ pre-commit と CI の整形差分を避けるため、Ruff は `pyproject.toml` 
 ## パッケージング
 
 1. Python 3.10.x の環境でリリース作成用依存をインストール: `python -m pip install -c requirements-dev.lock -e ".[dev,tagging-gpu,packaging]"`
-2. リリース用バイナリと 7z を生成: `.\scripts\package-release.ps1 -Version v0.6 -Clean`
-3. `dist\release\kobato-eyes-v0.6-win-x64.7z` と `dist\release\SHA256SUMS.txt` が出力されます
-4. Windows 標準展開用の zip も作る場合: `.\scripts\package-release.ps1 -Version v0.6 -Clean -Zip`
-5. モデルファイルは同梱せず、利用者が Quick Setup の手順で配置します
+2. main ブランチを最新化: `git switch main` → `git pull`
+3. リリース前チェックを実行: `.\scripts\check.ps1` と `.\scripts\check-package-smoke.ps1`
+4. リリース用バイナリと 7z を生成: `.\scripts\package-release.ps1 -Version v0.7 -Clean`
+5. `dist\release\kobato-eyes-v0.7-win-x64.7z` と `dist\release\SHA256SUMS.txt` が出力されます
+6. Windows 標準展開用の zip も作る場合: `.\scripts\package-release.ps1 -Version v0.7 -Clean -Zip`
+7. main のリリースコミットを push: `git push origin main`
+8. リリースタグを作成して push: `git tag -a v0.7 -m "v0.7"` → `git push origin v0.7`
+9. モデルファイルは同梱せず、利用者が Quick Setup の手順で配置します
 
 `package-release.ps1` は PyInstaller と 7-Zip (`7z` または `7zz`) を使用します。PyInstaller は `packaging` extra で導入されます。7-Zip は事前にインストールし、PATH または標準インストール先から見つかる状態にしてください。
 
