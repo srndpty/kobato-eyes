@@ -53,9 +53,15 @@
 
 ```powershell
 # 環境構築
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
+python -m pip install -c requirements-dev.lock -e ".[dev,tagging-cpu]"
+
 $env:PYTHONPATH = "src"
-pytest --cov=src --cov-report=html  # テスト実行・カバレッジ確認
-.\scripts\check.ps1                  # 統合チェック（コード品質 + テスト）
+$env:KOE_HEADLESS = "1"
+pytest -q                            # 高速な単体テスト
+.\scripts\check.ps1                  # 標準チェック（コード品質 + テスト）
 ```
 
 (以降のドキュメントはAI生成)

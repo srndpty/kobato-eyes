@@ -20,9 +20,8 @@ def test_test_image_path(test_image_path: Path) -> None:
     assert test_image_path.exists()
     assert test_image_path.suffix == ".png"
 
-    # Verify image can be loaded
-    img = Image.open(test_image_path)
-    assert img.size == (16, 16)
+    with Image.open(test_image_path) as img:
+        assert img.size == (16, 16)
 
 
 def test_test_db_path(test_db_path: Path) -> None:
@@ -56,5 +55,5 @@ def test_test_batch_images(test_batch_images: list[Path]) -> None:
 
     for path in test_batch_images:
         assert path.exists()
-        img = Image.open(path)
-        assert img.size == (16, 16)
+        with Image.open(path) as img:
+            assert img.size == (16, 16)

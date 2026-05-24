@@ -14,13 +14,15 @@ from db.schema import apply_schema
 
 
 @pytest.fixture(autouse=True)
-def _reset_quiesce_state() -> Generator[None, None, None]:
-    """Reset process-global quiesce counter to avoid leaking between tests."""
+def _assert_no_quiesce_leak() -> Generator[None, None, None]:
+    """Detect leaked quiesce state while keeping later tests isolated."""
     while is_quiesced():
         end_quiesce()
     yield
+    leaked = is_quiesced()
     while is_quiesced():
         end_quiesce()
+    assert not leaked, "quiesce state leaked from test"
 
 
 @pytest.fixture
@@ -38,14 +40,16 @@ def test_image_path(tmp_path: Path, test_rgb_image: Image.Image) -> Path:
 
 
 @pytest.fixture
-def test_db_path(tmp_path: Path) -> Path:
+def test_db_path(tmp_path: Path) -> Generator[Path, None, None]:
     """Create a temporary database path with schema initialized."""
     db_path = tmp_path / "test.db"
     conn = get_conn(db_path)
     apply_schema(conn)
     conn.commit()
-    conn.close()
-    return db_path
+    try:
+        yield db_path
+    finally:
+        conn.close()
 
 
 @pytest.fixture

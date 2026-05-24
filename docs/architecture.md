@@ -95,8 +95,12 @@ Worker Thread: Pipeline.process()
   │  └─ 新規/削除 ファイルを検出
   │
   ├─ Signature Stage: 画像署名計算
-  │  ├─ pHash (phash.py)
-  │  └─ SSIM/ORB (sig/ module)
+  │  ├─ pHash / dHash 計算
+  │  └─ DB へ署名保存
+  │
+  ├─ Duplicate Stage: 重複候補の精査
+  │  ├─ pHash / dHash で候補抽出
+  │  └─ SSIM / ORB で精査
   │
   ├─ Tag Stage: 推論実行
   │  ├─ Batch 分割 (max batch size by GPU VRAM)
