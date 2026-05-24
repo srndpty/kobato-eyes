@@ -180,7 +180,7 @@ def _tokenize(query: str) -> list[_Token]:
                 tokens.append(_Token(_TokenKind.NOT, raw))
             elif upper == "AND":
                 tokens.append(_Token(_TokenKind.AND, raw))
-            elif upper == "OR":
+            elif raw == "|" or upper == "OR":
                 tokens.append(_Token(_TokenKind.OR, raw))
             elif upper == "NOT":
                 tokens.append(_Token(_TokenKind.NOT, raw))
