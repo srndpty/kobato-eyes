@@ -74,7 +74,7 @@ def test_scan_start_disables_scan_button(monkeypatch, dup_tab: DupTab) -> None:
 
     assert started
     assert not dup_tab._scan_button.isEnabled()  # type: ignore[attr-defined]
-    assert dup_tab._status_label.text() == "Scanning duplicates…"  # type: ignore[attr-defined]
+    assert dup_tab._status_label.text() == "Scanning duplicates..."  # type: ignore[attr-defined]
 
 
 def test_scan_error_restores_button(monkeypatch, dup_tab: DupTab) -> None:

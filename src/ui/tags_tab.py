@@ -116,7 +116,7 @@ _PREFIXES = (
 
 
 class _ElidingLabel(QLabel):
-    """幅に収まらないテキストを…で中間省略し、フルテキストはツールチップに出す。"""
+    """幅に収まらないテキストを...で中間省略し、フルテキストはツールチップに出す。"""
 
     def __init__(self, text: str = "", *, mode=Qt.TextElideMode.ElideMiddle, parent: QWidget | None = None):
         super().__init__(text, parent)
@@ -331,7 +331,7 @@ class TagsTab(QWidget):
         self._search_chunk_size = max(1, int(search_chunk_size or self._PAGE_SIZE))
         self._search_chunk_delay = max(0.0, float(search_chunk_delay))
         self._query_edit = QLineEdit(self)
-        self._query_edit.setPlaceholderText("Search tags…")
+        self._query_edit.setPlaceholderText("Search tags...")
         self._tag_model = self.TagListModel(parent=self)
         self._completer = QCompleter(self._tag_model, self)
         self._completer.setCompletionMode(QCompleter.CompletionMode.PopupCompletion)
@@ -387,13 +387,13 @@ class TagsTab(QWidget):
         self._retag_all_action = self._retag_menu.addAction("All library")
         self._retag_results_action = self._retag_menu.addAction("Current results")
         self._retag_button = QToolButton(self)
-        self._retag_button.setText("Retag…")
+        self._retag_button.setText("Retag...")
         self._retag_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
         self._retag_button.setMenu(self._retag_menu)
         self._refresh_button = QPushButton("🔄 Refresh", self)
         self._refresh_button.setToolTip("Scan & tag untagged in this folder (Shift+Click = hard delete missing)")
         # 検索バーのボタン群を並べているあたり（_refresh_button のすぐ右あたりが見栄え良い）
-        self._copy_button = QPushButton("Copy results…", self)
+        self._copy_button = QPushButton("Copy results...", self)
         self._copy_button.setEnabled(False)  # 初期は無効
         self._copy_button.clicked.connect(self._on_copy_results_clicked)
         self._open_db_button = QPushButton("Open DB folder", self)
@@ -678,7 +678,7 @@ class TagsTab(QWidget):
             return
 
         runnable = _CopyRunnable(self._view_model, self._db_path, query, dest)
-        runnable.signals.progress.connect(lambda cur, tot: self._status_label.setText(f"Copying… {cur}/{tot}"))
+        runnable.signals.progress.connect(lambda cur, tot: self._status_label.setText(f"Copying... {cur}/{tot}"))
         runnable.signals.error.connect(lambda msg: QMessageBox.critical(self, "Copy results", msg))
 
         def _done(dest_dir: str, ok: int, ng: int) -> None:
@@ -836,8 +836,8 @@ class TagsTab(QWidget):
             self._use_relevance = False
             self._relevance_thresholds = {}
             self._search_state.begin_query()
-            self._status_label.setText("Searching…")
-            self._search_overlay.show("Loading latest… (Esc to cancel)")
+            self._status_label.setText("Searching...")
+            self._search_overlay.show("Loading latest... (Esc to cancel)")
             self._set_busy(True)
             self._start_async_search(reset=True)
         else:
@@ -1206,7 +1206,7 @@ class TagsTab(QWidget):
             )
 
         mode_hint = " (hard delete)" if hard_delete else ""
-        self._status_label.setText(f"Refreshing…{mode_hint}")
+        self._status_label.setText(f"Refreshing...{mode_hint}")
         self._update_control_states()
 
         db_path = self._db_path if self._db_path is not None else self._view_model.db_path
@@ -1265,7 +1265,7 @@ class TagsTab(QWidget):
             logger.exception("end_quiesce() failed in UI")
 
     def _create_progress_dialog(self) -> QProgressDialog:
-        dialog = QProgressDialog("Preparing…", "Cancel", 0, 0, self)
+        dialog = QProgressDialog("Preparing...", "Cancel", 0, 0, self)
         if self._refresh_active:
             title = "Refreshing"
         elif self._retag_active:
@@ -1280,8 +1280,8 @@ class TagsTab(QWidget):
         dialog.canceled.connect(self._cancel_indexing)
 
         # ★ カスタムラベル（中間省略）を組み込む
-        lbl = _ElidingLabel("Preparing…", parent=dialog)
-        lbl.set_full_text("Preparing…")
+        lbl = _ElidingLabel("Preparing...", parent=dialog)
+        lbl.set_full_text("Preparing...")
         dialog.setLabel(lbl)
         self._progress_label = lbl
 
@@ -1306,6 +1306,8 @@ class TagsTab(QWidget):
                 self._progress_dialog.setLabelText("Cancelling...")
 
     def _handle_index_progress(self, done: int, total: int, label: str) -> None:
+        """Handle the legacy progress signal retained for compatibility."""
+
         dlg = self._progress_dialog
         if dlg is None:
             return
@@ -1461,16 +1463,16 @@ class TagsTab(QWidget):
         self._current_where = fragment.where
         self._current_params = list(fragment.params)
         self._search_state.begin_query()
-        self._status_label.setText("Searching…")
-        self._search_overlay.show("Searching… (Esc to cancel)")
+        self._status_label.setText("Searching...")
+        self._search_overlay.show("Searching... (Esc to cancel)")
         self._set_busy(True)
         self._start_async_search(reset=True)
 
     def _on_load_more_clicked(self) -> None:
         if not self._current_where or self._search_busy:
             return
-        self._status_label.setText("Searching…")
-        self._search_overlay.show("Searching… (Esc to cancel)")
+        self._status_label.setText("Searching...")
+        self._search_overlay.show("Searching... (Esc to cancel)")
         self._set_busy(True)
         self._start_async_search(reset=False)
 

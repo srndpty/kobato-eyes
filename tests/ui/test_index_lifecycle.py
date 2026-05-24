@@ -18,9 +18,9 @@ from ui.index_lifecycle import (
 
 
 def test_index_started_and_cancel_status_follow_active_mode() -> None:
-    assert index_started_status(refresh_active=True, retag_active=False) == "Refreshing…"
-    assert index_started_status(refresh_active=False, retag_active=True) == "Retagging…"
-    assert index_started_status(refresh_active=False, retag_active=False) == "Indexing…"
+    assert index_started_status(refresh_active=True, retag_active=False) == "Refreshing..."
+    assert index_started_status(refresh_active=False, retag_active=True) == "Retagging..."
+    assert index_started_status(refresh_active=False, retag_active=False) == "Indexing..."
     assert index_cancel_status(refresh_active=False, retag_active=True) == "Retagging cancelling..."
 
 

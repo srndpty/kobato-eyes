@@ -288,7 +288,7 @@ class DupTab(QWidget):
         self._refine_task = task
 
         # 進捗ダイアログ
-        dlg = QProgressDialog("Refining duplicates…", "Cancel", 0, 0, self)
+        dlg = QProgressDialog("Refining duplicates...", "Cancel", 0, 0, self)
         dlg.setWindowModality(Qt.WindowModality.WindowModal)
         dlg.setAutoClose(False)
         dlg.setAutoReset(False)
@@ -747,7 +747,7 @@ class DupTab(QWidget):
         request = self._build_request()
         self._progress.setMaximum(1)
         self._progress.setValue(0)
-        self._status_label.setText("Scanning duplicates…")
+        self._status_label.setText("Scanning duplicates...")
         runnable = DuplicateScanRunnable(self._view_model, self._db_path, request)
         runnable.signals.progressState.connect(self._on_scan_progress_state)
         runnable.signals.finished.connect(self._on_scan_finished)

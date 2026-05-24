@@ -16,7 +16,7 @@ def test_delete_status_helpers_are_stable() -> None:
     path = Path("image.png")
 
     assert "Move this image" in format_delete_confirmation([path])
-    assert format_deleting_status([path]) == "Deleting image.png…"
+    assert format_deleting_status([path]) == "Deleting image.png..."
     assert format_delete_result_status([], [], 1, 3, "tag") == "Delete failed. Showing 3 result(s) for 'tag'"
     assert format_delete_result_status([(1, str(path))], [], 1, 2, "tag") == (
         "Deleted image.png. Showing 2 result(s) for 'tag'"

@@ -60,7 +60,7 @@ def _parse_phash_any(raw) -> int | None:
         if not s:
             return None
         try:
-            # base=0 なら "0x…" も 10進も自動判定
+            # base=0 なら "0x..." も 10進も自動判定
             v = int(s, 0)
         except ValueError:
             try:

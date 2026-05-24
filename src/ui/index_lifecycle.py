@@ -69,7 +69,7 @@ def index_prefix(mode: IndexMode) -> str:
 def index_started_status(*, refresh_active: bool, retag_active: bool) -> str:
     """Return status text for a newly-started index task."""
 
-    return f"{index_prefix(index_mode(refresh_active=refresh_active, retag_active=retag_active))}…"
+    return f"{index_prefix(index_mode(refresh_active=refresh_active, retag_active=retag_active))}..."
 
 
 def index_cancel_status(*, refresh_active: bool, retag_active: bool) -> str:

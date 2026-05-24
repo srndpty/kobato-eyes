@@ -325,13 +325,13 @@ def scan_and_tag(
         )
 
         records: list[_FileRecord] = []
-        _emit(IndexProgress(phase=IndexPhase.PREPARE, done=0, total=total, message="Preparing…"), force=True)
+        _emit(IndexProgress(phase=IndexPhase.PREPARE, done=0, total=total, message="Preparing..."), force=True)
 
         for i, path_obj in enumerate(queued_paths, start=1):
             if _cancelled():
                 break
             if i % 200 == 0:
-                _emit(IndexProgress(phase=IndexPhase.PREPARE, done=i, total=total, message="Preparing…"))
+                _emit(IndexProgress(phase=IndexPhase.PREPARE, done=i, total=total, message="Preparing..."))
 
             try:
                 stat_result = path_obj.stat()
