@@ -32,7 +32,8 @@ def test_duplicate_action_availability_follows_clusters_and_checked_count() -> N
 
 
 def test_duplicate_scan_progress_handles_unknown_total() -> None:
-    unknown = duplicate_scan_progress(5, 0, "Loading files")
+    unknown = duplicate_scan_progress(5, -1, "Loading files")
+    empty = duplicate_scan_progress(0, 0, "Building groups")
     known = duplicate_scan_progress(13, 10, "Building groups")
 
     assert unknown.label == "Loading files..."
@@ -40,6 +41,11 @@ def test_duplicate_scan_progress_handles_unknown_total() -> None:
     assert unknown.value == 0
     assert unknown.percent is None
     assert unknown.indeterminate is True
+    assert empty.label == "Building groups: 0 / 0 (100%)"
+    assert empty.maximum == 1
+    assert empty.value == 1
+    assert empty.percent == 100
+    assert empty.indeterminate is False
     assert known.label == "Building groups: 10 / 10 (100%)"
     assert known.maximum == 10
     assert known.value == 10

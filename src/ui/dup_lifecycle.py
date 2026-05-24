@@ -69,13 +69,21 @@ def duplicate_action_availability(*, has_clusters: bool, checked_count: int) -> 
 def duplicate_scan_progress(current: int, total: int, stage: str = "Scanning duplicates") -> DuplicateProgressState:
     """Return progress bar state for duplicate scanning."""
 
-    if total <= 0:
+    if total < 0:
         return DuplicateProgressState(
             label=f"{stage}...",
             maximum=0,
             value=0,
             percent=None,
             indeterminate=True,
+        )
+    if total == 0:
+        return DuplicateProgressState(
+            label=f"{stage}: 0 / 0 (100%)",
+            maximum=1,
+            value=1,
+            percent=100,
+            indeterminate=False,
         )
     maximum = max(1, int(total))
     value = max(0, min(int(current), maximum))

@@ -76,10 +76,13 @@ class ProgressEmitter:
         should = force or last is None
         if not should and last is not None:
             last_done, last_time, last_message = last
-            should = progress.message != last_message
             if progress.total > 0:
                 step = max(1, progress.total // 100)
-                should = should or (progress.done >= progress.total) or ((progress.done - last_done) >= step)
+                should = (
+                    progress.message != last_message
+                    or progress.done >= progress.total
+                    or (progress.done - last_done) >= step
+                )
             should = should or ((now - last_time) >= 0.1)
         if should:
             self._last[progress.phase] = (progress.done, now, progress.message)

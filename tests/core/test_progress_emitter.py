@@ -121,6 +121,22 @@ def test_emit_reports_message_changes_even_when_done_resets() -> None:
     ]
 
 
+def test_emit_throttles_unknown_total_message_changes(monkeypatch: pytest.MonkeyPatch) -> None:
+    """総数不明の message 変更はファイル単位で即時通知しない。"""
+
+    module = _types_module()
+    ticks = iter([1.0, 1.01, 1.2])
+    monkeypatch.setattr(module.time, "perf_counter", lambda: next(ticks))
+    events: list[IndexProgress] = []
+    emitter = ProgressEmitter(events.append)
+
+    emitter.emit(IndexProgress(phase=IndexPhase.SCAN, done=1, total=-1, message="a.png"), force=True)
+    emitter.emit(IndexProgress(phase=IndexPhase.SCAN, done=2, total=-1, message="b.png"))
+    emitter.emit(IndexProgress(phase=IndexPhase.SCAN, done=3, total=-1, message="c.png"))
+
+    assert [(event.done, event.message) for event in events] == [(1, "a.png"), (3, "c.png")]
+
+
 def test_cancelled_logs_exception(caplog: pytest.LogCaptureFixture) -> None:
     """キャンセル判定の例外が記録され False が返ることを検証する。"""
 
