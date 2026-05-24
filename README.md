@@ -39,10 +39,30 @@
 - gridは逆に、数字を大きくすると厳格に、小さくするとゆるく重複判定 (bigger is stricter)
 
 ## 既知の制限
-- 特定のタグは検索できない
-  - `"` を含むタグ（`don't_say_"lazy"`など）
-  - 丸カッコを含むタグのうち、片方しかないもの（`;)` など。ただし、`star_(symbol)` などのようにカッコのペアが揃っているタグは検索可能）
 - キャラ名の誤検出が多い（taggerモデルの限界のため。モデル側のアップグレードにより改善の可能性あり）
+
+## 開発に参加する
+
+このプロジェクトに貢献したい方は、以下を参照してください：
+
+- **[CLAUDE.md](CLAUDE.md)** — 開発者向けの統一的なガイド（環境構築、コード規約、モジュール構成、テスト方針）
+- **[AGENTS.md](AGENTS.md)** — 実装エージェント向けの詳細な指針
+- **[docs/architecture.md](docs/architecture.md)** — システムアーキテクチャとデータフロー図
+
+### クイックスタート（開発環境）
+
+```powershell
+# 環境構築
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
+python -m pip install -c requirements-dev.lock -e ".[dev,tagging-cpu]"
+
+$env:PYTHONPATH = "src"
+$env:KOE_HEADLESS = "1"
+pytest -q                            # 高速な単体テスト
+.\scripts\check.ps1                  # 標準チェック（コード品質 + テスト）
+```
 
 (以降のドキュメントはAI生成)
 
