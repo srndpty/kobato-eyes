@@ -157,6 +157,25 @@
   - `.\scripts\check-integration.ps1`
   - `.\scripts\check-package-smoke.ps1`
 
+## フェーズ 12: UI action helper と未使用 index 境界を整理する（実装済み）
+
+- 目的: 既存機能を変えずに `tags_tab.py` / `dup_tab.py` の事故りやすい UI action 境界をさらに薄くし、後続の安定化作業を小さく進められる状態にする。
+- 対象:
+  - `src/ui/tags_tab.py`
+  - `src/ui/dup_tab.py`
+  - `src/ui/tags_result_actions.py`
+  - `src/ui/dup_tree_state.py`
+  - `README.md`
+- 実装:
+  - 検索結果の row 解決、選択行正規化、削除対象抽出、タグコピー文言を `tags_result_actions` に切り出した。
+  - duplicate UI の thumbnail queue 判定、binding からの path 解決、未展開 cluster の既定チェック、hamming score 判定を `dup_tree_state` に切り出した。
+  - 新規 helper を mypy 対象に追加し、軽量 unit test で不正 row、重複 thumbnail key、keeper 除外を固定した。
+  - `README.md` / `docs/architecture.md` のチェック手順と `src/index/` の位置づけを整理した。
+- 検証対象:
+  - `.\scripts\check.ps1`
+  - `.\scripts\check-gui-smoke.ps1`
+  - `.\scripts\check-package-smoke.ps1`
+
 ## 運用ルール
 
 - Windows + Python 3.10 を主対象にする。

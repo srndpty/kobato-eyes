@@ -181,3 +181,19 @@ def test_job_manager_emits_cancelled_and_finished_on_cooperative_cancel(qapp: QC
     assert job.cleaned is True
     assert not manager.has_pending_jobs()
     manager.shutdown()
+
+
+def test_job_manager_shutdown_waits_for_queued_jobs(qapp: QCoreApplication) -> None:
+    manager = JobManager(max_workers=1)
+    completions: list[list[int]] = []
+
+    first = manager.submit(DummyJob([1]), priority=JobPriority.FOREGROUND)
+    second = manager.submit(DummyJob([2]), priority=JobPriority.BACKGROUND)
+    first.completed.connect(lambda result: completions.append(result))
+    second.completed.connect(lambda result: completions.append(result))
+
+    assert manager.shutdown(timeout_ms=2000)
+    _wait_for(lambda: not manager.has_pending_jobs(), qapp)
+
+    assert completions == [[2], [4]]
+    assert not manager.has_pending_jobs()

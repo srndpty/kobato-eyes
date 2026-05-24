@@ -87,6 +87,8 @@ from ui.tags_delete_state import format_delete_confirmation as _format_delete_co
 from ui.tags_delete_state import format_delete_failure_reason as _format_delete_failure_reason
 from ui.tags_delete_state import format_delete_result_status as _format_delete_result_status
 from ui.tags_delete_state import format_deleting_status as _format_deleting_status
+from ui.tags_result_actions import build_copy_tags_payload, collect_delete_entries, normalize_selected_rows
+from ui.tags_result_actions import result_row_from_stored as _result_row_from_stored
 from ui.tags_result_state import coerce_file_id as _coerce_file_id
 from ui.tags_result_state import coerce_result_path as _coerce_result_path
 from ui.tags_result_state import plan_result_removal, should_queue_missing_thumbnail, thumbnail_matches_result
@@ -1668,9 +1670,10 @@ class TagsTab(QWidget):
         index = self._grid_view.indexAt(pos)
         if not index.isValid():
             return
-        stored_row = index.data(Qt.ItemDataRole.UserRole)
-        row = int(stored_row) if stored_row is not None else index.row()
-        if not (0 <= row < len(self._results_cache)):
+        row = _result_row_from_stored(
+            index.row(), index.data(Qt.ItemDataRole.UserRole), result_count=len(self._results_cache)
+        )
+        if row is None:
             return
         self._grid_view.setCurrentIndex(index)
         global_pos = self._grid_view.viewport().mapToGlobal(pos)
@@ -1702,14 +1705,14 @@ class TagsTab(QWidget):
                 if not index.isValid():
                     continue
                 stored_row = index.data(Qt.ItemDataRole.UserRole)
-                rows.append(int(stored_row) if stored_row is not None else index.row())
+                rows.append(stored_row if stored_row is not None else index.row())
         else:
             selected = self._table_view.selectionModel().selectedRows()
             if not selected:
                 index = self._table_view.currentIndex()
                 selected = [index] if index.isValid() else []
             rows = [index.row() for index in selected if index.isValid()]
-        return sorted({row for row in rows if 0 <= row < len(self._results_cache)})
+        return normalize_selected_rows(rows, result_count=len(self._results_cache))
 
     def _on_delete_selected_result(self) -> None:
         """Confirm and start deletion for the selected search result."""
@@ -1719,16 +1722,7 @@ class TagsTab(QWidget):
         rows = self._selected_result_rows()
         if not rows:
             return
-        entries: list[tuple[int, Path]] = []
-        for row in rows:
-            record = self._results_cache[row]
-            file_id = self._coerce_file_id(record.get("id"))
-            if file_id is None:
-                continue
-            path = self._coerce_result_path(record.get("path"))
-            if path is None:
-                continue
-            entries.append((file_id, path))
+        entries = collect_delete_entries(self._results_cache, rows)
         if not entries:
             QMessageBox.warning(self, "Delete image", "Selected results do not have valid database ids or file paths.")
             return
@@ -1860,26 +1854,22 @@ class TagsTab(QWidget):
             return
         record = self._results_cache[row]
         raw_tags = list(record.get("tags") or record.get("top_tags") or [])
-        filtered = _filter_tags_by_threshold(raw_tags)
-        if not filtered:
+        payload = build_copy_tags_payload(raw_tags, include_scores=include_scores)
+        if payload is None:
             self._show_toast("コピー可能なタグがありません。")
             return
-        if include_scores:
-            text = ", ".join(f"{name} ({score:.2f})" for name, score, _ in filtered)
-            feedback = "タグ（スコア付き）をクリップボードにコピーしました。"
-        else:
-            text = ", ".join(name for name, _, _ in filtered)
-            feedback = "タグをクリップボードにコピーしました。"
-        QApplication.clipboard().setText(text)
-        self._show_toast(feedback)
+        QApplication.clipboard().setText(payload.text)
+        self._show_toast(payload.feedback)
 
     def _on_table_double_clicked(self, index: QModelIndex) -> None:
         self._open_row(index.row())
 
     def _on_grid_double_clicked(self, index: QModelIndex) -> None:
-        stored_row = index.data(Qt.ItemDataRole.UserRole)
-        row = int(stored_row) if stored_row is not None else index.row()
-        self._open_row(row)
+        row = _result_row_from_stored(
+            index.row(), index.data(Qt.ItemDataRole.UserRole), result_count=len(self._results_cache)
+        )
+        if row is not None:
+            self._open_row(row)
 
     def _open_row(self, row: int) -> None:
         if 0 <= row < len(self._results_cache):
