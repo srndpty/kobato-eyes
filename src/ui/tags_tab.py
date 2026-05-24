@@ -1345,6 +1345,7 @@ class TagsTab(QWidget):
             else:
                 dlg.setRange(0, state.maximum)
                 dlg.setValue(state.value)
+            dlg.setWindowTitle(state.title)
             if self._progress_label is not None:
                 self._progress_label.set_full_text(state.label)
             else:

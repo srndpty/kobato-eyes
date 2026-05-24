@@ -106,6 +106,21 @@ def test_emit_disables_callback_after_exception(caplog: pytest.LogCaptureFixture
     assert any("Progress callback raised" in record.getMessage() for record in caplog.records)
 
 
+def test_emit_reports_message_changes_even_when_done_resets() -> None:
+    """同じ phase 内の小段階変更は間引かず通知する。"""
+
+    events: list[IndexProgress] = []
+    emitter = ProgressEmitter(events.append)
+
+    emitter.emit(IndexProgress(phase=IndexPhase.FTS, done=57, total=57, message="merge.insert"), force=True)
+    emitter.emit(IndexProgress(phase=IndexPhase.FTS, done=0, total=2, message="merge.index"))
+
+    assert [(event.done, event.total, event.message) for event in events] == [
+        (57, 57, "merge.insert"),
+        (0, 2, "merge.index"),
+    ]
+
+
 def test_cancelled_logs_exception(caplog: pytest.LogCaptureFixture) -> None:
     """キャンセル判定の例外が記録され False が返ることを検証する。"""
 

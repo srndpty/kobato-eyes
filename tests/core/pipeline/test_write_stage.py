@@ -9,7 +9,7 @@ import pytest
 from core.pipeline.stages import write_stage
 from core.pipeline.stages.tag_stage import TagStageResult
 from core.pipeline.stages.write_stage import WriteStage
-from core.pipeline.types import PipelineContext, ProgressEmitter
+from core.pipeline.types import IndexProgress, PipelineContext, ProgressEmitter
 
 
 def _make_ctx(tmp_path) -> PipelineContext:
@@ -218,6 +218,58 @@ def test_write_stage_rebuilds_fts_after_successful_fast_write(monkeypatch, tmp_p
     assert deps.end_calls == 1
     assert deps.rebuild_calls == [(str(ctx.db_path), 32)]
     assert settle_calls == [str(ctx.db_path), str(ctx.db_path)]
+
+
+def test_write_stage_preserves_writer_progress_substage_messages(monkeypatch, tmp_path):
+    monkeypatch.setattr(write_stage, "_settle_after_quiesce", lambda _path: None)
+
+    class _Writer:
+        def __init__(self, progress_cb) -> None:
+            self._progress_cb = progress_cb
+
+        def start(self) -> None:
+            return None
+
+        def raise_if_failed(self) -> None:
+            return None
+
+        def put(self, item) -> None:
+            assert item
+
+        def stop(self, *, flush: bool, wait_forever: bool) -> None:
+            assert flush is True
+            assert wait_forever is True
+            self._progress_cb("merge.index", 1, 2)
+
+    class _Deps:
+        def connect(self, db_path: str) -> None:
+            assert db_path
+
+        def begin_quiesce(self) -> None:
+            return None
+
+        def end_quiesce(self) -> None:
+            return None
+
+        def build_writer(self, *, ctx: PipelineContext, progress_cb):
+            assert ctx
+            return _Writer(progress_cb)
+
+        def rebuild_fts(self, db_path: str, *, topk: int) -> int:
+            assert db_path
+            assert topk == 32
+            return 1
+
+    events: list[IndexProgress] = []
+    stage = WriteStage(deps=_Deps())
+    ctx = _make_ctx(tmp_path)
+    emitter = ProgressEmitter(events.append)
+    tag_result = TagStageResult(records=[], db_items=[object()], tagged_count=1)
+
+    result = stage.run(ctx, emitter, tag_result)
+
+    assert result.success is True
+    assert [event.message for event in events] == ["write", "merge.index", "rebuild", "done"]
 
 
 def test_write_stage_reports_writer_failure_discovered_after_stop(monkeypatch, tmp_path):
