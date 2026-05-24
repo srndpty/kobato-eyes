@@ -72,6 +72,22 @@ class TaggerSettings(BaseModel):
             return None
         return _normalise_path(str(value))
 
+    @field_validator("provider", mode="before")
+    @classmethod
+    def _validate_provider(cls, value: Any) -> str:
+        normalized = str(value or "auto").strip().lower()
+        if normalized in {"auto", "wd14", "pixai"}:
+            return normalized
+        return "auto"
+
+    @field_validator("device", mode="before")
+    @classmethod
+    def _validate_device(cls, value: Any) -> str:
+        normalized = str(value or "auto").strip().lower()
+        if normalized in {"auto", "cuda", "cpu"}:
+            return normalized
+        return "auto"
+
     @field_validator("thresholds", mode="before")
     @classmethod
     def _validate_thresholds(cls, value: Any) -> dict[str, float]:
