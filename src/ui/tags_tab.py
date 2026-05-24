@@ -201,6 +201,20 @@ class _DeleteResultRunnable(QRunnable):
         self.signals.finished.emit(trashed, db_updated_ids, failures)
 
 
+def _unique_destination(dest_dir: Path, filename: str) -> Path:
+    """Return a non-conflicting destination path inside ``dest_dir``."""
+
+    dest = dest_dir / filename
+    if not dest.exists():
+        return dest
+    stem = dest.stem
+    suffix = dest.suffix
+    for index in itertools.count(2):
+        candidate = dest_dir / f"{stem}_{index}{suffix}"
+        if not candidate.exists():
+            return candidate
+
+
 # --- バックグラウンドコピー ---------------------------------------------
 class _CopyRunnable(QRunnable):
     def __init__(
@@ -219,15 +233,7 @@ class _CopyRunnable(QRunnable):
 
     def _unique_dest(self, name: str) -> Path:
         """同名ファイルがある場合は _2, _3... と連番で回避。"""
-        dest = self.dest_dir / name
-        if not dest.exists():
-            return dest
-        stem = dest.stem
-        suf = dest.suffix
-        for i in itertools.count(2):
-            cand = self.dest_dir / f"{stem}_{i}{suf}"
-            if not cand.exists():
-                return cand
+        return _unique_destination(self.dest_dir, name)
 
     def run(self) -> None:
         try:
@@ -677,19 +683,20 @@ class TagsTab(QWidget):
             return
 
         def _run_copy(
-            _is_cancelled: Callable[[], bool], emit_progress: Callable[[object], None]
+            is_cancelled: Callable[[], bool], emit_progress: Callable[[object], None]
         ) -> tuple[str, int, int]:
             with self._view_model.open_connection(self._db_path) as conn:
                 paths = self._view_model.iter_paths_for_search(conn, query)
-            copy_task = _CopyRunnable(self._view_model, self._db_path, query, dest)
             total_paths = len(paths)
             emit_progress((0, total_paths))
             ok = ng = 0
             for idx, raw_path in enumerate(paths, start=1):
+                if is_cancelled():
+                    return str(dest), ok, ng
                 try:
                     src = Path(raw_path)
                     if src.exists():
-                        shutil.copy2(src, copy_task._unique_dest(src.name))
+                        shutil.copy2(src, _unique_destination(dest, src.name))
                         ok += 1
                     else:
                         ng += 1

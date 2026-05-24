@@ -396,6 +396,30 @@ def test_headless_callable_job_emits_progress_state(headless_jobs) -> None:
     assert not handle.is_cancelled
 
 
+def test_headless_foreground_submit_allows_connecting_before_completion(headless_jobs) -> None:
+    def _run(is_cancelled, emit_progress_state):
+        assert not is_cancelled()
+        emit_progress_state("ready")
+        return "ok"
+
+    manager = headless_jobs.JobManager(max_workers=1)
+    handle = manager.submit_handle(
+        headless_jobs.CallableJob(_run, name="foreground-fast"),
+        priority=headless_jobs.JobPriority.FOREGROUND,
+    )
+    progress_states: list[str] = []
+    completions: list[str] = []
+
+    handle.signals.progressState.connect(progress_states.append)
+    handle.signals.completed.connect(completions.append)
+
+    assert manager.wait_for_done(2000)
+    _wait_until(lambda: completions == ["ok"])
+
+    assert progress_states == ["ready"]
+    assert completions == ["ok"]
+
+
 def test_headless_job_handle_cancels_queued_job(headless_jobs) -> None:
     class _BlockingJob(headless_jobs.BatchJob):
         def __init__(self, gate: threading.Event) -> None:

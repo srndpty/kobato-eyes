@@ -79,7 +79,11 @@ def test_index_now_async_flow(tags_tab: TagsTab, qapp: QApplication) -> None:
     with patch("ui.tags_tab.run_index_once", side_effect=_fake_run_index_once):
         with patch.object(tags_tab, "_on_search_clicked", search_spy):
             tags_tab._placeholder_button.click()  # type: ignore[attr-defined]
-            assert started.wait(2)
+            for _ in range(100):
+                qapp.processEvents()
+                if started.wait(0.01):
+                    break
+            assert started.is_set()
             qapp.processEvents()
 
             assert not tags_tab._placeholder_button.isEnabled()  # type: ignore[attr-defined]

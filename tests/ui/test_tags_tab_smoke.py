@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sqlite3
 import threading
+import time
 from pathlib import Path
 from typing import Iterable
 from unittest import mock
@@ -66,7 +67,7 @@ def test_toggle_views(tags_tab: TagsTab) -> None:
     assert tags_tab._stack.currentWidget() is tags_tab._table_view  # type: ignore[attr-defined]
 
 
-def test_index_now_triggers_pipeline(tags_tab: TagsTab) -> None:
+def test_index_now_triggers_pipeline(tags_tab: TagsTab, qapp: QApplication) -> None:
     done = threading.Event()
 
     def _fake_run_index_once(*args, **kwargs):
@@ -82,5 +83,10 @@ def test_index_now_triggers_pipeline(tags_tab: TagsTab) -> None:
 
     with patch("ui.tags_tab.run_index_once", side_effect=_fake_run_index_once) as mocked:
         tags_tab._placeholder_button.click()  # type: ignore[attr-defined]
-        assert done.wait(2)
+        for _ in range(100):
+            qapp.processEvents()
+            if done.wait(0.01):
+                break
+            time.sleep(0.01)
+        assert done.is_set()
         mocked.assert_called_once()

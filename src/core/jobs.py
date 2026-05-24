@@ -395,10 +395,7 @@ class JobManager(QObject):
         self._signal_to_runnable[signals] = runnable
         heapq.heappush(self._pending, (int(priority), self._sequence, runnable))
         self._sequence += 1
-        if priority == JobPriority.FOREGROUND:
-            self._drain_pending()
-        else:
-            self._request_schedule()
+        self._request_schedule()
         return JobHandle(self, runnable)
 
     def has_pending_jobs(self) -> bool:
