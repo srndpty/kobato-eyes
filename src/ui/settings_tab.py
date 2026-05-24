@@ -6,7 +6,7 @@ import logging
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable, Iterable
 
-from PyQt6.QtCore import QObject, QRunnable, QThreadPool, QTimer, pyqtSignal
+from PyQt6.QtCore import QObject, QRunnable, QTimer, pyqtSignal
 from PyQt6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -26,6 +26,7 @@ from PyQt6.QtWidgets import (
 )
 
 from core.config import PipelineSettings, TaggerSettings
+from core.jobs import CallableJob, JobHandle, JobManager, JobPriority
 from tagger.model_inspection import format_inspection, inspect_model
 from ui.viewmodels import SettingsViewModel
 
@@ -185,13 +186,13 @@ class SettingsTab(QWidget):
         super().__init__(parent)
         self._view_model = view_model or SettingsViewModel(self)
         self._view_model.settings_applied.connect(self.settings_applied.emit)
-        self._thread_pool = QThreadPool.globalInstance()
+        self._inspection_jobs = JobManager(max_workers=1, parent=self)
+        self._inspection_task: JobHandle | None = None
         self._inspection_generation = 0
         self._inspection_timer = QTimer(self)
         self._inspection_timer.setSingleShot(True)
         self._inspection_timer.setInterval(350)
         self._inspection_timer.timeout.connect(self._start_model_inspection)
-        self._inspection_runnables: set[_ModelInspectionRunnable] = set()
 
         self._roots_edit = QPlainTextEdit(self)
         self._roots_edit.setPlaceholderText("One path per line")
@@ -384,22 +385,48 @@ class SettingsTab(QWidget):
         self._inspection_timer.start()
 
     def _start_model_inspection(self) -> None:
+        if self._inspection_task is not None:
+            self._inspection_task.cancel()
+            self._inspection_task = None
+
         generation = self._inspection_generation
         tagger_name = self._tagger_combo.currentText()
         current = self._current_settings or PipelineSettings()
         tags_csv = current.tagger.tags_csv if tagger_name.lower() == "wd14-onnx" else None
         model_path = self._tagger_model_edit.text().strip() or None
-        runnable = _ModelInspectionRunnable(
-            generation,
-            tagger_name=tagger_name,
-            model_path=model_path,
-            tags_csv=tags_csv,
-            provider_loader=self._view_model.provider_loader,
+
+        def _inspect(is_cancelled, _emit_progress) -> tuple[int, str, bool]:
+            if is_cancelled():
+                return generation, "", False
+            try:
+                inspection = inspect_model(
+                    tagger_name=tagger_name,
+                    model_path=model_path,
+                    tags_csv=tags_csv,
+                    provider_loader=self._view_model.provider_loader,
+                )
+                return generation, format_inspection(inspection), inspection.ok
+            except Exception as exc:  # pragma: no cover - defensive UI fallback
+                logger.exception("Failed to inspect tagger model")
+                return generation, f"Model status: Error\nError: {exc}", False
+
+        handle = self._inspection_jobs.submit_handle(
+            CallableJob(_inspect, name="model-inspection"),
+            priority=JobPriority.BACKGROUND,
         )
-        runnable.signals.finished.connect(self._on_model_inspection_finished)
-        runnable.signals.finished.connect(lambda *_args, task=runnable: self._inspection_runnables.discard(task))
-        self._inspection_runnables.add(runnable)
-        self._thread_pool.start(runnable)
+        self._inspection_task = handle
+
+        def _clear_current() -> None:
+            if self._inspection_task is handle:
+                self._inspection_task = None
+
+        def _done(payload) -> None:
+            _clear_current()
+            self._on_model_inspection_finished(*payload)
+
+        handle.signals.completed.connect(_done)
+        handle.signals.cancelled.connect(_clear_current)
+        handle.signals.error.connect(lambda *_args: _clear_current())
 
     def _on_model_inspection_finished(self, generation: int, message: str, ok: bool) -> None:
         if generation != self._inspection_generation:

@@ -4,16 +4,19 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
 import time
 from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Callable
 
 from PIL import Image
 from PIL.ImageQt import ImageQt
 from PyQt6.QtCore import QObject, QRunnable, pyqtSignal
 
 from core.fastsig import fast_fill_missing_signatures
+from core.jobs import CallableJob
 from dup.scanner import DuplicateFile, DuplicateScanConfig
 from ui.dup_refine_parallel import refine_by_pixels_parallel, refine_by_tilehash_parallel
 from ui.viewmodels import DupViewModel
@@ -124,10 +127,21 @@ class DuplicateScanRunnable(QRunnable):
         self._db_path = db_path
         self._request = request
         self.signals = DuplicateScanSignals()
+        self._cancel_event = threading.Event()
+
+    def cancel(self) -> None:
+        """Request cooperative cancellation."""
+
+        self._cancel_event.set()
+
+    def _is_cancelled(self) -> bool:
+        return self._cancel_event.is_set()
 
     def _emit_progress(self, current: int, total: int, stage: str) -> None:
         """Emit both legacy and stage-aware progress signals."""
 
+        if self._is_cancelled():
+            return
         self.signals.progressState.emit(current, total, stage)
         self.signals.progress.emit(current, total)
 
@@ -136,14 +150,20 @@ class DuplicateScanRunnable(QRunnable):
 
         try:
             logger.info("scan: start")
+            if self._is_cancelled():
+                return
             self._emit_progress(0, -1, "Loading files")
             with closing(self._view_model.open_connection(self._db_path)) as conn:
                 rows = self._view_model.iter_files_for_dup(conn, self._request.path_like)
                 logger.info("scan: rows loaded = %d", len(rows))
             self._emit_progress(len(rows), len(rows), "Loading files")
+            if self._is_cancelled():
+                return
 
             missing: list[tuple[int, str]] = []
             for row in rows:
+                if self._is_cancelled():
+                    return
                 file_id = _as_int(row["file_id"])
                 path = str(row["path"])
                 if row.get("phash_u64") is None:
@@ -171,12 +191,16 @@ class DuplicateScanRunnable(QRunnable):
                         row["phash_u64"] = int(pair[0])
                         patched += 1
                 logger.info("sig: computed=%d, patched_rows=%d", len(computed), patched)
+            if self._is_cancelled():
+                return
 
             total = len(rows)
             self._emit_progress(0, total, "Building groups")
             files: list[DuplicateFile] = []
             bad_rows = 0
             for index, row in enumerate(rows, start=1):
+                if self._is_cancelled():
+                    return
                 try:
                     files.append(DuplicateFile.from_row(row))
                 except ValueError:
@@ -198,7 +222,11 @@ class DuplicateScanRunnable(QRunnable):
             logger.info("cluster: building ...")
             self._emit_progress(0, -1, "Clustering duplicates")
             started = time.perf_counter()
+            if self._is_cancelled():
+                return
             clusters = self._view_model.build_clusters(config, files)
+            if self._is_cancelled():
+                return
             logger.info("cluster: done; n=%d, %.2fs", len(clusters), time.perf_counter() - started)
             self._emit_progress(total, total, "Clustering duplicates")
             self.signals.finished.emit(clusters)
@@ -208,6 +236,52 @@ class DuplicateScanRunnable(QRunnable):
                 self.signals.error.emit(str(exc))
             except RuntimeError:
                 pass
+
+
+class DuplicateScanJob(CallableJob):
+    """Managed duplicate scan job for :class:`core.jobs.JobManager`."""
+
+    def __init__(self, view_model: DupViewModel, db_path: Path, request: DuplicateScanRequest) -> None:
+        self._view_model = view_model
+        self._db_path = db_path
+        self._request = request
+        self._worker: DuplicateScanRunnable | None = None
+        super().__init__(self._run_scan, name="duplicate-scan")
+
+    def cancel(self) -> None:
+        """Request cooperative cancellation for both wrapper and worker."""
+
+        super().cancel()
+        if self._worker is not None:
+            self._worker.cancel()
+
+    def _run_scan(
+        self,
+        is_cancelled: Callable[[], bool],
+        emit_progress_state: Callable[[object], None],
+    ) -> object:
+        if is_cancelled():
+            self.cancel()
+            return []
+        worker = DuplicateScanRunnable(self._view_model, self._db_path, self._request)
+        self._worker = worker
+        results: list[object] = []
+        errors: list[str] = []
+        worker.signals.progressState.connect(lambda current, total, stage: emit_progress_state((current, total, stage)))
+        worker.signals.finished.connect(results.append)
+        worker.signals.error.connect(errors.append)
+        try:
+            worker.run()
+        finally:
+            self._worker = None
+        if is_cancelled():
+            self.cancel()
+            return []
+        if errors:
+            raise RuntimeError(errors[0])
+        if not results:
+            raise RuntimeError("Duplicate scan finished without result")
+        return results[0]
 
 
 class ThumbSignals(QObject):
@@ -263,10 +337,59 @@ class ThumbJob(QRunnable):
                 logger.info("thumb emit failed: %s", exc)
 
 
+class RefinePipelineJob(CallableJob):
+    """Managed duplicate refinement job for :class:`core.jobs.JobManager`."""
+
+    def __init__(self, clusters: object, tile_params: object, pixel_params: object) -> None:
+        self._clusters = clusters
+        self._tile_params = tile_params
+        self._pixel_params = pixel_params
+        self._worker: RefinePipelineRunnable | None = None
+        super().__init__(self._run_refine, name="duplicate-refine")
+
+    def cancel(self) -> None:
+        """Request cooperative cancellation for both wrapper and worker."""
+
+        super().cancel()
+        if self._worker is not None:
+            self._worker.cancel()
+
+    def _run_refine(
+        self,
+        is_cancelled: Callable[[], bool],
+        emit_progress_state: Callable[[object], None],
+    ) -> object:
+        worker = RefinePipelineRunnable(self._clusters, self._tile_params, self._pixel_params)
+        self._worker = worker
+        if is_cancelled():
+            worker.cancel()
+        results: list[object] = []
+        errors: list[str] = []
+        cancelled: list[bool] = []
+        worker.signals.progress.connect(lambda current, total, stage: emit_progress_state((current, total, stage)))
+        worker.signals.finished.connect(results.append)
+        worker.signals.canceled.connect(lambda: cancelled.append(True))
+        worker.signals.error.connect(errors.append)
+        try:
+            worker.run()
+        finally:
+            self._worker = None
+        if errors:
+            raise RuntimeError(errors[0])
+        if cancelled or is_cancelled():
+            self.cancel()
+            return []
+        if not results:
+            raise RuntimeError("Duplicate refine finished without result")
+        return results[0]
+
+
 __all__ = [
     "DuplicateScanRequest",
+    "DuplicateScanJob",
     "DuplicateScanRunnable",
     "DuplicateScanSignals",
+    "RefinePipelineJob",
     "RefinePipelineRunnable",
     "RefinePipelineSignals",
     "ThumbJob",

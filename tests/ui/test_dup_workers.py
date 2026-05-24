@@ -8,7 +8,14 @@ import pytest
 
 pytest.importorskip("PyQt6.QtCore", reason="PyQt6 core required", exc_type=ImportError)
 
-from ui.dup_workers import DuplicateScanRequest, DuplicateScanRunnable, RefinePipelineRunnable, ThumbJob
+from ui.dup_workers import (
+    DuplicateScanJob,
+    DuplicateScanRequest,
+    DuplicateScanRunnable,
+    RefinePipelineJob,
+    RefinePipelineRunnable,
+    ThumbJob,
+)
 from ui.viewmodels import DupViewModel
 
 
@@ -144,6 +151,73 @@ def test_duplicate_scan_worker_reports_non_int_file_id(tmp_path: Path) -> None:
     assert errors == ["expected int-compatible value, got object"]
 
 
+class _Signal:
+    def __init__(self) -> None:
+        self._callbacks = []
+
+    def connect(self, callback) -> None:
+        self._callbacks.append(callback)
+
+    def emit(self, *args) -> None:
+        for callback in list(self._callbacks):
+            callback(*args)
+
+
+def test_duplicate_scan_job_propagates_cancel_to_worker(monkeypatch, tmp_path: Path) -> None:
+    job_ref: list[DuplicateScanJob] = []
+    workers: list[object] = []
+
+    class _Signals:
+        def __init__(self) -> None:
+            self.progressState = _Signal()
+            self.finished = _Signal()
+            self.error = _Signal()
+
+    class _Worker:
+        def __init__(self, *args, **kwargs) -> None:
+            self.signals = _Signals()
+            self.cancelled = False
+            workers.append(self)
+
+        def cancel(self) -> None:
+            self.cancelled = True
+
+        def run(self) -> None:
+            job_ref[0].cancel()
+
+    monkeypatch.setattr("ui.dup_workers.DuplicateScanRunnable", _Worker)
+    view_model = DupViewModel(db_path=tmp_path / "library.db")
+    job = DuplicateScanJob(view_model, view_model.db_path, DuplicateScanRequest(None, 4, None))
+    job_ref.append(job)
+
+    assert job._run_scan(job.is_cancelled, lambda payload: None) == []  # type: ignore[attr-defined]
+    assert workers
+    assert workers[0].cancelled is True
+    assert job.is_cancelled()
+
+
+def test_duplicate_scan_job_requires_result_signal(monkeypatch, tmp_path: Path) -> None:
+    class _Signals:
+        def __init__(self) -> None:
+            self.progressState = _Signal()
+            self.finished = _Signal()
+            self.error = _Signal()
+
+    class _Worker:
+        def __init__(self, *args, **kwargs) -> None:
+            self.signals = _Signals()
+
+        def run(self) -> None:
+            return None
+
+    monkeypatch.setattr("ui.dup_workers.DuplicateScanRunnable", _Worker)
+    view_model = DupViewModel(db_path=tmp_path / "library.db")
+    job = DuplicateScanJob(view_model, view_model.db_path, DuplicateScanRequest(None, 4, None))
+
+    with pytest.raises(RuntimeError, match="without result"):
+        job._run_scan(job.is_cancelled, lambda payload: None)  # type: ignore[attr-defined]
+
+
 def test_refine_worker_cancel_emits_canceled(monkeypatch) -> None:
     canceled: list[bool] = []
 
@@ -158,6 +232,31 @@ def test_refine_worker_cancel_emits_canceled(monkeypatch) -> None:
     worker.run()
 
     assert canceled == [True]
+
+
+def test_refine_job_requires_result_signal(monkeypatch) -> None:
+    class _Signals:
+        def __init__(self) -> None:
+            self.progress = _Signal()
+            self.finished = _Signal()
+            self.canceled = _Signal()
+            self.error = _Signal()
+
+    class _Worker:
+        def __init__(self, *args, **kwargs) -> None:
+            self.signals = _Signals()
+
+        def cancel(self) -> None:
+            return None
+
+        def run(self) -> None:
+            return None
+
+    monkeypatch.setattr("ui.dup_workers.RefinePipelineRunnable", _Worker)
+    job = RefinePipelineJob(["cluster"], {}, {})
+
+    with pytest.raises(RuntimeError, match="without result"):
+        job._run_refine(job.is_cancelled, lambda payload: None)  # type: ignore[attr-defined]
 
 
 class _DoneEmitter:

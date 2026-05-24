@@ -367,4 +367,102 @@ def test_headless_job_signal_sender_and_cleanup_state(headless_jobs) -> None:
 
     assert senders == [signals]
     assert signals not in manager._active_signals
+    assert signals not in manager._running_signals
     assert signals not in manager._signal_to_runnable
+
+
+def test_headless_callable_job_emits_progress_state(headless_jobs) -> None:
+    def _run(is_cancelled, emit_progress_state):
+        assert not is_cancelled()
+        emit_progress_state({"stage": "work", "done": 1})
+        return "ok"
+
+    manager = headless_jobs.JobManager(max_workers=1)
+    handle = manager.submit_handle(headless_jobs.CallableJob(_run, name="callable"))
+    progress_states: list[dict[str, object]] = []
+    completions: list[str] = []
+    finished: list[None] = []
+
+    handle.signals.progressState.connect(progress_states.append)
+    handle.signals.completed.connect(completions.append)
+    handle.signals.finished.connect(lambda: finished.append(None))
+
+    assert handle.name == "callable"
+    assert manager.wait_for_done(2000)
+    _wait_until(lambda: bool(finished))
+
+    assert progress_states == [{"stage": "work", "done": 1}]
+    assert completions == ["ok"]
+    assert not handle.is_running
+    assert not handle.is_cancelled
+
+
+def test_headless_foreground_submit_allows_connecting_before_completion(headless_jobs) -> None:
+    def _run(is_cancelled, emit_progress_state):
+        assert not is_cancelled()
+        emit_progress_state("ready")
+        return "ok"
+
+    manager = headless_jobs.JobManager(max_workers=1)
+    handle = manager.submit_handle(
+        headless_jobs.CallableJob(_run, name="foreground-fast"),
+        priority=headless_jobs.JobPriority.FOREGROUND,
+    )
+    progress_states: list[str] = []
+    completions: list[str] = []
+
+    handle.signals.progressState.connect(progress_states.append)
+    handle.signals.completed.connect(completions.append)
+
+    assert manager.wait_for_done(2000)
+    _wait_until(lambda: completions == ["ok"])
+
+    assert progress_states == ["ready"]
+    assert completions == ["ok"]
+
+
+def test_headless_job_handle_cancels_queued_job(headless_jobs) -> None:
+    class _BlockingJob(headless_jobs.BatchJob):
+        def __init__(self, gate: threading.Event) -> None:
+            super().__init__([1])
+            self._gate = gate
+
+        def process_item(self, item: int, loaded: int) -> int:
+            assert self._gate.wait(2.0)
+            return loaded
+
+    class _ShouldNotRunJob(headless_jobs.BatchJob):
+        def __init__(self) -> None:
+            super().__init__([1])
+            self.processed = False
+            self.cleaned = False
+
+        def process_item(self, item: int, loaded: int) -> int:
+            self.processed = True
+            return loaded
+
+        def cleanup(self) -> None:
+            self.cleaned = True
+
+    manager = headless_jobs.JobManager(max_workers=1)
+    gate = threading.Event()
+    first = manager.submit_handle(_BlockingJob(gate), priority=headless_jobs.JobPriority.FOREGROUND)
+    second_job = _ShouldNotRunJob()
+    second = manager.submit_handle(second_job, priority=headless_jobs.JobPriority.BACKGROUND)
+    cancellations: list[None] = []
+    finished: list[None] = []
+
+    second.signals.cancelled.connect(lambda: cancellations.append(None))
+    second.signals.finished.connect(lambda: finished.append(None))
+    second.cancel()
+    gate.set()
+
+    assert first.is_cancelled is False
+    assert manager.wait_for_done(2000)
+    _wait_until(lambda: bool(finished))
+
+    assert cancellations == [None]
+    assert second.is_cancelled
+    assert second_job.processed is False
+    assert second_job.cleaned is True
+    assert second.signals not in manager._running_signals

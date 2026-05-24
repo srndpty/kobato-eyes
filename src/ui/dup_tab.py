@@ -31,6 +31,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from core.jobs import JobHandle, JobManager, JobPriority
 from dup.scanner import DuplicateCluster, DuplicateClusterEntry
 from ui.dup_cluster_update import rebuild_clusters_after_removal, sort_entries_for_display
 from ui.dup_lifecycle import (
@@ -53,7 +54,7 @@ from ui.dup_tree_state import (
     unique_pending_thumbnail_keys,
 )
 from ui.dup_widgets import ThumbPanel, ThumbTile, format_duplicate_resolution, format_duplicate_size
-from ui.dup_workers import DuplicateScanRequest, DuplicateScanRunnable, RefinePipelineRunnable, ThumbJob, ThumbSignals
+from ui.dup_workers import DuplicateScanJob, DuplicateScanRequest, RefinePipelineJob, ThumbJob, ThumbSignals
 from ui.file_actions import export_duplicate_clusters_csv, open_path, reveal_in_file_manager, trash_duplicate_entries
 from ui.viewmodels import DupViewModel
 
@@ -90,13 +91,13 @@ class DupTab(QWidget):
         super().__init__(parent)
         self._view_model = view_model or DupViewModel(self)
         self._db_path = self._view_model.db_path
-        self._pool = QThreadPool(self)
+        self._jobs = JobManager(max_workers=1, parent=self)
         self._clusters: list[DuplicateCluster] = []
-        self._active_scan: DuplicateScanRunnable | None = None
+        self._active_scan: JobHandle | None = None
         self._block_item_changed = False
         self._bulk_populating = False
         self._refine_dialog = None
-        self._refine_task = None
+        self._refine_task: JobHandle | None = None
 
         self._hamming_spin = QSpinBox(self)
         self._hamming_spin.setRange(0, 10)
@@ -178,9 +179,6 @@ class DupTab(QWidget):
         sb.sliderPressed.connect(self._on_scroll_activity)
         sb.sliderReleased.connect(self._on_scroll_activity)
 
-        # サムネ用スレッドプールを控えめに（I/O スパイク防止）
-        self._pool.setMaxThreadCount(min(4, os.cpu_count() or 2))
-
         self._tree.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
         self._tree.setHorizontalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
         sb = self._tree.verticalScrollBar()
@@ -253,7 +251,7 @@ class DupTab(QWidget):
         self._thumb_signals = ThumbSignals()
         self._thumb_signals.done.connect(self._on_thumb_done, Qt.ConnectionType.QueuedConnection)
 
-        # ★ QThreadPool は既存の self._pool を使い回す（QRunnableをstartでOK）
+        # ★ サムネイルは可視範囲連動の専用 QThreadPool を使う
         self._thumb_pool = QThreadPool(self)
         self._thumb_pool.setMaxThreadCount(2)  # サムネは低並列に
         # ★ プレースホルダ（薄グレーの枠）
@@ -284,8 +282,7 @@ class DupTab(QWidget):
         )
         pixel_params = dict(mae_thr=0.004)
 
-        task = RefinePipelineRunnable(clusters, tile_params, pixel_params)
-        self._refine_task = task
+        task = RefinePipelineJob(clusters, tile_params, pixel_params)
 
         # 進捗ダイアログ
         dlg = QProgressDialog("Refining duplicates...", "Cancel", 0, 0, self)
@@ -297,7 +294,8 @@ class DupTab(QWidget):
         self._refine_dialog = dlg
 
         # シグナル接続
-        def on_progress(cur, total, stage):
+        def on_progress(payload):
+            cur, total, stage = payload
             state = duplicate_refine_progress(cur, total, stage)
             if state.indeterminate:
                 dlg.setRange(0, 0)
@@ -310,6 +308,7 @@ class DupTab(QWidget):
             dlg.close()
             self._refine_dialog = None
             self._refine_task = None
+            self._scan_button.setEnabled(True)
             # ここで self._clusters を置き換え → 並べ替え → ツリー構築
             self._clusters = refined
             self._clusters.sort(key=lambda c: (self._cluster_hamming_score(c), len(c.files)), reverse=True)
@@ -321,24 +320,28 @@ class DupTab(QWidget):
             dlg.close()
             self._refine_dialog = None
             self._refine_task = None
+            self._scan_button.setEnabled(True)
             self._status_label.setText(duplicate_refine_cancel_status())
 
         def on_error(msg):
             dlg.close()
             self._refine_dialog = None
             self._refine_task = None
+            self._scan_button.setEnabled(True)
             QMessageBox.warning(self, "Refine failed", msg)
             self._status_label.setText(duplicate_refine_error_status())
 
-        task.signals.progress.connect(on_progress)
-        task.signals.finished.connect(on_finished)
-        task.signals.canceled.connect(on_canceled)
-        task.signals.error.connect(on_error)
+        handle = self._jobs.submit_handle(task, priority=JobPriority.FOREGROUND)
+        self._refine_task = handle
+        self._scan_button.setEnabled(False)
+        handle.signals.progressState.connect(on_progress)
+        handle.signals.completed.connect(on_finished)
+        handle.signals.cancelled.connect(on_canceled)
+        handle.signals.error.connect(lambda exc, _tb: on_error(str(exc)))
 
-        dlg.canceled.connect(task.cancel)
+        dlg.canceled.connect(handle.cancel)
 
         dlg.show()
-        self._pool.start(task)  # 既存の QThreadPool を使う
 
     def _auto_expand_visible_groups(self, margin: int = 200) -> None:
         rect = self._tree.viewport().rect().adjusted(0, -margin, 0, +margin)
@@ -739,7 +742,7 @@ class DupTab(QWidget):
         self._trash_button.setEnabled(availability.trash)
 
     def _on_scan_clicked(self) -> None:
-        if self._active_scan is not None:
+        if self._active_scan is not None or self._refine_task is not None:
             return
         self._clusters.clear()
         self._tree.clear()
@@ -748,13 +751,13 @@ class DupTab(QWidget):
         self._progress.setMaximum(1)
         self._progress.setValue(0)
         self._status_label.setText("Scanning duplicates...")
-        runnable = DuplicateScanRunnable(self._view_model, self._db_path, request)
-        runnable.signals.progressState.connect(self._on_scan_progress_state)
-        runnable.signals.finished.connect(self._on_scan_finished)
-        runnable.signals.error.connect(self._on_scan_error)
-        self._active_scan = runnable
+        job = DuplicateScanJob(self._view_model, self._db_path, request)
+        handle = self._jobs.submit_handle(job, priority=JobPriority.FOREGROUND)
+        handle.signals.progressState.connect(lambda payload: self._on_scan_progress_state(*payload))
+        handle.signals.completed.connect(self._on_scan_finished)
+        handle.signals.error.connect(lambda exc, _tb: self._on_scan_error(str(exc)))
+        self._active_scan = handle
         self._scan_button.setEnabled(False)
-        self._pool.start(runnable)
 
     def _on_scan_progress(self, current: int, total: int) -> None:
         state = duplicate_scan_progress(current, total)

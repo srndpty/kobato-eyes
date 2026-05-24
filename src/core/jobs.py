@@ -172,6 +172,7 @@ class JobSignals(QObject):
     """Signals emitted during job execution."""
 
     progress = pyqtSignal(int, int)
+    progressState = pyqtSignal(object)
     completed = pyqtSignal(object)
     cancelled = pyqtSignal()
     error = pyqtSignal(object, str)
@@ -181,9 +182,11 @@ class JobSignals(QObject):
 class BatchJob(ABC):
     """Template for batch-oriented jobs with load/process/write stages."""
 
-    def __init__(self, items: Sequence[Any] | None = None) -> None:
+    def __init__(self, items: Sequence[Any] | None = None, *, name: str | None = None) -> None:
         self.items: list[Any] = list(items or [])
+        self.name = name or self.__class__.__name__
         self._cancel_event = threading.Event()
+        self._progress_state_cb: Callable[[object], None] | None = None
 
     def cancel(self) -> None:
         """Request cooperative cancellation before the next item is processed."""
@@ -216,6 +219,71 @@ class BatchJob(ABC):
     def cleanup(self) -> None:
         """Hook executed after the batch completes (success or failure)."""
 
+    def emit_progress_state(self, payload: object) -> None:
+        """Emit a structured progress payload when a manager is running this job."""
+
+        if self._progress_state_cb is not None:
+            self._progress_state_cb(payload)
+
+    def execute(self, progress_cb: Callable[[int, int], None]) -> Any:
+        """Execute the job and return the completion payload."""
+
+        total = len(self.items)
+        if self.is_cancelled():
+            raise _JobCancelled
+        if total == 0:
+            return self.finalize()
+
+        for index, item in enumerate(self.items, start=1):
+            if self.is_cancelled():
+                raise _JobCancelled
+            loaded = self.load_item(item)
+            if self.is_cancelled():
+                raise _JobCancelled
+            processed = self.process_item(item, loaded)
+            if self.is_cancelled():
+                raise _JobCancelled
+            self.write_item(item, processed)
+            progress_cb(index, total)
+
+        return self.finalize()
+
+    def _bind_progress_state(self, callback: Callable[[object], None] | None) -> None:
+        self._progress_state_cb = callback
+
+
+class CallableJob(BatchJob):
+    """Single-call job for non-batch background tasks."""
+
+    def __init__(
+        self,
+        func: Callable[[Callable[[], bool], Callable[[object], None]], Any],
+        *,
+        cleanup: Callable[[], None] | None = None,
+        name: str | None = None,
+    ) -> None:
+        super().__init__([], name=name)
+        self._func = func
+        self._cleanup = cleanup
+
+    def execute(self, progress_cb: Callable[[int, int], None]) -> Any:
+        """Execute the wrapped callable."""
+
+        del progress_cb
+        if self.is_cancelled():
+            raise _JobCancelled
+        return self._func(self.is_cancelled, self.emit_progress_state)
+
+    def cleanup(self) -> None:
+        """Run the optional cleanup callback."""
+
+        if self._cleanup is not None:
+            self._cleanup()
+
+
+class _JobCancelled(Exception):
+    """Internal sentinel used to stop job execution without reporting an error."""
+
 
 class _BatchJobRunnable(QRunnable):
     """Internal runnable executing a :class:`BatchJob` instance."""
@@ -224,36 +292,23 @@ class _BatchJobRunnable(QRunnable):
         super().__init__()
         self.job = job
         self.signals = JobSignals()
+        self.running = False
+        self.started = False
+        self.completed = False
 
     def run(self) -> None:  # noqa: D401 - QRunnable entry point
+        self.started = True
+        self.running = True
+        self.job._bind_progress_state(self.signals.progressState.emit)
         try:
             self.job.prepare()
-            total = len(self.job.items)
+            result = self.job.execute(self.signals.progress.emit)
             if self.job.is_cancelled():
                 self.signals.cancelled.emit()
                 return
-            if total == 0:
-                result = self.job.finalize()
-                self.signals.completed.emit(result)
-                return
-
-            for index, item in enumerate(self.job.items, start=1):
-                if self.job.is_cancelled():
-                    self.signals.cancelled.emit()
-                    return
-                loaded = self.job.load_item(item)
-                if self.job.is_cancelled():
-                    self.signals.cancelled.emit()
-                    return
-                processed = self.job.process_item(item, loaded)
-                if self.job.is_cancelled():
-                    self.signals.cancelled.emit()
-                    return
-                self.job.write_item(item, processed)
-                self.signals.progress.emit(index, total)
-
-            result = self.job.finalize()
             self.signals.completed.emit(result)
+        except _JobCancelled:
+            self.signals.cancelled.emit()
         except Exception as exc:  # pragma: no cover - exercised via error signal
             tb = traceback.format_exc()
             self.signals.error.emit(exc, tb)
@@ -261,7 +316,54 @@ class _BatchJobRunnable(QRunnable):
             try:
                 self.job.cleanup()
             finally:
+                self.job._bind_progress_state(None)
+                self.running = False
+                self.completed = True
                 self.signals.finished.emit()
+
+    def cancel_without_start(self) -> None:
+        """Cancel a queued job before it reaches the thread pool."""
+
+        self.job.cancel()
+        try:
+            self.job.cleanup()
+        finally:
+            self.completed = True
+            self.signals.cancelled.emit()
+            self.signals.finished.emit()
+
+
+class JobHandle:
+    """Handle returned for managed jobs that need lifecycle control."""
+
+    def __init__(self, manager: "JobManager", runnable: _BatchJobRunnable) -> None:
+        self._manager = manager
+        self._runnable = runnable
+        self.signals = runnable.signals
+
+    @property
+    def name(self) -> str:
+        """Return the human-readable job name."""
+
+        return self._runnable.job.name
+
+    @property
+    def is_running(self) -> bool:
+        """Return whether the job is currently executing."""
+
+        return self._runnable.running
+
+    @property
+    def is_cancelled(self) -> bool:
+        """Return whether cancellation has been requested."""
+
+        return self._runnable.job.is_cancelled()
+
+    def cancel(self) -> None:
+        """Request cancellation, including while the job is still queued."""
+
+        self._runnable.job.cancel()
+        self._manager._cancel_pending(self._runnable)
 
 
 class JobManager(QObject):
@@ -276,11 +378,17 @@ class JobManager(QObject):
         self._sequence = 0
         self._running = 0
         self._active_signals: set[JobSignals] = set()
+        self._running_signals: set[JobSignals] = set()
         self._signal_to_runnable: dict[JobSignals, _BatchJobRunnable] = {}
         self._schedule_pending = False
 
     def submit(self, job: BatchJob, priority: JobPriority = JobPriority.BACKGROUND) -> JobSignals:
         """Queue ``job`` for execution and return its associated signals."""
+        return self.submit_handle(job, priority=priority).signals
+
+    def submit_handle(self, job: BatchJob, priority: JobPriority = JobPriority.BACKGROUND) -> JobHandle:
+        """Queue ``job`` for execution and return a lifecycle handle."""
+
         runnable = _BatchJobRunnable(job)
         signals = runnable.signals
         signals.finished.connect(self._handle_job_finished)
@@ -289,7 +397,7 @@ class JobManager(QObject):
         heapq.heappush(self._pending, (int(priority), self._sequence, runnable))
         self._sequence += 1
         self._request_schedule()
-        return signals
+        return JobHandle(self, runnable)
 
     def has_pending_jobs(self) -> bool:
         """Return whether jobs are queued or running."""
@@ -335,7 +443,16 @@ class JobManager(QObject):
         while self._pending and self._running < self._pool.maxThreadCount():
             _, _, runnable = heapq.heappop(self._pending)
             self._running += 1
+            self._running_signals.add(runnable.signals)
             self._pool.start(runnable)
+
+    def _cancel_pending(self, runnable: _BatchJobRunnable) -> None:
+        for index, (_priority, _sequence, pending) in enumerate(self._pending):
+            if pending is runnable:
+                self._pending.pop(index)
+                heapq.heapify(self._pending)
+                runnable.cancel_without_start()
+                return
 
     def _handle_job_finished(self) -> None:
         sender = self.sender()
@@ -354,12 +471,16 @@ class JobManager(QObject):
             pass
         self._active_signals.discard(signals)
         signals.deleteLater()
-        self._running = max(0, self._running - 1)
+        if signals in self._running_signals:
+            self._running_signals.discard(signals)
+            self._running = max(0, self._running - 1)
         self._request_schedule()
 
 
 __all__ = [
     "BatchJob",
+    "CallableJob",
+    "JobHandle",
     "JobManager",
     "JobPriority",
     "JobSignals",

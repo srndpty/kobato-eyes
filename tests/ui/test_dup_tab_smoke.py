@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Iterable
 
 import pytest
@@ -67,12 +66,32 @@ def test_initial_action_state(dup_tab: DupTab) -> None:
 
 
 def test_scan_start_disables_scan_button(monkeypatch, dup_tab: DupTab) -> None:
-    started: list[object] = []
-    dup_tab._pool = SimpleNamespace(start=started.append)  # type: ignore[attr-defined]
+    submitted: list[object] = []
+
+    class _Signals:
+        def __init__(self) -> None:
+            self.progressState = SimpleSignal()
+            self.completed = SimpleSignal()
+            self.error = SimpleSignal()
+
+    class SimpleSignal:
+        def connect(self, callback) -> None:
+            submitted.append(callback)
+
+    class _Handle:
+        def __init__(self) -> None:
+            self.signals = _Signals()
+
+    class _Jobs:
+        def submit_handle(self, job, priority):
+            submitted.append((job, priority))
+            return _Handle()
+
+    dup_tab._jobs = _Jobs()  # type: ignore[attr-defined]
 
     dup_tab._on_scan_clicked()  # type: ignore[attr-defined]
 
-    assert started
+    assert submitted
     assert not dup_tab._scan_button.isEnabled()  # type: ignore[attr-defined]
     assert dup_tab._status_label.text() == "Scanning duplicates..."  # type: ignore[attr-defined]
 

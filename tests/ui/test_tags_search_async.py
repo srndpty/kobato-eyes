@@ -168,6 +168,20 @@ def test_typing_does_not_trigger_search(tags_tab: TagsTab, qapp: QApplication) -
     assert tags_tab._table_model.rowCount() == initial_rows  # type: ignore[attr-defined]
 
 
+def test_new_search_clears_pending_thumbnail_pool(tags_tab: TagsTab, qapp: QApplication) -> None:
+    _await_idle(tags_tab, qapp)
+    clear_pool = mock.MagicMock()
+    tags_tab._pending_thumbs.add((0, 123))  # type: ignore[attr-defined]
+    tags_tab._thumb_pool.clear = clear_pool  # type: ignore[attr-defined,method-assign]
+
+    tags_tab._clear_results_for_new_search()  # type: ignore[attr-defined]
+
+    assert tags_tab._pending_thumbs == set()  # type: ignore[attr-defined]
+    assert tags_tab._table_model.rowCount() == 0  # type: ignore[attr-defined]
+    assert tags_tab._grid_model.rowCount() == 0  # type: ignore[attr-defined]
+    clear_pool.assert_called_once_with()
+
+
 def test_negative_autocomplete_displays_hyphen(tags_tab: TagsTab, qapp: QApplication) -> None:
     _await_idle(tags_tab, qapp)
     tags_tab._completion_candidates = [TagMeta(name="tag0", category=0, count=1234)]  # type: ignore[attr-defined]
