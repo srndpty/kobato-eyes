@@ -54,6 +54,7 @@ from PyQt6.QtWidgets import (
 )
 
 from core.config import PipelineSettings
+from core.jobs import CallableJob, JobHandle, JobManager, JobPriority
 from core.pipeline import IndexProgress, run_index_once
 from db.connection import get_conn
 from tagger import labels_util
@@ -74,7 +75,7 @@ from ui.index_lifecycle import (
     plan_index_failed,
     plan_index_finished,
 )
-from ui.index_tasks import IndexRunnable
+from ui.index_tasks import IndexJob
 from ui.result_delegates import GridThumbDelegate
 from ui.result_delegates import HighlightDelegate as _HighlightDelegate
 from ui.result_delegates import WrappingItemDelegate as _WrappingItemDelegate
@@ -600,19 +601,17 @@ class TagsTab(QWidget):
         self._thumb_signal.finished.connect(self._apply_thumbnail)
         self._pending_thumbs: set[tuple[int, int]] = set()
 
-        self._index_pool = QThreadPool(self)
-        self._index_pool.setMaxThreadCount(1)
+        self._index_jobs = JobManager(max_workers=1, parent=self)
         self._indexing_active = False
         self._retag_active = False
         self._refresh_active = False
         self._delete_active = False
         self._progress_dialog: QProgressDialog | None = None
-        self._current_index_task: IndexRunnable | None = None
-        self._current_delete_task: _DeleteResultRunnable | None = None
+        self._current_index_task: JobHandle | None = None
+        self._current_delete_task: JobHandle | None = None
         self._active_refresh_folder: Sequence[Path] | None = None
         self._quiesce_guard: AbstractContextManager[None] = nullcontext()
-        self._delete_pool = QThreadPool(self)
-        self._delete_pool.setMaxThreadCount(1)
+        self._file_jobs = JobManager(max_workers=1, parent=self)
 
         self._toast_label = QLabel("", self)
         self._toast_label.setObjectName("toastLabel")
@@ -677,9 +676,39 @@ class TagsTab(QWidget):
         if choice != QMessageBox.StandardButton.Yes:
             return
 
-        runnable = _CopyRunnable(self._view_model, self._db_path, query, dest)
-        runnable.signals.progress.connect(lambda cur, tot: self._status_label.setText(f"Copying... {cur}/{tot}"))
-        runnable.signals.error.connect(lambda msg: QMessageBox.critical(self, "Copy results", msg))
+        def _run_copy(
+            _is_cancelled: Callable[[], bool], emit_progress: Callable[[object], None]
+        ) -> tuple[str, int, int]:
+            with self._view_model.open_connection(self._db_path) as conn:
+                paths = self._view_model.iter_paths_for_search(conn, query)
+            copy_task = _CopyRunnable(self._view_model, self._db_path, query, dest)
+            total_paths = len(paths)
+            emit_progress((0, total_paths))
+            ok = ng = 0
+            for idx, raw_path in enumerate(paths, start=1):
+                try:
+                    src = Path(raw_path)
+                    if src.exists():
+                        shutil.copy2(src, copy_task._unique_dest(src.name))
+                        ok += 1
+                    else:
+                        ng += 1
+                except Exception:
+                    ng += 1
+                emit_progress((idx, total_paths))
+            return str(dest), ok, ng
+
+        job = CallableJob(_run_copy, name="copy-results")
+        handle = self._file_jobs.submit_handle(job, priority=JobPriority.BACKGROUND)
+        handle.signals.progressState.connect(
+            lambda payload: self._status_label.setText(f"Copying... {payload[0]}/{payload[1]}")
+        )
+
+        def _copy_error(exc: Exception, _tb: str) -> None:
+            QMessageBox.critical(self, "Copy results", str(exc))
+            self._copy_button.setEnabled(True)
+
+        handle.signals.error.connect(_copy_error)
 
         def _done(dest_dir: str, ok: int, ng: int) -> None:
             self._status_label.setText(f"Copied {ok} file(s). Failed {ng}. → {dest_dir}")
@@ -702,9 +731,8 @@ class TagsTab(QWidget):
                     pass
             self._copy_button.setEnabled(True)
 
-        runnable.signals.finished.connect(_done)
+        handle.signals.completed.connect(lambda payload: _done(*payload))
         self._copy_button.setEnabled(False)
-        (getattr(self, "_threadpool", None) or QThreadPool.globalInstance()).start(runnable)
 
     def _on_debug_toggled(self, checked: bool) -> None:
         # 中身の表示・非表示
@@ -1090,7 +1118,7 @@ class TagsTab(QWidget):
             self.prepare_for_database_reset()
         except Exception:
             pass
-        task = IndexRunnable(self._view_model, self._db_path, settings=settings)
+        task = IndexJob(self._view_model, self._db_path, settings=settings, name="index")
         self._start_indexing_task(task)
 
     def _run_retag(
@@ -1132,12 +1160,13 @@ class TagsTab(QWidget):
                 is_cancelled=is_cancelled,
             )
 
-        task = IndexRunnable(
+        task = IndexJob(
             self._view_model,
             self._db_path,
             settings=settings,
             pre_run=_pre_run,
             runner=_runner,
+            name="retag",
         )
         self._retag_active = True
         self._start_indexing_task(task)
@@ -1210,11 +1239,12 @@ class TagsTab(QWidget):
         self._update_control_states()
 
         db_path = self._db_path if self._db_path is not None else self._view_model.db_path
-        task = IndexRunnable(
+        task = IndexJob(
             self._view_model,
             db_path,
             settings=settings,
             runner=_runner,
+            name="refresh",
         )
         self._start_indexing_task(task)
 
@@ -1236,7 +1266,7 @@ class TagsTab(QWidget):
         except OSError:
             return base.absolute()
 
-    def _start_indexing_task(self, task: IndexRunnable) -> None:
+    def _start_indexing_task(self, task: IndexJob) -> None:
         # UIの長寿命接続を閉じて静穏化
         from db.connection import quiesced
 
@@ -1245,13 +1275,14 @@ class TagsTab(QWidget):
         self._quiesce_guard = quiesced()
         self._quiesce_guard.__enter__()
 
-        self._current_index_task = task
-        task.signals.progressState.connect(self._handle_index_progress_state)
-        task.signals.finished.connect(self._handle_index_finished)
-        task.signals.error.connect(self._handle_index_failed)
+        handle = self._index_jobs.submit_handle(task, priority=JobPriority.FOREGROUND)
+        self._current_index_task = handle
+        handle.signals.progressState.connect(self._handle_index_progress_state)
+        handle.signals.completed.connect(self._handle_index_finished)
+        handle.signals.error.connect(lambda exc, _tb: self._handle_index_failed(str(exc)))
+        handle.signals.cancelled.connect(lambda: self._handle_index_finished({"cancelled": True, "elapsed_sec": 0.0}))
         self._handle_index_started()
         self._progress_dialog = self._create_progress_dialog()
-        self._index_pool.start(task)
 
     def _enter_quiesce(self) -> None:
         self._release_quiesce()
@@ -1768,18 +1799,36 @@ class TagsTab(QWidget):
         self._delete_active = True
         self._status_label.setText(_format_deleting_status(paths))
         self._update_control_states()
-        runnable = _DeleteResultRunnable(self._view_model, self._db_path, entries=entries)
         total_entries = len(entries)
-        runnable.signals.finished.connect(
-            lambda removed, db_updated_ids, failures: self._handle_delete_finished(
-                removed,
-                db_updated_ids,
-                failures,
-                total_entries,
+
+        def _run_delete(
+            _is_cancelled: Callable[[], bool],
+            _emit_progress: Callable[[object], None],
+        ) -> tuple[list[tuple[int, str]], list[int], list[tuple[str, int, str, str]]]:
+            task = _DeleteResultRunnable(self._view_model, self._db_path, entries=entries)
+            result: list[tuple[list[tuple[int, str]], list[int], list[tuple[str, int, str, str]]]] = []
+            task.signals.finished.connect(
+                lambda removed, updated, failures: result.append((removed, updated, failures))
             )
+            task.run()
+            return result[0] if result else ([], [], [])
+
+        job = CallableJob(_run_delete, name="delete-results")
+        handle = self._file_jobs.submit_handle(job, priority=JobPriority.FOREGROUND)
+        handle.signals.completed.connect(
+            lambda payload: self._handle_delete_finished(payload[0], payload[1], payload[2], total_entries)
         )
-        self._current_delete_task = runnable
-        self._delete_pool.start(runnable)
+        handle.signals.error.connect(lambda exc, _tb: self._handle_delete_error(str(exc)))
+        self._current_delete_task = handle
+
+    def _handle_delete_error(self, message: str) -> None:
+        """Restore UI state after an unexpected delete job failure."""
+
+        self._delete_active = False
+        self._current_delete_task = None
+        self._status_label.setText(f"Delete failed: {message}")
+        QMessageBox.warning(self, "Delete image", f"Delete failed:\n{message}")
+        self._update_control_states()
 
     def _handle_delete_finished(
         self,

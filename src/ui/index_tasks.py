@@ -10,6 +10,7 @@ from pathlib import Path
 from PyQt6.QtCore import QObject, QRunnable, pyqtSignal
 
 from core.config import PipelineSettings
+from core.jobs import CallableJob
 from core.pipeline import IndexProgress
 from ui.viewmodels import TagsViewModel
 
@@ -88,4 +89,50 @@ class IndexRunnable(QRunnable):
             self.signals.finished.emit(stats)
 
 
-__all__ = ["IndexRunnable"]
+class IndexJob(CallableJob):
+    """Managed indexing job for :class:`core.jobs.JobManager`."""
+
+    def __init__(
+        self,
+        view_model: TagsViewModel,
+        db_path: Path,
+        *,
+        settings: PipelineSettings | None = None,
+        pre_run: Callable[[], dict[str, object]] | None = None,
+        runner: Callable[[Callable[[IndexProgress], None], Callable[[], bool]], dict[str, object]] | None = None,
+        name: str = "index",
+    ) -> None:
+        self._view_model = view_model
+        self._db_path = Path(db_path)
+        self._settings = settings
+        self._pre_run = pre_run
+        self._runner = runner
+        super().__init__(self._run_index, name=name)
+
+    def _run_index(
+        self,
+        is_cancelled: Callable[[], bool],
+        emit_progress_state: Callable[[object], None],
+    ) -> dict[str, object]:
+        extra: dict[str, object] = {}
+        if self._pre_run is not None:
+            extra = self._pre_run()
+
+        def _emit_progress(progress: IndexProgress) -> None:
+            emit_progress_state(progress)
+
+        if self._runner is not None:
+            stats = self._runner(_emit_progress, is_cancelled)
+        else:
+            stats = self._view_model.run_index_once(
+                self._db_path,
+                settings=self._settings,
+                progress_cb=_emit_progress,
+                is_cancelled=is_cancelled,
+            )
+        if extra:
+            stats.update(extra)
+        return stats
+
+
+__all__ = ["IndexJob", "IndexRunnable"]

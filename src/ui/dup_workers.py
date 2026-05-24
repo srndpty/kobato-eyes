@@ -14,6 +14,7 @@ from PIL.ImageQt import ImageQt
 from PyQt6.QtCore import QObject, QRunnable, pyqtSignal
 
 from core.fastsig import fast_fill_missing_signatures
+from core.jobs import CallableJob
 from dup.scanner import DuplicateFile, DuplicateScanConfig
 from ui.dup_refine_parallel import refine_by_pixels_parallel, refine_by_tilehash_parallel
 from ui.viewmodels import DupViewModel
@@ -210,6 +211,30 @@ class DuplicateScanRunnable(QRunnable):
                 pass
 
 
+class DuplicateScanJob(CallableJob):
+    """Managed duplicate scan job for :class:`core.jobs.JobManager`."""
+
+    def __init__(self, view_model: DupViewModel, db_path: Path, request: DuplicateScanRequest) -> None:
+        self._view_model = view_model
+        self._db_path = db_path
+        self._request = request
+        super().__init__(self._run_scan, name="duplicate-scan")
+
+    def _run_scan(self, is_cancelled, emit_progress_state):
+        if is_cancelled():
+            self.cancel()
+        worker = DuplicateScanRunnable(self._view_model, self._db_path, self._request)
+        results: list[object] = []
+        errors: list[str] = []
+        worker.signals.progressState.connect(lambda current, total, stage: emit_progress_state((current, total, stage)))
+        worker.signals.finished.connect(results.append)
+        worker.signals.error.connect(errors.append)
+        worker.run()
+        if errors:
+            raise RuntimeError(errors[0])
+        return results[0] if results else []
+
+
 class ThumbSignals(QObject):
     """Signals emitted by duplicate thumbnail jobs."""
 
@@ -263,10 +288,53 @@ class ThumbJob(QRunnable):
                 logger.info("thumb emit failed: %s", exc)
 
 
+class RefinePipelineJob(CallableJob):
+    """Managed duplicate refinement job for :class:`core.jobs.JobManager`."""
+
+    def __init__(self, clusters, tile_params, pixel_params) -> None:
+        self._clusters = clusters
+        self._tile_params = tile_params
+        self._pixel_params = pixel_params
+        self._worker: RefinePipelineRunnable | None = None
+        super().__init__(self._run_refine, name="duplicate-refine")
+
+    def cancel(self) -> None:
+        """Request cooperative cancellation for both wrapper and worker."""
+
+        super().cancel()
+        if self._worker is not None:
+            self._worker.cancel()
+
+    def _run_refine(self, is_cancelled, emit_progress_state):
+        worker = RefinePipelineRunnable(self._clusters, self._tile_params, self._pixel_params)
+        self._worker = worker
+        if is_cancelled():
+            worker.cancel()
+        results: list[object] = []
+        errors: list[str] = []
+        cancelled: list[bool] = []
+        worker.signals.progress.connect(lambda current, total, stage: emit_progress_state((current, total, stage)))
+        worker.signals.finished.connect(results.append)
+        worker.signals.canceled.connect(lambda: cancelled.append(True))
+        worker.signals.error.connect(errors.append)
+        try:
+            worker.run()
+        finally:
+            self._worker = None
+        if errors:
+            raise RuntimeError(errors[0])
+        if cancelled or is_cancelled():
+            self.cancel()
+            return []
+        return results[0] if results else []
+
+
 __all__ = [
     "DuplicateScanRequest",
+    "DuplicateScanJob",
     "DuplicateScanRunnable",
     "DuplicateScanSignals",
+    "RefinePipelineJob",
     "RefinePipelineRunnable",
     "RefinePipelineSignals",
     "ThumbJob",
