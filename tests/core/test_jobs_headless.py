@@ -367,6 +367,7 @@ def test_headless_job_signal_sender_and_cleanup_state(headless_jobs) -> None:
 
     assert senders == [signals]
     assert signals not in manager._active_signals
+    assert signals not in manager._running_signals
     assert signals not in manager._signal_to_runnable
 
 
@@ -464,3 +465,4 @@ def test_headless_job_handle_cancels_queued_job(headless_jobs) -> None:
     assert second.is_cancelled
     assert second_job.processed is False
     assert second_job.cleaned is True
+    assert second.signals not in manager._running_signals

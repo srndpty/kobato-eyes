@@ -378,6 +378,7 @@ class JobManager(QObject):
         self._sequence = 0
         self._running = 0
         self._active_signals: set[JobSignals] = set()
+        self._running_signals: set[JobSignals] = set()
         self._signal_to_runnable: dict[JobSignals, _BatchJobRunnable] = {}
         self._schedule_pending = False
 
@@ -442,6 +443,7 @@ class JobManager(QObject):
         while self._pending and self._running < self._pool.maxThreadCount():
             _, _, runnable = heapq.heappop(self._pending)
             self._running += 1
+            self._running_signals.add(runnable.signals)
             self._pool.start(runnable)
 
     def _cancel_pending(self, runnable: _BatchJobRunnable) -> None:
@@ -462,14 +464,15 @@ class JobManager(QObject):
         self._complete_finished_job(sender)
 
     def _complete_finished_job(self, signals: JobSignals) -> None:
-        runnable = self._signal_to_runnable.pop(signals, None)
+        self._signal_to_runnable.pop(signals, None)
         try:
             signals.finished.disconnect(self._handle_job_finished)
         except TypeError:
             pass
         self._active_signals.discard(signals)
         signals.deleteLater()
-        if runnable is None or runnable.started:
+        if signals in self._running_signals:
+            self._running_signals.discard(signals)
             self._running = max(0, self._running - 1)
         self._request_schedule()
 
