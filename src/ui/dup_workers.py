@@ -9,6 +9,7 @@ import time
 from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Callable
 
 from PIL import Image
 from PIL.ImageQt import ImageQt
@@ -254,7 +255,11 @@ class DuplicateScanJob(CallableJob):
         if self._worker is not None:
             self._worker.cancel()
 
-    def _run_scan(self, is_cancelled, emit_progress_state):
+    def _run_scan(
+        self,
+        is_cancelled: Callable[[], bool],
+        emit_progress_state: Callable[[object], None],
+    ) -> object:
         if is_cancelled():
             self.cancel()
             return []
@@ -335,7 +340,7 @@ class ThumbJob(QRunnable):
 class RefinePipelineJob(CallableJob):
     """Managed duplicate refinement job for :class:`core.jobs.JobManager`."""
 
-    def __init__(self, clusters, tile_params, pixel_params) -> None:
+    def __init__(self, clusters: object, tile_params: object, pixel_params: object) -> None:
         self._clusters = clusters
         self._tile_params = tile_params
         self._pixel_params = pixel_params
@@ -349,7 +354,11 @@ class RefinePipelineJob(CallableJob):
         if self._worker is not None:
             self._worker.cancel()
 
-    def _run_refine(self, is_cancelled, emit_progress_state):
+    def _run_refine(
+        self,
+        is_cancelled: Callable[[], bool],
+        emit_progress_state: Callable[[object], None],
+    ) -> object:
         worker = RefinePipelineRunnable(self._clusters, self._tile_params, self._pixel_params)
         self._worker = worker
         if is_cancelled():
