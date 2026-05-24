@@ -272,15 +272,7 @@ utils/                   (共通ユーティリティ)
 
 ## 将来の拡張
 
-```
-index/ モジュール (現在未使用)
-  ├─ CLIP 埋め込み
-  ├─ hnswlib ベクトル検索
-  └─ 高速近傍検索 (duplicate detection 高速化)
-
-Tier 2: ベクトル検索統合
-  └─ pHash → CLIP → SSIM の多段判定
-```
+`src/index/` は現在未使用の stub です。後続フェーズでは CLIP 埋め込みと hnswlib を追加し、pHash → CLIP → SSIM / ORB の多段判定へ拡張する想定です。
 
 ---
 

@@ -45,6 +45,13 @@ from ui.dup_lifecycle import (
     duplicate_trash_summary,
 )
 from ui.dup_status import format_duplicate_summary
+from ui.dup_tree_state import (
+    bound_path_from_bindings,
+    cluster_hamming_score,
+    default_checked_entries,
+    should_start_thumbnail,
+    unique_pending_thumbnail_keys,
+)
 from ui.dup_widgets import ThumbPanel, ThumbTile, format_duplicate_resolution, format_duplicate_size
 from ui.dup_workers import DuplicateScanRequest, DuplicateScanRunnable, RefinePipelineRunnable, ThumbJob, ThumbSignals
 from ui.file_actions import export_duplicate_clusters_csv, open_path, reveal_in_file_manager, trash_duplicate_entries
@@ -442,7 +449,7 @@ class DupTab(QWidget):
 
         while slots > 0 and self._thumb_pending:
             key = self._thumb_pending.popleft()
-            if key in self._thumb_inflight or key in self._thumb_done:
+            if not should_start_thumbnail(key, inflight=self._thumb_inflight, done=self._thumb_done):
                 continue
             path = Path(key)
             job = ThumbJob(self._view_model, path, size, cache_dir, self._thumb_signals)
@@ -452,13 +459,7 @@ class DupTab(QWidget):
 
     def _bound_path_of_item(self, item: QTreeWidgetItem) -> Path | None:
         # 可視行は数十件なので O(可視件数) の探索で十分軽い
-        for key, lst in self._thumb_bindings.items():
-            if item in lst:
-                try:
-                    return Path(key)
-                except Exception:
-                    return None
-        return None
+        return bound_path_from_bindings(self._thumb_bindings, item)
 
     def _request_visible_thumbs(self) -> None:
         # ★ 先に可視グループを自動展開
@@ -497,13 +498,13 @@ class DupTab(QWidget):
                 continue
             for tile in panel.visible_tiles_in(vp, rect):
                 key = str(tile.path)
-                if key not in self._thumb_inflight and key not in self._thumb_done:
+                if should_start_thumbnail(key, inflight=self._thumb_inflight, done=self._thumb_done):
                     wanted.append(key)
 
         self._thumb_pending.clear()
-        for key in wanted:
-            if key not in self._thumb_pending:
-                self._thumb_pending.append(key)
+        self._thumb_pending.extend(
+            unique_pending_thumbnail_keys(wanted, inflight=self._thumb_inflight, done=self._thumb_done)
+        )
 
         # self._status_label.setText(f"thumb requests (visible): ~{len(self._thumb_pending)}")
         self._maybe_start_more_thumbs()
@@ -536,9 +537,7 @@ class DupTab(QWidget):
                 continue
 
             # 未展開のクラスターは keeper 以外が Checked 相当
-            for entry in cluster.files:
-                if entry.file.file_id == cluster.keeper_id:
-                    continue
+            for entry in default_checked_entries(cluster):
                 yield entry
 
     def _cluster_hamming_score(self, cluster: "DuplicateCluster") -> int:
@@ -547,13 +546,7 @@ class DupTab(QWidget):
         値が大きいほど“目視確認の必要性が高い”とみなす。
         すべて None の場合は -1（最下位扱い）を返す。
         """
-        vals = []
-        for e in cluster.files:
-            if e.file.file_id == cluster.keeper_id:
-                continue
-            if e.best_hamming is not None:
-                vals.append(e.best_hamming)
-        return max(vals) if vals else -1
+        return cluster_hamming_score(cluster)
 
     def _make_placeholder_icon(self, size: QSize) -> QIcon:
         img = QPixmap(size)

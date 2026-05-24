@@ -64,10 +64,6 @@ pytest -q                            # 高速な単体テスト
 .\scripts\check.ps1                  # 標準チェック（コード品質 + テスト）
 ```
 
-(以降のドキュメントはAI生成)
-
-----
-
 ## 主な機能
 
 - **タグ付けパイプライン**: 監視対象ディレクトリをスキャンし、ONNX Runtime (WD14 / PixAI) で画像に Danbooru タグを推論。閾値や最大タグ数はプロバイダーごとに調整可能です。
@@ -90,7 +86,7 @@ src/
 └─ utils/       # 共通ユーティリティ
 ```
 
-`tests/` にはパイプライン・DB・ユーティリティ向けの自動テストが配置されています。
+`tests/` にはパイプライン・DB・UI helper・ユーティリティ向けの自動テストが配置されています。
 
 ## 前提条件
 
@@ -112,7 +108,7 @@ python -m pip install -c requirements-dev.lock -e ".[dev,tagging-cpu]"
 pre-commit install
 ```
 
-GPU で ONNX タガーを実行する開発環境では、CPU 版の代わりに `python -m pip install -c requirements-dev.lock -e ".[dev,tagging-gpu]"` を使用してください。将来の CLIP / hnswlib ベクトル検索を試す場合は `vector` extra を追加します。
+GPU で ONNX タガーを実行する開発環境では、CPU 版の代わりに `python -m pip install -c requirements-dev.lock -e ".[dev,tagging-gpu]"` を使用してください。CLIP / hnswlib のベクトル検索は後続機能で、現状の `src/index/` は未使用 stub です。依存関係の事前検証を行う場合のみ `vector` extra を追加します。
 
 ### モデルファイルの配置
 
@@ -144,24 +140,28 @@ CI などで GUI を起動しない場合は、環境変数 `KOE_HEADLESS=1` を
 ## データベースとインデックス
 
 - SQLite3 + WAL モードで DB を保存し、`fts_images` テーブルで FTS5 を利用します。
-- 将来的にベクトル近傍探索を格納するための `index/` ディレクトリを用意しています。
+- `src/index/` は後続の CLIP / hnswlib ベクトル近傍探索用の未使用 stub です。現行リリースの検索と重複検出は SQLite / FTS5 / pHash / SSIM / ORB 経路で動作します。
 - ログは `%APPDATA%\kobato-eyes\logs\app.log` にローテーション出力されます。
 
 ## テスト / CI
 
-- CI は GitHub Actions 上の Windows + Python 3.10 で実行し、ローカル開発と同じ `requirements-dev.lock` を pip constraints として参照します。
-- ヘッドレスでユニットテスト:
-  ```powershell
-  $env:PYTHONPATH="src"
-  $env:QT_QPA_PLATFORM="offscreen"
-  pytest
-  ```
-- GUI / 統合テストを含めて実行:
-  ```powershell
-  $env:PYTHONPATH="src"
-  pytest -m "gui or integration"
-  ```
-- pre-commit と CI の整形差分を避けるため、Ruff は `pyproject.toml` と `.pre-commit-config.yaml` のバージョン・ターゲットを揃えています。
+CI は GitHub Actions 上の Windows + Python 3.10 で実行し、ローカル開発と同じ `requirements-dev.lock` を pip constraints として参照します。通常の高速確認は GUI / integration / db_stress / gpu を除外する `.\scripts\check.ps1` を使います。
+
+```powershell
+.\scripts\check.ps1
+```
+
+変更内容に応じて、以下の追加チェックを使います。
+
+```powershell
+.\scripts\check-gui-smoke.ps1        # PyQt6 / worker / GUI 状態変更
+.\scripts\check-integration.ps1      # pipeline / DB bootstrap / end-to-end
+.\scripts\check-db-stress.ps1        # SQLite lock / WAL / checkpoint / quiesce
+.\scripts\check-package-smoke.ps1    # import 構造 / tools / packaging
+.\scripts\check-gpu.ps1              # ONNX Runtime CUDA / GPU smoke
+```
+
+pre-commit と CI の整形差分を避けるため、Ruff は `pyproject.toml` と `.pre-commit-config.yaml` のバージョン・ターゲットを揃えています。
 
 ## パッケージング
 
