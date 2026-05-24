@@ -6,7 +6,7 @@ from PyQt6.QtCore import QEvent, QRect, Qt
 from PyQt6.QtGui import QColor, QPainter
 from PyQt6.QtWidgets import QFrame, QGraphicsDropShadowEffect, QLabel, QProgressBar, QVBoxLayout, QWidget
 
-DEFAULT_OVERLAY_MESSAGE = "Searching… (Esc to cancel)"
+DEFAULT_OVERLAY_MESSAGE = "Searching... (Esc to cancel)"
 
 
 def overlay_message(message: str | None) -> str:

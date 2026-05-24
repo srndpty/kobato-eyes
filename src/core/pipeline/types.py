@@ -66,7 +66,7 @@ class _FileRecord:
 class ProgressEmitter:
     def __init__(self, cb: Callable[[IndexProgress], None] | None):
         self._cb = cb
-        self._last: dict[IndexPhase, tuple[int, float]] = {}
+        self._last: dict[IndexPhase, tuple[int, float, str | None]] = {}
 
     def emit(self, progress: IndexProgress, force: bool = False) -> None:
         if self._cb is None:
@@ -75,13 +75,17 @@ class ProgressEmitter:
         last = self._last.get(progress.phase)
         should = force or last is None
         if not should and last is not None:
-            last_done, last_time = last
+            last_done, last_time, last_message = last
             if progress.total > 0:
                 step = max(1, progress.total // 100)
-                should = (progress.done >= progress.total) or ((progress.done - last_done) >= step)
+                should = (
+                    progress.message != last_message
+                    or progress.done >= progress.total
+                    or (progress.done - last_done) >= step
+                )
             should = should or ((now - last_time) >= 0.1)
         if should:
-            self._last[progress.phase] = (progress.done, now)
+            self._last[progress.phase] = (progress.done, now, progress.message)
             try:
                 self._cb(progress)
             except Exception:

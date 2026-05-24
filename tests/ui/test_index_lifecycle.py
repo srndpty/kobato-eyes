@@ -5,10 +5,12 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
+from core.pipeline import IndexPhase, IndexProgress
 from tagger.wd14_onnx import ONNXRUNTIME_MISSING_MESSAGE
 from ui.index_lifecycle import (
     connection_retry_action,
     index_cancel_status,
+    index_progress_state,
     index_started_status,
     plan_index_failed,
     plan_index_finished,
@@ -16,10 +18,48 @@ from ui.index_lifecycle import (
 
 
 def test_index_started_and_cancel_status_follow_active_mode() -> None:
-    assert index_started_status(refresh_active=True, retag_active=False) == "Refreshing…"
-    assert index_started_status(refresh_active=False, retag_active=True) == "Retagging…"
-    assert index_started_status(refresh_active=False, retag_active=False) == "Indexing…"
-    assert index_cancel_status(refresh_active=False, retag_active=True) == "Retagging cancelling…"
+    assert index_started_status(refresh_active=True, retag_active=False) == "Refreshing..."
+    assert index_started_status(refresh_active=False, retag_active=True) == "Retagging..."
+    assert index_started_status(refresh_active=False, retag_active=False) == "Indexing..."
+    assert index_cancel_status(refresh_active=False, retag_active=True) == "Retagging cancelling..."
+
+
+def test_index_progress_state_formats_known_total_and_clamps() -> None:
+    state = index_progress_state(IndexProgress(phase=IndexPhase.TAG, done=12, total=10, message="ignored"))
+
+    assert state.label == "10 / 10 (100%)"
+    assert state.status == "Tagging (3/5)..."
+    assert state.title == "Tagging (3/5)"
+    assert state.maximum == 10
+    assert state.value == 10
+    assert state.percent == 100
+    assert state.indeterminate is False
+    assert state.stage_index == 3
+    assert state.stage_total == 5
+
+
+def test_index_progress_state_formats_unknown_total_with_message() -> None:
+    state = index_progress_state(IndexProgress(phase=IndexPhase.SCAN, done=5, total=-1, message="C:/images/a.png"))
+
+    assert state.label == "C:/images/a.png"
+    assert state.status == "Scanning (1/5)..."
+    assert state.title == "Scanning (1/5)"
+    assert state.maximum == 0
+    assert state.value == 0
+    assert state.percent is None
+    assert state.indeterminate is True
+    assert state.stage_index == 1
+    assert state.stage_total == 5
+
+
+def test_index_progress_state_formats_writing_substage_without_repeating_title() -> None:
+    state = index_progress_state(IndexProgress(phase=IndexPhase.FTS, done=2, total=57, message="merge.index"))
+
+    assert state.title == "Writing index (4/5)"
+    assert state.status == "Writing index (4/5)..."
+    assert state.label == "Rebuilding DB indexes: 2 / 57 (3%)"
+    assert state.stage_index == 4
+    assert state.stage_total == 5
 
 
 def test_plan_index_finished_refresh_success_uses_active_folder(tmp_path: Path) -> None:

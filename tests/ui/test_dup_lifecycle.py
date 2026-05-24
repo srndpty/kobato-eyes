@@ -32,10 +32,25 @@ def test_duplicate_action_availability_follows_clusters_and_checked_count() -> N
 
 
 def test_duplicate_scan_progress_handles_unknown_total() -> None:
-    assert duplicate_scan_progress(5, 0).maximum == 1
-    assert duplicate_scan_progress(5, 0).value == 0
-    assert duplicate_scan_progress(3, 10).maximum == 10
-    assert duplicate_scan_progress(3, 10).value == 3
+    unknown = duplicate_scan_progress(5, -1, "Loading files")
+    empty = duplicate_scan_progress(0, 0, "Building groups")
+    known = duplicate_scan_progress(13, 10, "Building groups")
+
+    assert unknown.label == "Loading files..."
+    assert unknown.maximum == 0
+    assert unknown.value == 0
+    assert unknown.percent is None
+    assert unknown.indeterminate is True
+    assert empty.label == "Building groups: 0 / 0 (100%)"
+    assert empty.maximum == 1
+    assert empty.value == 1
+    assert empty.percent == 100
+    assert empty.indeterminate is False
+    assert known.label == "Building groups: 10 / 10 (100%)"
+    assert known.maximum == 10
+    assert known.value == 10
+    assert known.percent == 100
+    assert known.indeterminate is False
 
 
 def test_duplicate_scan_finished_plan_filters_payload_and_requests_refine() -> None:
@@ -61,11 +76,18 @@ def test_duplicate_scan_finished_plan_handles_empty_and_invalid_payload() -> Non
 
 
 def test_duplicate_refine_progress_and_status_text() -> None:
-    progress = duplicate_refine_progress(2, 0, "tile")
+    unknown = duplicate_refine_progress(2, 0, "tile")
+    progress = duplicate_refine_progress(2, 4, "TileHash 1/2")
 
-    assert progress.label == "tile  2 / 1"
-    assert progress.maximum == 1
+    assert unknown.label == "tile..."
+    assert unknown.maximum == 0
+    assert unknown.value == 0
+    assert unknown.indeterminate is True
+    assert progress.label == "TileHash 1/2: 2 / 4 (50%)"
+    assert progress.maximum == 4
     assert progress.value == 2
+    assert progress.percent == 50
+    assert progress.indeterminate is False
     assert (
         duplicate_refine_complete_status([_Cluster([object()])]) == "Refine complete: 1 group(s), 1 file(s) detected."
     )

@@ -215,7 +215,7 @@ class SettingsTab(QWidget):
         self._tagger_model_edit = QLineEdit(self)
         self._tagger_model_edit.setPlaceholderText("Path to WD14 ONNX model")
         self._tagger_model_edit.textChanged.connect(self._schedule_model_inspection)
-        self._tagger_model_button = QPushButton("Browse…", self)
+        self._tagger_model_button = QPushButton("Browse...", self)
         self._tagger_model_button.clicked.connect(self._on_browse_model)
         tagger_model_row = QWidget(self)
         tagger_layout = QHBoxLayout(tagger_model_row)
@@ -232,7 +232,7 @@ class SettingsTab(QWidget):
         apply_button = QPushButton("Apply", self)
         apply_button.clicked.connect(self._emit_settings)
 
-        self._reset_button = QPushButton("Reset database…", self)
+        self._reset_button = QPushButton("Reset database...", self)
         self._reset_button.clicked.connect(self._on_reset_database)
 
         form = QFormLayout()

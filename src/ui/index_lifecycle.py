@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, Mapping, Sequence, cast
 
+from core.pipeline import IndexPhase, IndexProgress
 from ui.index_feedback import format_index_failure, format_index_success_toast, format_refresh_feedback
 
 IndexMode = Literal["refresh", "retag", "index"]
@@ -34,6 +35,21 @@ class IndexFailurePlan:
     retag_active: bool = False
 
 
+@dataclass(frozen=True)
+class IndexProgressState:
+    """Progress dialog state derived from an indexing progress event."""
+
+    label: str
+    status: str
+    title: str
+    maximum: int
+    value: int
+    percent: int | None
+    indeterminate: bool
+    stage_index: int
+    stage_total: int
+
+
 def index_mode(*, refresh_active: bool, retag_active: bool) -> IndexMode:
     """Return the active index mode from UI flags."""
 
@@ -53,13 +69,102 @@ def index_prefix(mode: IndexMode) -> str:
 def index_started_status(*, refresh_active: bool, retag_active: bool) -> str:
     """Return status text for a newly-started index task."""
 
-    return f"{index_prefix(index_mode(refresh_active=refresh_active, retag_active=retag_active))}…"
+    return f"{index_prefix(index_mode(refresh_active=refresh_active, retag_active=retag_active))}..."
 
 
 def index_cancel_status(*, refresh_active: bool, retag_active: bool) -> str:
     """Return status text after the user requested cancellation."""
 
-    return f"{index_prefix(index_mode(refresh_active=refresh_active, retag_active=retag_active))} cancelling…"
+    return f"{index_prefix(index_mode(refresh_active=refresh_active, retag_active=retag_active))} cancelling..."
+
+
+def index_phase_label(phase: IndexPhase) -> str:
+    """Return a stable user-facing label for an index pipeline phase."""
+
+    return {
+        IndexPhase.SCAN: "Scanning",
+        IndexPhase.PREPARE: "Preparing",
+        IndexPhase.TAG: "Tagging",
+        IndexPhase.FTS: "Writing index",
+        IndexPhase.DONE: "Finishing",
+    }[phase]
+
+
+def index_phase_position(phase: IndexPhase) -> tuple[int, int]:
+    """Return the stable ordinal position for an index pipeline phase."""
+
+    phases = [
+        IndexPhase.SCAN,
+        IndexPhase.PREPARE,
+        IndexPhase.TAG,
+        IndexPhase.FTS,
+        IndexPhase.DONE,
+    ]
+    return phases.index(phase) + 1, len(phases)
+
+
+def index_progress_detail(progress: IndexProgress) -> str | None:
+    """Return a user-facing detail for a progress event within its phase."""
+
+    raw_message = str(progress.message or "").strip()
+    if progress.phase is IndexPhase.FTS:
+        return {
+            "write": "Writing queued results",
+            "merge.start": "Preparing DB merge",
+            "merge.delete": "Replacing old tags",
+            "merge.insert": "Writing tags",
+            "merge.update": "Updating file metadata",
+            "merge.index": "Rebuilding DB indexes",
+            "merge.done": "Finalizing DB merge",
+            "rebuild": "Rebuilding search index",
+            "done": "Writing complete",
+        }.get(raw_message, raw_message or None)
+    if progress.total <= 0:
+        return raw_message or None
+    return None
+
+
+def index_progress_state(progress: IndexProgress) -> IndexProgressState:
+    """Return display-ready progress state for an indexing event."""
+
+    phase_label = index_phase_label(progress.phase)
+    stage_index, stage_total = index_phase_position(progress.phase)
+    stage_label = f"{phase_label} ({stage_index}/{stage_total})"
+    done = max(0, int(progress.done))
+    total = int(progress.total)
+    status = f"{stage_label}..."
+    detail = index_progress_detail(progress)
+
+    if total <= 0:
+        label = detail if detail else "Working..."
+        return IndexProgressState(
+            label=label,
+            status=status,
+            title=stage_label,
+            maximum=0,
+            value=0,
+            percent=None,
+            indeterminate=True,
+            stage_index=stage_index,
+            stage_total=stage_total,
+        )
+
+    maximum = max(1, total)
+    value = min(done, maximum)
+    percent = min(100, (value * 100) // maximum)
+    label_prefix = f"{detail}: " if detail else ""
+    label = f"{label_prefix}{value} / {maximum} ({percent}%)"
+    return IndexProgressState(
+        label=label,
+        status=status,
+        title=stage_label,
+        maximum=maximum,
+        value=value,
+        percent=percent,
+        indeterminate=False,
+        stage_index=stage_index,
+        stage_total=stage_total,
+    )
 
 
 def plan_index_finished(
@@ -176,9 +281,14 @@ __all__ = [
     "IndexFailurePlan",
     "IndexFinishPlan",
     "IndexMode",
+    "IndexProgressState",
     "connection_retry_action",
     "index_cancel_status",
     "index_mode",
+    "index_phase_label",
+    "index_phase_position",
+    "index_progress_detail",
+    "index_progress_state",
     "index_prefix",
     "index_started_status",
     "plan_index_failed",

@@ -110,6 +110,7 @@ class DuplicateScanSignals(QObject):
     """Signals emitted by the scanning worker."""
 
     progress = pyqtSignal(int, int)
+    progressState = pyqtSignal(int, int, str)
     finished = pyqtSignal(object)
     error = pyqtSignal(str)
 
@@ -124,14 +125,22 @@ class DuplicateScanRunnable(QRunnable):
         self._request = request
         self.signals = DuplicateScanSignals()
 
+    def _emit_progress(self, current: int, total: int, stage: str) -> None:
+        """Emit both legacy and stage-aware progress signals."""
+
+        self.signals.progressState.emit(current, total, stage)
+        self.signals.progress.emit(current, total)
+
     def run(self) -> None:
         """Run duplicate scanning."""
 
         try:
             logger.info("scan: start")
+            self._emit_progress(0, -1, "Loading files")
             with closing(self._view_model.open_connection(self._db_path)) as conn:
                 rows = self._view_model.iter_files_for_dup(conn, self._request.path_like)
                 logger.info("scan: rows loaded = %d", len(rows))
+            self._emit_progress(len(rows), len(rows), "Loading files")
 
             missing: list[tuple[int, str]] = []
             for row in rows:
@@ -143,7 +152,7 @@ class DuplicateScanRunnable(QRunnable):
                 logger.info("sig: missing=%d -> computing in parallel ...", len(missing))
 
                 def tick(done, total) -> None:
-                    self.signals.progress.emit(done, total)
+                    self._emit_progress(done, total, "Computing signatures")
 
                 computed = fast_fill_missing_signatures(
                     str(self._db_path),
@@ -164,7 +173,7 @@ class DuplicateScanRunnable(QRunnable):
                 logger.info("sig: computed=%d, patched_rows=%d", len(computed), patched)
 
             total = len(rows)
-            self.signals.progress.emit(0, total)
+            self._emit_progress(0, total, "Building groups")
             files: list[DuplicateFile] = []
             bad_rows = 0
             for index, row in enumerate(rows, start=1):
@@ -174,8 +183,8 @@ class DuplicateScanRunnable(QRunnable):
                     bad_rows += 1
                     continue
                 if index % 500 == 0:
-                    self.signals.progress.emit(index, total)
-            self.signals.progress.emit(total, total)
+                    self._emit_progress(index, total, "Building groups")
+            self._emit_progress(total, total, "Building groups")
 
             logger.setLevel(logging.DEBUG)
             logger.info("scan: files built = %d (skipped rows=%d)", len(files), bad_rows)
@@ -187,9 +196,11 @@ class DuplicateScanRunnable(QRunnable):
             )
 
             logger.info("cluster: building ...")
+            self._emit_progress(0, -1, "Clustering duplicates")
             started = time.perf_counter()
             clusters = self._view_model.build_clusters(config, files)
             logger.info("cluster: done; n=%d, %.2fs", len(clusters), time.perf_counter() - started)
+            self._emit_progress(total, total, "Clustering duplicates")
             self.signals.finished.emit(clusters)
         except Exception as exc:
             logger.exception("scan worker crashed: %s", exc)
