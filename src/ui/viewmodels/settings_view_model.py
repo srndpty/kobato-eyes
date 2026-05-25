@@ -91,13 +91,16 @@ class SettingsViewModel(QObject):
         roots: Iterable[Path],
         excluded: Iterable[Path],
         batch_size: int,
+        prefetch_depth: int,
         tagger_name: str,
         model_path: str | None,
         previous_tagger: TaggerSettings,
+        previous_settings: PipelineSettings | None = None,
         device: str = "auto",
     ) -> PipelineSettings:
         """Construct a :class:`PipelineSettings` instance from UI inputs."""
 
+        previous = previous_settings or self._current_settings
         tagger_settings = TaggerSettings(
             name=tagger_name,
             model_path=model_path,
@@ -109,8 +112,13 @@ class SettingsViewModel(QObject):
         settings = PipelineSettings(
             roots=[str(path) for path in roots],
             excluded=[str(path) for path in excluded],
+            allow_exts=set(previous.allow_exts),
             batch_size=batch_size,
+            prefetch_depth=prefetch_depth,
+            hamming_threshold=previous.hamming_threshold,
+            ssim_threshold=previous.ssim_threshold,
             tagger=tagger_settings,
+            index_dir=previous.index_dir,
         )
         return settings
 

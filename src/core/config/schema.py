@@ -111,6 +111,7 @@ class PipelineSettings(BaseModel):
     excluded: list[str] = Field(default_factory=_default_excluded)
     allow_exts: set[str] = Field(default_factory=_default_allow_exts)
     batch_size: int = 8
+    prefetch_depth: int = 4
     hamming_threshold: int = 10
     ssim_threshold: float = 0.92
     tagger: TaggerSettings = Field(default_factory=TaggerSettings)
@@ -161,6 +162,15 @@ class PipelineSettings(BaseModel):
         except (TypeError, ValueError):
             return 8
         return max(1, batch_size)
+
+    @field_validator("prefetch_depth", mode="before")
+    @classmethod
+    def _coerce_prefetch_depth(cls, value: Any) -> int:
+        try:
+            prefetch_depth = int(value)
+        except (TypeError, ValueError):
+            return 4
+        return min(64, max(1, prefetch_depth))
 
     @field_validator("hamming_threshold", mode="before")
     @classmethod

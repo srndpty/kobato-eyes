@@ -7,8 +7,10 @@ from typing import Iterable
 import pytest
 
 pytest.importorskip("PyQt6.QtWidgets", reason="PyQt6 widgets required", exc_type=ImportError)
+from PyQt6.QtGui import QHideEvent
 from PyQt6.QtWidgets import QApplication
 
+from core.config import PipelineSettings
 from ui.settings_tab import SettingsTab
 from ui.viewmodels import SettingsViewModel
 
@@ -82,6 +84,29 @@ def test_model_inspection_cancels_stale_handle(qapp: QApplication) -> None:
 
         jobs.handles[1].signals.completed.emit((2, "Model status: OK", True))
         assert widget._inspection_task is None  # type: ignore[attr-defined]
+    finally:
+        widget.deleteLater()
+        qapp.processEvents()
+
+
+def test_settings_tab_auto_applies_pending_changes_on_hide(qapp: QApplication) -> None:
+    view_model = SettingsViewModel(provider_loader=lambda: [])
+    view_model.set_current_settings(PipelineSettings(batch_size=8, prefetch_depth=4))
+    widget = SettingsTab(view_model=view_model)
+    applied: list[PipelineSettings] = []
+    widget.settings_applied.connect(applied.append)
+
+    try:
+        widget._batch_size_spin.setValue(12)  # type: ignore[attr-defined]
+        widget._prefetch_depth_spin.setValue(7)  # type: ignore[attr-defined]
+
+        widget.hideEvent(QHideEvent())  # type: ignore[attr-defined]
+        qapp.processEvents()
+
+        assert applied
+        assert applied[-1].batch_size == 12
+        assert applied[-1].prefetch_depth == 7
+        assert widget._dirty is False  # type: ignore[attr-defined]
     finally:
         widget.deleteLater()
         qapp.processEvents()

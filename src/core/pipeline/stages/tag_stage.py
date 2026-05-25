@@ -162,7 +162,11 @@ class TagStage:
                 current_batch,
             )
             current_batch = 1
-        prefetch_depth = safe_int(os.environ.get("KE_PREFETCH_DEPTH"), 4, min_value=1)
+        prefetch_depth = safe_int(
+            os.environ.get("KE_PREFETCH_DEPTH"),
+            getattr(settings, "prefetch_depth", 4),
+            min_value=1,
+        )
         io_workers = safe_int(os.environ.get("KE_IO_WORKERS"), 12, min_value=1)
 
         loader = self._deps.loader_factory(tag_paths, tagger, current_batch, prefetch_depth, io_workers)
