@@ -8,7 +8,7 @@ param(
     [string] $TagsCsv = "",
     [ValidateSet("auto", "wd14", "pixai")]
     [string] $Provider = "auto",
-    [ValidateSet("auto", "cuda", "cpu")]
+    [ValidateSet("auto", "tensorrt", "cuda", "cpu")]
     [string] $Device = "auto",
     [int] $BatchSize = 32,
     [int] $Limit = 1000,

@@ -202,7 +202,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--tags-csv", type=Path)
     parser.add_argument("--tagger", default="wd14-onnx")
     parser.add_argument("--provider", choices=["auto", "wd14", "pixai"], default="auto")
-    parser.add_argument("--device", choices=["auto", "cuda", "cpu"], default="auto")
+    parser.add_argument("--device", choices=["auto", "tensorrt", "cuda", "cpu"], default="auto")
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--limit", type=int, default=1000)
     parser.add_argument("--warmup-batches", type=int, default=2)

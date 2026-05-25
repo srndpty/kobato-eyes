@@ -6,6 +6,7 @@ from typing import Mapping
 
 from core.config import PipelineSettings
 from tagger.base import ITagger, TagCategory
+from tagger.onnx_backend import CPU_PROVIDER, CUDA_PROVIDER, TENSORRT_PROVIDER
 
 from .utils import (
     _serialise_max_tags,
@@ -22,10 +23,12 @@ def _onnx_providers_for_device(device: str | None) -> list[str] | None:
     """Return explicit ONNX providers for a configured execution device."""
 
     normalized = str(device or "auto").strip().lower()
+    if normalized == "tensorrt":
+        return [TENSORRT_PROVIDER, CUDA_PROVIDER, CPU_PROVIDER]
     if normalized == "cuda":
-        return ["CUDAExecutionProvider"]
+        return [CUDA_PROVIDER]
     if normalized == "cpu":
-        return ["CPUExecutionProvider"]
+        return [CPU_PROVIDER]
     return None
 
 

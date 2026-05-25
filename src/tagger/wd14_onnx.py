@@ -20,7 +20,8 @@ from tagger.labels_util import load_selected_tags
 from tagger.onnx_backend import (
     CPU_PROVIDER,
     CUDA_PROVIDER,
-    cuda_provider_options,
+    TENSORRT_PROVIDER,
+    onnx_provider_options,
     plan_provider_attempts,
     resolve_existing_file,
     validate_label_count,
@@ -140,7 +141,7 @@ class WD14Tagger(ITagger):
         chosen_providers: list[str] | None = None
         for provider_list in provider_attempts:
             try:
-                provider_options = cuda_provider_options(provider_list)
+                provider_options = onnx_provider_options(provider_list)
                 session_kwargs: dict[str, object] = {
                     "sess_options": session_options,
                     "providers": provider_list,
@@ -155,6 +156,13 @@ class WD14Tagger(ITagger):
                 # Failure policy: automatic CUDA attempt may fall back to CPU;
                 # explicit provider/session failures propagate to the caller.
                 last_error = exc
+                if TENSORRT_PROVIDER in provider_list:
+                    logger.warning(
+                        "WD14: %s unavailable, falling back to %s",
+                        TENSORRT_PROVIDER,
+                        _CUDA_PROVIDER,
+                    )
+                    continue
                 if requested_providers is None and provider_list == [_CUDA_PROVIDER]:
                     logger.warning(
                         "WD14: %s unavailable, falling back to %s",

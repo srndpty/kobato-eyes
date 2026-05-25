@@ -49,15 +49,7 @@ def test_prefetch_loader_pil_fallback_and_cleanup(tmp_path, monkeypatch) -> None
     def _failing_imdecode(data: np.ndarray, flags: int):  # type: ignore[override]
         return None
 
-    class _FailingTJ:
-        def decode_header(self, buf: bytes) -> tuple[int, int, int, int]:
-            return (64, 48, 0, 0)
-
-        def decode(self, buf: bytes, *, pixel_format=None, scaling_factor=None):  # type: ignore[override]
-            raise RuntimeError("decode failed")
-
     monkeypatch.setattr(loaders.cv2, "imdecode", _failing_imdecode)
-    monkeypatch.setattr(loaders, "_TJ", _FailingTJ())
 
     loader = loaders.PrefetchLoaderPrepared(
         [str(png_path), str(jpeg_path)],
