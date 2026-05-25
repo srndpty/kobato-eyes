@@ -9,7 +9,6 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Any, Iterator, List, Literal, Tuple
 
 import cv2
@@ -26,22 +25,9 @@ if not isinstance(_CV2_ERROR, type) or not issubclass(_CV2_ERROR, BaseException)
 _DECODE_FALLBACK_ERRORS: tuple[type[BaseException], ...] = (OSError, ValueError, RuntimeError, MemoryError, _CV2_ERROR)
 
 
-_USE_TJ = os.getenv("KE_USE_TURBOJPEG", "1") != "0"
-_TJ = None
-_TJPF_BGR = None
-if _USE_TJ:
-    try:
-        from turbojpeg import TJPF, TurboJPEG  # type: ignore
-
-        _TJ = TurboJPEG()
-        _TJPF_BGR = TJPF.BGR
-    except (ImportError, OSError, RuntimeError) as e:
-        logger.info("TurboJPEG not available (%s); falling back to OpenCV/PIL", e)
-        _TJ = None
-
 _TARGET = 448
-_LOAD_ROUTE_KEYS = ("turbojpeg", "opencv", "pil_fallback", "failed")
-LoadRoute = Literal["turbojpeg", "opencv", "pil_fallback", "failed"]
+_LOAD_ROUTE_KEYS = ("opencv", "pil_fallback", "failed")
+LoadRoute = Literal["opencv", "pil_fallback", "failed"]
 
 
 @dataclass(slots=True)
@@ -70,17 +56,6 @@ class LoaderMetrics:
             "prepare_seconds": self.prepare_seconds,
             "queue_put_wait_seconds": self.queue_put_wait_seconds,
         }
-
-
-def _choose_tj_scale(w: int, h: int) -> tuple[int, int]:
-    side = max(w, h)
-    if side >= _TARGET * 8:
-        return (1, 8)
-    if side >= _TARGET * 4:
-        return (1, 4)
-    if side >= _TARGET * 2:
-        return (1, 2)
-    return (1, 1)
 
 
 def _alpha_to_white_bgr(bg_or_bgra: np.ndarray) -> np.ndarray:
@@ -178,7 +153,7 @@ class PrefetchLoaderPrepared:
             "PrefetchLoaderPrepared: start (B=%d, depth=%d, io_workers=%d)", self._B, self._depth, self._io_workers
         )
 
-    # --- 1 枚ロード（TurboJPEG/OpenCV 優先、失敗したら PIL） ---
+    # --- 1 枚ロード（OpenCV 優先、失敗したら PIL） ---
     def _record_route(self, route: LoadRoute, seconds: float, *, ok: bool) -> None:
         """Record one decode attempt in the loader metrics."""
 
@@ -207,36 +182,9 @@ class PrefetchLoaderPrepared:
             )
 
     def _load_one(self, p: str) -> tuple[str, np.ndarray | None, tuple[int, int] | None, LoadRoute]:
-        ext = Path(p).suffix.lower()
         route: LoadRoute = "opencv"
         started = time.perf_counter()
         try:
-            # --- JPEG: TurboJPEG 縮小デコード ---
-            if ext in (".jpg", ".jpeg") and _TJ is not None:
-                route = "turbojpeg"
-                with open(p, "rb") as f:
-                    buf = f.read()
-                # ヘッダから元サイズ取得
-                try:
-                    w, h, _, _ = _TJ.decode_header(buf)
-                except _DECODE_FALLBACK_ERRORS:
-                    # ヘッダ取れない超古い JPEG 等は一旦フルで読んで形状から決める
-                    tmp = _TJ.decode(buf, pixel_format=_TJPF_BGR)
-                    h, w = tmp.shape[:2]
-                scale = _choose_tj_scale(w, h)
-                bgr = _TJ.decode(buf, pixel_format=_TJPF_BGR, scaling_factor=scale)
-                # ここで軽く TARGET 付近へ
-                hh, ww = bgr.shape[:2]
-                side = max(hh, ww)
-                if side != _TARGET:
-                    ratio = _TARGET / side
-                    interp = cv2.INTER_AREA if side > _TARGET else cv2.INTER_CUBIC
-                    bgr = cv2.resize(bgr, (max(1, int(ww * ratio)), max(1, int(hh * ratio))), interpolation=interp)
-                rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
-                self._record_route(route, time.perf_counter() - started, ok=True)
-                return (p, rgb, (w, h), route)
-
-            # --- PNG / WebP / その他: OpenCV ---
             data = np.fromfile(p, dtype=np.uint8)  # Windows で速い
             im = cv2.imdecode(data, cv2.IMREAD_UNCHANGED)
             if im is None:
@@ -258,10 +206,10 @@ class PrefetchLoaderPrepared:
                     rgba = pil_image.convert("RGBA")
                     bg = Image.new("RGBA", rgba.size, "WHITE")
                     bg.paste(rgba, mask=rgba.split()[-1])
-                    rgb = bg.convert("RGB")
-                    rgb.thumbnail((_TARGET, _TARGET), Image.Resampling.LANCZOS)
+                    rgb_image = bg.convert("RGB")
+                    rgb_image.thumbnail((_TARGET, _TARGET), Image.Resampling.LANCZOS)
                     # bgr = np.asarray(rgb)[:, :, ::-1]  # RGB->BGR
-                    rgb_arr = np.asarray(rgb)  # ここはそのままRGB
+                    rgb_arr = np.asarray(rgb_image)  # ここはそのままRGB
                     self._record_route(route, time.perf_counter() - started, ok=True)
                     return (p, rgb_arr, (w, h), route)
             except _DECODE_FALLBACK_ERRORS as e2:
