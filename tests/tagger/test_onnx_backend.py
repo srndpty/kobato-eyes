@@ -52,6 +52,14 @@ def test_plan_provider_attempts_tensorrt_missing_falls_back_to_cuda() -> None:
     assert plan.infos == []
 
 
+def test_plan_provider_attempts_tensorrt_and_cuda_missing_reports_cpu_fallback() -> None:
+    plan = plan_provider_attempts([TENSORRT_PROVIDER, CUDA_PROVIDER, CPU_PROVIDER], [CPU_PROVIDER])
+
+    assert plan.attempts == [[CPU_PROVIDER]]
+    assert plan.warnings == [f"{TENSORRT_PROVIDER} requested but not available; falling back to {CPU_PROVIDER}"]
+    assert plan.infos == []
+
+
 def test_onnx_provider_options_includes_tensorrt_cache_and_fp16(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

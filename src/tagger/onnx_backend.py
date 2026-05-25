@@ -46,9 +46,10 @@ def plan_provider_attempts(
     if requested is not None:
         requested_list = list(requested)
         if tensorrt_provider in requested_list and tensorrt_provider not in available_set:
-            warnings.append(f"{tensorrt_provider} requested but not available; falling back to {cuda_provider}")
             if cuda_provider in available_set:
+                warnings.append(f"{tensorrt_provider} requested but not available; falling back to {cuda_provider}")
                 return ProviderPlan(attempts=[[cuda_provider], [cpu_provider]], warnings=warnings, infos=infos)
+            warnings.append(f"{tensorrt_provider} requested but not available; falling back to {cpu_provider}")
             return ProviderPlan(attempts=[[cpu_provider]], warnings=warnings, infos=infos)
         if tensorrt_provider in requested_list:
             return ProviderPlan(

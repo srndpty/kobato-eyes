@@ -153,8 +153,9 @@ class WD14Tagger(ITagger):
                     **session_kwargs,
                 )
             except Exception as exc:  # pragma: no cover - handled in tests via mocks
-                # Failure policy: automatic CUDA attempt may fall back to CPU;
-                # explicit provider/session failures propagate to the caller.
+                # Failure policy: automatic CUDA may fall back to CPU. The
+                # explicit TensorRT mode is a chained TensorRT -> CUDA -> CPU
+                # preference, so TensorRT session failures retry CUDA only.
                 last_error = exc
                 if TENSORRT_PROVIDER in provider_list:
                     logger.warning(

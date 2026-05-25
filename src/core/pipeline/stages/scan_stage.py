@@ -160,9 +160,11 @@ class ScanStage:
             logger.info("Scanning %d root(s) for eligible images", len(roots))
             image_paths = list(iter_images(roots, excluded=excluded_paths, extensions=allow_exts))
             existing_by_path: dict[str, object] = {}
+            bulk_fetched = False
             fetch_many = getattr(self._deps, "fetch_files_by_path", None)
             if callable(fetch_many):
                 existing_by_path = fetch_many(conn, [str(path) for path in image_paths])
+                bulk_fetched = True
 
             for image_path in image_paths:
                 if emitter.cancelled(ctx.is_cancelled):
@@ -185,7 +187,7 @@ class ScanStage:
 
                 path_str = str(image_path)
                 row = existing_by_path.get(path_str)
-                if row is None and not existing_by_path:
+                if row is None and not bulk_fetched:
                     row = self._deps.fetch_file(conn, path_str)
                 is_new = row is None
                 if row is not None:
