@@ -23,7 +23,9 @@ _numpy_stub = types.ModuleType("numpy")
 _numpy_stub.ndarray = object
 _numpy_stub.float32 = "float32"
 _numpy_stub.uint8 = "uint8"
+_numpy_stub.bool_ = bool
 _numpy_stub.clip = lambda array, _min, _max: _FakeClipResult(array)
+_numpy_stub.isscalar = lambda obj: isinstance(obj, (int, float, bool, str, bytes))
 sys.modules.setdefault("numpy", _numpy_stub)
 
 _config_stub = types.ModuleType("core.config")
@@ -51,7 +53,7 @@ _core_pipeline_resolver_stub = types.ModuleType("core.pipeline.resolver")
 def _resolver_stub(settings, override, *, thresholds=None, max_tags=None):
     if override is None:
         raise AssertionError("tagger override must be provided for tests")
-    return override
+    return override, thresholds, max_tags
 
 
 _pil_stub = types.ModuleType("PIL")
@@ -310,6 +312,54 @@ def test_tag_stage_uses_configured_batch_size() -> None:
 
 
 def test_tag_stage_uses_configured_prefetch_depth() -> None:
+    records = [
+        _FileRecord(
+            file_id=1,
+            path=Path("single.jpg"),
+            size=1,
+            mtime=time.time(),
+            sha="sha1",
+            is_new=True,
+            changed=False,
+            tag_exists=False,
+            needs_tagging=True,
+        )
+    ]
+    deps = _RetryingDeps()
+    stage = TagStage(deps=deps)
+    ctx = _make_context(_FlakyTagger(), prefetch_depth=9)
+
+    stage.run(ctx, ProgressEmitter(lambda _p: None), records)
+
+    assert deps.prefetch_batches == [9]
+
+
+def test_tag_stage_prefetch_depth_env_overrides_settings(monkeypatch) -> None:
+    monkeypatch.setenv("KE_PREFETCH_DEPTH", "3")
+    records = [
+        _FileRecord(
+            file_id=1,
+            path=Path("single.jpg"),
+            size=1,
+            mtime=time.time(),
+            sha="sha1",
+            is_new=True,
+            changed=False,
+            tag_exists=False,
+            needs_tagging=True,
+        )
+    ]
+    deps = _RetryingDeps()
+    stage = TagStage(deps=deps)
+    ctx = _make_context(_FlakyTagger(), prefetch_depth=9)
+
+    stage.run(ctx, ProgressEmitter(lambda _p: None), records)
+
+    assert deps.prefetch_batches == [3]
+
+
+def test_tag_stage_invalid_prefetch_depth_env_falls_back_to_settings(monkeypatch) -> None:
+    monkeypatch.setenv("KE_PREFETCH_DEPTH", "0")
     records = [
         _FileRecord(
             file_id=1,

@@ -170,7 +170,7 @@ class PipelineSettings(BaseModel):
             prefetch_depth = int(value)
         except (TypeError, ValueError):
             return 4
-        return max(1, prefetch_depth)
+        return min(64, max(1, prefetch_depth))
 
     @field_validator("hamming_threshold", mode="before")
     @classmethod

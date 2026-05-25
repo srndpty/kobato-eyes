@@ -38,6 +38,11 @@ def test_explicit_empty_excluded_disables_default_exclusions() -> None:
     assert settings.excluded == []
 
 
+def test_prefetch_depth_is_clamped() -> None:
+    assert PipelineSettings(prefetch_depth=0).prefetch_depth == 1
+    assert PipelineSettings(prefetch_depth=999).prefetch_depth == 64
+
+
 def test_legacy_mapping_fills_missing_fields(tmp_path: Path) -> None:
     legacy = {
         "roots": [str(tmp_path / "images")],
