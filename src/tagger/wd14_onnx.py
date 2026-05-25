@@ -139,7 +139,7 @@ class WD14Tagger(ITagger):
         last_error: Exception | None = None
         session = None
         chosen_providers: list[str] | None = None
-        for provider_list in provider_attempts:
+        for attempt_index, provider_list in enumerate(provider_attempts):
             try:
                 provider_options = onnx_provider_options(provider_list)
                 session_kwargs: dict[str, object] = {
@@ -155,13 +155,25 @@ class WD14Tagger(ITagger):
             except Exception as exc:  # pragma: no cover - handled in tests via mocks
                 # Failure policy: automatic CUDA may fall back to CPU. The
                 # explicit TensorRT mode is a chained TensorRT -> CUDA -> CPU
-                # preference, so TensorRT session failures retry CUDA only.
+                # preference, so each failed attempt retries the next provider.
                 last_error = exc
                 if TENSORRT_PROVIDER in provider_list:
                     logger.warning(
                         "WD14: %s unavailable, falling back to %s",
                         TENSORRT_PROVIDER,
                         _CUDA_PROVIDER,
+                    )
+                    continue
+                if (
+                    requested_providers is not None
+                    and TENSORRT_PROVIDER in requested_providers
+                    and provider_list == [_CUDA_PROVIDER]
+                    and attempt_index < len(provider_attempts) - 1
+                ):
+                    logger.warning(
+                        "WD14: %s unavailable, falling back to %s",
+                        _CUDA_PROVIDER,
+                        _CPU_PROVIDER,
                     )
                     continue
                 if requested_providers is None and provider_list == [_CUDA_PROVIDER]:

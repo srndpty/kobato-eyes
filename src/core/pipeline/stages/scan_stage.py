@@ -12,6 +12,7 @@ from core.scanner import DEFAULT_EXTENSIONS, iter_images
 from utils.hash import compute_sha256
 
 logger = logging.getLogger(__name__)
+_SCAN_FETCH_CHUNK_SIZE = 500
 
 
 def _row_get(row: object, key: str, default: object = None) -> object:
@@ -158,92 +159,105 @@ class ScanStage:
         records: list[_FileRecord] = []
         try:
             logger.info("Scanning %d root(s) for eligible images", len(roots))
-            image_paths = list(iter_images(roots, excluded=excluded_paths, extensions=allow_exts))
-            existing_by_path: dict[str, object] = {}
-            bulk_fetched = False
             fetch_many = getattr(self._deps, "fetch_files_by_path", None)
-            if callable(fetch_many):
-                existing_by_path = fetch_many(conn, [str(path) for path in image_paths])
-                bulk_fetched = True
 
-            for image_path in image_paths:
-                if emitter.cancelled(ctx.is_cancelled):
-                    break
+            def _process_paths(image_paths: list[Path]) -> None:
+                existing_by_path: dict[str, object] = {}
+                bulk_fetched = False
+                if callable(fetch_many):
+                    existing_by_path = fetch_many(conn, [str(path) for path in image_paths])
+                    bulk_fetched = True
 
-                stats["scanned"] += 1
-                emitter.emit(
-                    IndexProgress(
-                        phase=IndexPhase.SCAN,
-                        done=stats["scanned"],
-                        total=-1,
-                        message=str(image_path),
+                for image_path in image_paths:
+                    if emitter.cancelled(ctx.is_cancelled):
+                        break
+
+                    stats["scanned"] += 1
+                    emitter.emit(
+                        IndexProgress(
+                            phase=IndexPhase.SCAN,
+                            done=stats["scanned"],
+                            total=-1,
+                            message=str(image_path),
+                        )
                     )
-                )
-                try:
-                    stat = image_path.stat()
-                except OSError as exc:
-                    logger.warning("Failed to stat %s: %s", image_path, exc)
-                    continue
-
-                path_str = str(image_path)
-                row = existing_by_path.get(path_str)
-                if row is None and not bulk_fetched:
-                    row = self._deps.fetch_file(conn, path_str)
-                is_new = row is None
-                if row is not None:
-                    size_changed = int(_row_get(row, "size", 0) or 0) != stat.st_size
-                    mtime_changed = float(_row_get(row, "mtime", 0.0) or 0.0) != stat.st_mtime
-                else:
-                    size_changed = True
-                    mtime_changed = True
-
-                if is_new or size_changed or mtime_changed:
                     try:
-                        sha = compute_sha256(image_path)
+                        stat = image_path.stat()
                     except OSError as exc:
-                        logger.warning("Failed to hash %s: %s", image_path, exc)
+                        logger.warning("Failed to stat %s: %s", image_path, exc)
                         continue
-                    changed = True if is_new else (str(_row_get(row, "sha256", "") or "") != sha)
-                else:
-                    sha = str(_row_get(row, "sha256", "") or "")
-                    changed = False
 
-                indexed_at = None if changed else (_row_get(row, "indexed_at") if row else None)
-                file_id = self._deps.upsert_file(
-                    conn,
-                    path=path_str,
-                    size=stat.st_size,
-                    mtime=stat.st_mtime,
-                    sha256=sha,
-                    indexed_at=indexed_at,
-                )
+                    path_str = str(image_path)
+                    row = existing_by_path.get(path_str)
+                    if row is None and not bulk_fetched:
+                        row = self._deps.fetch_file(conn, path_str)
+                    is_new = row is None
+                    if row is not None:
+                        size_changed = int(_row_get(row, "size", 0) or 0) != stat.st_size
+                        mtime_changed = float(_row_get(row, "mtime", 0.0) or 0.0) != stat.st_mtime
+                    else:
+                        size_changed = True
+                        mtime_changed = True
 
-                tag_exists_value = _row_get(row, "_tag_exists") if row is not None else None
-                tag_exists = (
-                    bool(tag_exists_value) if tag_exists_value is not None else self._deps.has_tag(conn, file_id)
-                )
-                tagger_sig_value = _row_get(row, "tagger_sig") if row is not None else None
-                stored_sig = str(tagger_sig_value) if tagger_sig_value is not None else None
-                stored_tagged_at = _row_get(row, "last_tagged_at") if row is not None else None
-                last_tagged_at = float(stored_tagged_at) if stored_tagged_at is not None else None
-                needs_tagging = is_new or changed or (not tag_exists) or (stored_sig != ctx.tagger_sig)
+                    if is_new or size_changed or mtime_changed:
+                        try:
+                            sha = compute_sha256(image_path)
+                        except OSError as exc:
+                            logger.warning("Failed to hash %s: %s", image_path, exc)
+                            continue
+                        changed = True if is_new else (str(_row_get(row, "sha256", "") or "") != sha)
+                    else:
+                        sha = str(_row_get(row, "sha256", "") or "")
+                        changed = False
 
-                records.append(
-                    _FileRecord(
-                        file_id=file_id,
-                        path=image_path,
+                    indexed_at = None if changed else (_row_get(row, "indexed_at") if row else None)
+                    file_id = self._deps.upsert_file(
+                        conn,
+                        path=path_str,
                         size=stat.st_size,
                         mtime=stat.st_mtime,
-                        sha=sha,
-                        is_new=is_new,
-                        changed=changed,
-                        tag_exists=tag_exists,
-                        needs_tagging=needs_tagging,
-                        stored_tagger_sig=stored_sig,
-                        current_tagger_sig=ctx.tagger_sig,
-                        last_tagged_at=last_tagged_at,
+                        sha256=sha,
+                        indexed_at=indexed_at,
                     )
-                )
+
+                    tag_exists_value = _row_get(row, "_tag_exists") if row is not None else None
+                    tag_exists = (
+                        bool(tag_exists_value) if tag_exists_value is not None else self._deps.has_tag(conn, file_id)
+                    )
+                    tagger_sig_value = _row_get(row, "tagger_sig") if row is not None else None
+                    stored_sig = str(tagger_sig_value) if tagger_sig_value is not None else None
+                    stored_tagged_at = _row_get(row, "last_tagged_at") if row is not None else None
+                    last_tagged_at = float(stored_tagged_at) if stored_tagged_at is not None else None
+                    needs_tagging = is_new or changed or (not tag_exists) or (stored_sig != ctx.tagger_sig)
+
+                    records.append(
+                        _FileRecord(
+                            file_id=file_id,
+                            path=image_path,
+                            size=stat.st_size,
+                            mtime=stat.st_mtime,
+                            sha=sha,
+                            is_new=is_new,
+                            changed=changed,
+                            tag_exists=tag_exists,
+                            needs_tagging=needs_tagging,
+                            stored_tagger_sig=stored_sig,
+                            current_tagger_sig=ctx.tagger_sig,
+                            last_tagged_at=last_tagged_at,
+                        )
+                    )
+
+            pending_paths: list[Path] = []
+            for image_path in iter_images(roots, excluded=excluded_paths, extensions=allow_exts):
+                if emitter.cancelled(ctx.is_cancelled):
+                    pending_paths = []
+                    break
+                pending_paths.append(image_path)
+                if len(pending_paths) >= _SCAN_FETCH_CHUNK_SIZE:
+                    _process_paths(pending_paths)
+                    pending_paths = []
+            if pending_paths and not emitter.cancelled(ctx.is_cancelled):
+                _process_paths(pending_paths)
             conn.commit()
 
             stats["new_or_changed"] = sum(1 for r in records if r.is_new or r.changed)

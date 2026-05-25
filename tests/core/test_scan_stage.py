@@ -89,3 +89,40 @@ def test_scan_stage_does_not_fallback_to_fetch_file_after_empty_bulk_fetch(
     assert result.new_or_changed == 1
     assert deps.bulk_fetch_paths == [str(image_path)]
     assert deps.fetch_file_calls == 0
+
+
+def test_scan_stage_keeps_iteration_streaming_for_cancellation(monkeypatch, tmp_path: Path) -> None:
+    paths = []
+    for index in range(5):
+        image_path = tmp_path / f"sample-{index}.jpg"
+        image_path.write_bytes(b"hashable")
+        paths.append(image_path)
+    yielded: list[Path] = []
+
+    def _iter_images(*args, **kwargs):
+        for image_path in paths:
+            yielded.append(image_path)
+            yield image_path
+
+    cancelled = False
+
+    def _on_progress(_progress) -> None:
+        nonlocal cancelled
+        cancelled = True
+
+    monkeypatch.setattr(scan_stage, "_SCAN_FETCH_CHUNK_SIZE", 1)
+    monkeypatch.setattr(scan_stage, "iter_images", _iter_images)
+
+    ctx = PipelineContext(
+        db_path=tmp_path / "index.db",
+        settings=PipelineSettings(roots=[str(tmp_path)], allow_exts={".jpg"}),
+        thresholds={},
+        max_tags_map={},
+        tagger_sig="sig",
+        is_cancelled=lambda: cancelled,
+    )
+
+    result = ScanStage(_BulkEmptyDeps()).run(ctx, ProgressEmitter(_on_progress))
+
+    assert result.scanned == 1
+    assert len(yielded) < len(paths)
