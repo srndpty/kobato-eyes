@@ -282,6 +282,75 @@ def test_wd14_tagger_warns_when_cuda_requested_but_missing(
     assert tagger._session is not None  # type: ignore[attr-defined]
 
 
+def test_wd14_tagger_falls_back_from_tensorrt_to_cuda(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    _mock_labels: list[Path],
+) -> None:
+    """TensorRT session failures should retry the CUDA-only provider attempt."""
+
+    attempts: list[list[str]] = []
+    option_attempts: list[object] = []
+
+    class _FailTensorRTThenCUDA:
+        def __init__(self, *args, **kwargs) -> None:  # noqa: D401 - signature compatibility
+            providers = kwargs.get("providers", [])
+            attempts.append(list(providers))
+            option_attempts.append(kwargs.get("provider_options"))
+            if "TensorrtExecutionProvider" in providers:
+                raise RuntimeError("TensorRT failed")
+            self._inputs = [SimpleNamespace(name="input_0", shape=(1, 448, 448, 3))]
+            self._outputs = [SimpleNamespace(name="output_0")]
+            self._providers = list(providers)
+            self._provider_options = {provider: {} for provider in self._providers}
+            self._sess_options = kwargs.get("sess_options")
+
+        def get_inputs(self) -> list[SimpleNamespace]:
+            return self._inputs
+
+        def get_outputs(self) -> list[SimpleNamespace]:
+            return self._outputs
+
+        def get_providers(self) -> list[str]:
+            return list(self._providers)
+
+        def get_provider_options(self) -> dict[str, dict[str, object]]:
+            return dict(self._provider_options)
+
+        def end_profiling(self) -> str:
+            return "dummy"
+
+    def _fake_available() -> list[str]:
+        return ["TensorrtExecutionProvider", "CUDAExecutionProvider", "CPUExecutionProvider"]
+
+    monkeypatch.setenv("KE_ORT_TENSORRT_FP16", "1")
+    monkeypatch.setattr(wd14_onnx.ort, "InferenceSession", _FailTensorRTThenCUDA)
+    monkeypatch.setattr(wd14_onnx, "get_available_providers", _fake_available)
+
+    model_path = tmp_path / "model.onnx"
+    model_path.write_bytes(b"dummy")
+    csv_path = tmp_path / "selected_tags.csv"
+    csv_path.write_text("tag,0\n", encoding="utf-8")
+
+    with caplog.at_level(logging.WARNING):
+        tagger = wd14_onnx.WD14Tagger(
+            model_path,
+            providers=["TensorrtExecutionProvider", "CUDAExecutionProvider", "CPUExecutionProvider"],
+        )
+
+    assert attempts == [
+        ["TensorrtExecutionProvider", "CUDAExecutionProvider", "CPUExecutionProvider"],
+        ["CUDAExecutionProvider"],
+    ]
+    first_options = option_attempts[0]
+    assert isinstance(first_options, list)
+    assert first_options[0]["trt_fp16_enable"] == "True"
+    warning_messages = [record.message for record in caplog.records if record.levelno == logging.WARNING]
+    assert any("TensorrtExecutionProvider unavailable" in message for message in warning_messages)
+    assert tagger._session.get_providers() == ["CUDAExecutionProvider"]  # type: ignore[attr-defined]
+
+
 def test_end_profile_writes_path(tmp_path: Path, _mock_labels: list[Path]) -> None:
     """Calling end_profile should return the profiling path."""
 

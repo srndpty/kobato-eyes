@@ -33,7 +33,8 @@ DEFAULT_THUMBNAIL_SIZE = (320, 320)
 _THUMB_CACHE_LIMIT = 256
 _THUMB_CACHE: "OrderedDict[str, QPixmap]" = OrderedDict()
 _THUMB_CACHE_LOCK = Lock()
-_READABLE_THUMB_CACHE: dict[Path, tuple[int, int]] = {}
+_READABLE_THUMB_CACHE_LIMIT = 1024
+_READABLE_THUMB_CACHE: OrderedDict[Path, tuple[int, int]] = OrderedDict()
 _READABLE_THUMB_CACHE_LOCK = Lock()
 
 
@@ -188,6 +189,7 @@ def _cached_thumbnail_is_readable(path: Path) -> bool:
     cache_key = (int(stat_result.st_size), int(stat_result.st_mtime_ns))
     with _READABLE_THUMB_CACHE_LOCK:
         if _READABLE_THUMB_CACHE.get(path) == cache_key:
+            _READABLE_THUMB_CACHE.move_to_end(path)
             return True
     try:
         with Image.open(path) as image:
@@ -201,6 +203,9 @@ def _cached_thumbnail_is_readable(path: Path) -> bool:
         return False
     with _READABLE_THUMB_CACHE_LOCK:
         _READABLE_THUMB_CACHE[path] = cache_key
+        _READABLE_THUMB_CACHE.move_to_end(path)
+        while len(_READABLE_THUMB_CACHE) > _READABLE_THUMB_CACHE_LIMIT:
+            _READABLE_THUMB_CACHE.popitem(last=False)
     return True
 
 
@@ -243,6 +248,9 @@ def generate_thumbnail(
         else:
             with _READABLE_THUMB_CACHE_LOCK:
                 _READABLE_THUMB_CACHE[thumb_path] = (int(stat_result.st_size), int(stat_result.st_mtime_ns))
+                _READABLE_THUMB_CACHE.move_to_end(thumb_path)
+                while len(_READABLE_THUMB_CACHE) > _READABLE_THUMB_CACHE_LIMIT:
+                    _READABLE_THUMB_CACHE.popitem(last=False)
         return thumb_path
     except OSError as exc:
         logger.warning("Failed to write thumbnail cache for %s: %s", source, exc)

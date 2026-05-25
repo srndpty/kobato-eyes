@@ -156,7 +156,9 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
     return {
         "created_at": datetime.now(timezone.utc).isoformat(),
         "root": str(Path(args.root).expanduser()),
-        "tagger": args.provider,
+        "tagger": args.tagger,
+        "provider": args.provider,
+        "device": args.device,
         "model": str(Path(args.model).expanduser()),
         "tags_csv": str(Path(args.tags_csv).expanduser()) if args.tags_csv else None,
         "selected_images": len(paths),

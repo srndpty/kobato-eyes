@@ -24,6 +24,9 @@ if not isinstance(_CV2_ERROR, type) or not issubclass(_CV2_ERROR, BaseException)
     _CV2_ERROR = RuntimeError
 _DECODE_FALLBACK_ERRORS: tuple[type[BaseException], ...] = (OSError, ValueError, RuntimeError, MemoryError, _CV2_ERROR)
 
+# JPEG decode is intentionally OpenCV-only. TurboJPEG was benchmarked but
+# removed to avoid external DLL packaging; TensorRT made disk/decode the next
+# separate optimization target rather than a dependency to ship by default.
 
 _TARGET = 448
 _LOAD_ROUTE_KEYS = ("opencv", "pil_fallback", "failed")

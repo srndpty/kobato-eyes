@@ -71,15 +71,14 @@ def rebuild_fts_offline(
                 JOIN tags AS t ON t.id = ft.tag_id
                 WHERE f.is_present = 1
                   AND TRIM(t.name) <> ''
-            ),
-            clipped AS (
-                SELECT file_id, tag_name, rank
+            )
+            SELECT file_id, GROUP_CONCAT(tag_name, ' ') AS text
+            FROM (
+                SELECT file_id, tag_name
                 FROM ranked
                 WHERE rank <= ?
                 ORDER BY file_id ASC, rank ASC
             )
-            SELECT file_id, GROUP_CONCAT(tag_name, ' ') AS text
-            FROM clipped
             GROUP BY file_id
             ORDER BY file_id ASC
             """,

@@ -6,6 +6,7 @@ param(
     [string] $Model,
 
     [string] $TagsCsv = "",
+    [string] $Tagger = "wd14-onnx",
     [ValidateSet("auto", "wd14", "pixai")]
     [string] $Provider = "auto",
     [ValidateSet("auto", "tensorrt", "cuda", "cpu")]
@@ -20,24 +21,33 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-$env:PYTHONPATH = "src"
+$projectRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
+$env:PYTHONPATH = Join-Path $projectRoot "src"
 
-$python = Join-Path $PSScriptRoot "..\.venv\Scripts\python.exe"
+$python = Join-Path $projectRoot ".venv\Scripts\python.exe"
 if (-not (Test-Path -LiteralPath $python)) {
     $python = "python"
 }
 
+$scriptPath = Join-Path $projectRoot "scripts\bench_tagger.py"
+$outputPath = if ([System.IO.Path]::IsPathRooted($Output)) {
+    $Output
+} else {
+    Join-Path $projectRoot $Output
+}
+
 $argsList = @(
-    "scripts\bench_tagger.py",
+    $scriptPath,
     "--root", $Root,
     "--model", $Model,
+    "--tagger", $Tagger,
     "--provider", $Provider,
     "--device", $Device,
     "--batch-size", "$BatchSize",
     "--limit", "$Limit",
     "--warmup-batches", "$WarmupBatches",
     "--prefetch-depth", "$PrefetchDepth",
-    "--output", $Output
+    "--output", $outputPath
 )
 
 if ($TagsCsv) {
