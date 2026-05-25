@@ -8,8 +8,9 @@ import queue
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Iterator, List, Tuple
+from typing import Any, Iterator, List, Literal, Tuple
 
 import cv2
 import numpy as np
@@ -39,6 +40,36 @@ if _USE_TJ:
         _TJ = None
 
 _TARGET = 448
+_LOAD_ROUTE_KEYS = ("turbojpeg", "opencv", "pil_fallback", "failed")
+LoadRoute = Literal["turbojpeg", "opencv", "pil_fallback", "failed"]
+
+
+@dataclass(slots=True)
+class LoaderMetrics:
+    """Diagnostic timings collected by :class:`PrefetchLoaderPrepared`."""
+
+    submitted: int = 0
+    loaded: int = 0
+    failed: int = 0
+    batches: int = 0
+    route_counts: dict[str, int] = field(default_factory=lambda: {key: 0 for key in _LOAD_ROUTE_KEYS})
+    route_seconds: dict[str, float] = field(default_factory=lambda: {key: 0.0 for key in _LOAD_ROUTE_KEYS})
+    prepare_seconds: float = 0.0
+    queue_put_wait_seconds: float = 0.0
+
+    def as_dict(self) -> dict[str, object]:
+        """Return a JSON-serialisable snapshot of the metrics."""
+
+        return {
+            "submitted": self.submitted,
+            "loaded": self.loaded,
+            "failed": self.failed,
+            "batches": self.batches,
+            "route_counts": dict(self.route_counts),
+            "route_seconds": dict(self.route_seconds),
+            "prepare_seconds": self.prepare_seconds,
+            "queue_put_wait_seconds": self.queue_put_wait_seconds,
+        }
 
 
 def _choose_tj_scale(w: int, h: int) -> tuple[int, int]:
@@ -135,6 +166,8 @@ class PrefetchLoaderPrepared:
         self._io_workers = current_workers
         self._tagger = tagger
         self._producer_error: BaseException | None = None
+        self._metrics = LoaderMetrics()
+        self._metrics_lock = threading.Lock()
 
         # (paths, np_batch, sizes) or None(sentinal)
         self._q: "queue.Queue[tuple[list[str], np.ndarray, list[tuple[int,int]]] | None]" = queue.Queue(self._depth)
@@ -146,11 +179,41 @@ class PrefetchLoaderPrepared:
         )
 
     # --- 1 枚ロード（TurboJPEG/OpenCV 優先、失敗したら PIL） ---
-    def _load_one(self, p: str) -> tuple[str, np.ndarray | None, tuple[int, int] | None]:
+    def _record_route(self, route: LoadRoute, seconds: float, *, ok: bool) -> None:
+        """Record one decode attempt in the loader metrics."""
+
+        with self._metrics_lock:
+            self._metrics.submitted += 1
+            if ok:
+                self._metrics.loaded += 1
+            else:
+                self._metrics.failed += 1
+            self._metrics.route_counts[route] = self._metrics.route_counts.get(route, 0) + 1
+            self._metrics.route_seconds[route] = self._metrics.route_seconds.get(route, 0.0) + float(seconds)
+
+    def metrics_snapshot(self) -> LoaderMetrics:
+        """Return a stable copy of diagnostic loader metrics."""
+
+        with self._metrics_lock:
+            return LoaderMetrics(
+                submitted=self._metrics.submitted,
+                loaded=self._metrics.loaded,
+                failed=self._metrics.failed,
+                batches=self._metrics.batches,
+                route_counts=dict(self._metrics.route_counts),
+                route_seconds=dict(self._metrics.route_seconds),
+                prepare_seconds=self._metrics.prepare_seconds,
+                queue_put_wait_seconds=self._metrics.queue_put_wait_seconds,
+            )
+
+    def _load_one(self, p: str) -> tuple[str, np.ndarray | None, tuple[int, int] | None, LoadRoute]:
         ext = Path(p).suffix.lower()
+        route: LoadRoute = "opencv"
+        started = time.perf_counter()
         try:
             # --- JPEG: TurboJPEG 縮小デコード ---
             if ext in (".jpg", ".jpeg") and _TJ is not None:
+                route = "turbojpeg"
                 with open(p, "rb") as f:
                     buf = f.read()
                 # ヘッダから元サイズ取得
@@ -170,7 +233,8 @@ class PrefetchLoaderPrepared:
                     interp = cv2.INTER_AREA if side > _TARGET else cv2.INTER_CUBIC
                     bgr = cv2.resize(bgr, (max(1, int(ww * ratio)), max(1, int(hh * ratio))), interpolation=interp)
                 rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
-                return (p, rgb, (w, h))
+                self._record_route(route, time.perf_counter() - started, ok=True)
+                return (p, rgb, (w, h), route)
 
             # --- PNG / WebP / その他: OpenCV ---
             data = np.fromfile(p, dtype=np.uint8)  # Windows で速い
@@ -181,12 +245,14 @@ class PrefetchLoaderPrepared:
             bgr = _alpha_to_white_then_resize_bgr(im)
             rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
             # 元サイズは im の生サイズ（アルファ有無に関係なし）
-            return (p, rgb, (int(W0), int(H0)))
+            self._record_route(route, time.perf_counter() - started, ok=True)
+            return (p, rgb, (int(W0), int(H0)), route)
 
         except _DECODE_FALLBACK_ERRORS as e:
             logger.warning("PrefetchLoaderPrepared: failed to load %s: %s (fallback PIL)", p, e)
             # --- フォールバック: PIL ---
             try:
+                route = "pil_fallback"
                 with Image.open(p) as pil_image:
                     w, h = pil_image.size
                     rgba = pil_image.convert("RGBA")
@@ -196,10 +262,12 @@ class PrefetchLoaderPrepared:
                     rgb.thumbnail((_TARGET, _TARGET), Image.Resampling.LANCZOS)
                     # bgr = np.asarray(rgb)[:, :, ::-1]  # RGB->BGR
                     rgb_arr = np.asarray(rgb)  # ここはそのままRGB
-                    return (p, rgb_arr, (w, h))
+                    self._record_route(route, time.perf_counter() - started, ok=True)
+                    return (p, rgb_arr, (w, h), route)
             except _DECODE_FALLBACK_ERRORS as e2:
                 logger.warning("PrefetchLoaderPrepared: PIL fallback also failed %s: %s", p, e2)
-                return (p, None, None)
+                self._record_route("failed", time.perf_counter() - started, ok=False)
+                return (p, None, None, "failed")
 
     def qsize(self) -> int:
         try:
@@ -222,7 +290,8 @@ class PrefetchLoaderPrepared:
 
                     tmp: dict[str, tuple[np.ndarray | None, tuple[int, int] | None]] = {}
                     for fut in as_completed(futs):
-                        p, arr, sz = fut.result()
+                        result = fut.result()
+                        p, arr, sz = result[:3]
                         tmp[p] = (arr, sz)
 
                     # 順序維持で集約
@@ -241,13 +310,20 @@ class PrefetchLoaderPrepared:
                         continue
 
                     # ここで最終整形（正方形 + ぴったり TARGET + float32）を tagger に任せる
+                    prepare_started = time.perf_counter()
                     np_batch = self._tagger.prepare_batch_from_rgb_np(bgr_list)
+                    prepare_seconds = time.perf_counter() - prepare_started
 
                     # キューへ（必要なら put 時間をログ）
                     t0 = time.perf_counter()
                     q_before = self._q.qsize()
                     self._q.put((kept_paths, np_batch, sizes))
-                    wait_put_ms = (time.perf_counter() - t0) * 1000.0
+                    wait_put_seconds = time.perf_counter() - t0
+                    wait_put_ms = wait_put_seconds * 1000.0
+                    with self._metrics_lock:
+                        self._metrics.batches += 1
+                        self._metrics.prepare_seconds += prepare_seconds
+                        self._metrics.queue_put_wait_seconds += wait_put_seconds
                     if wait_put_ms > 1.0 or q_before == self._depth - 1:
                         logger.info("LOAD put wait=%.1fms q=%d/%d", wait_put_ms, q_before, self._depth)
 
@@ -298,3 +374,6 @@ class PrefetchLoaderPrepared:
         if self._th.is_alive():
             self._th.join(timeout=2.0)
         logger.info("PrefetchLoaderPrepared: stop")
+
+
+__all__ = ["LoaderMetrics", "PrefetchLoaderPrepared"]

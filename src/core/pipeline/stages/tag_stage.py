@@ -282,6 +282,12 @@ class TagStage:
                 emitter.emit(IndexProgress(phase=IndexPhase.TAG, done=processed_tags, total=len(tag_records)))
 
         finally:
+            metrics_snapshot = getattr(loader, "metrics_snapshot", None)
+            if callable(metrics_snapshot):
+                try:
+                    logger.info("Tag loader metrics: %s", metrics_snapshot().as_dict())
+                except Exception:
+                    logger.debug("Failed to collect tag loader metrics", exc_info=True)
             try:
                 loader.close()
             except Exception:

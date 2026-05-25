@@ -48,6 +48,30 @@ def test_generate_thumbnail_recovers_corrupt_cache_file(tmp_path: Path) -> None:
         assert thumb.size == (32, 32)
 
 
+def test_generate_thumbnail_verifies_unchanged_cache_once(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    source = tmp_path / "source.png"
+    cache_dir = tmp_path / "cache"
+    _create_sample_image(source)
+    image_io._READABLE_THUMB_CACHE.clear()
+
+    thumbnail_path = generate_thumbnail(source, cache_dir, size=(32, 32))
+    assert thumbnail_path is not None
+
+    real_open = image_io.Image.open
+    opened: list[Path] = []
+
+    def tracking_open(path, *args, **kwargs):
+        opened.append(Path(path))
+        return real_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(image_io.Image, "open", tracking_open)
+
+    assert generate_thumbnail(source, cache_dir, size=(32, 32)) == thumbnail_path
+    assert generate_thumbnail(source, cache_dir, size=(32, 32)) == thumbnail_path
+
+    assert opened == []
+
+
 def test_safe_load_image_handles_corrupted_file(tmp_path: Path) -> None:
     broken = tmp_path / "broken.jpg"
     broken.write_bytes(b"not-an-image")

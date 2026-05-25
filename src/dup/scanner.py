@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import math
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Mapping, Sequence
@@ -234,7 +235,22 @@ class DuplicateScanner:
         bucket_sizes = [len(v) for v in buckets.values()]
         ge2 = sum(1 for s in bucket_sizes if s >= 2)
         max_bucket = max(bucket_sizes) if bucket_sizes else 0
-        logger.info("dup: buckets=%d (>=2:%d) max_bucket=%d", len(buckets), ge2, max_bucket)
+        max_pairs = (max_bucket * (max_bucket - 1)) // 2
+        bucket_pair_cap = _safe_positive_int(os.environ.get("KE_DUP_BUCKET_PAIR_CAP"))
+        logger.info(
+            "dup: buckets=%d (>=2:%d) max_bucket=%d max_bucket_pairs=%d pair_cap=%s",
+            len(buckets),
+            ge2,
+            max_bucket,
+            max_pairs,
+            bucket_pair_cap,
+        )
+        if bucket_pair_cap is not None and max_pairs > bucket_pair_cap:
+            logger.warning(
+                "dup: largest bucket has %d pair(s), above KE_DUP_BUCKET_PAIR_CAP=%d; large buckets will be skipped",
+                max_pairs,
+                bucket_pair_cap,
+            )
         if ge2 == 0:
             logger.warning("dup: no bucket has 2+ items -> edges=0")
             return []
@@ -245,6 +261,8 @@ class DuplicateScanner:
 
         for indices in buckets.values():
             if len(indices) < 2:
+                continue
+            if bucket_pair_cap is not None and (len(indices) * (len(indices) - 1)) // 2 > bucket_pair_cap:
                 continue
             for i in range(len(indices) - 1):
                 a = candidates[indices[i]]
@@ -395,6 +413,18 @@ class DuplicateScanner:
             )
 
         return min(entries, key=key).file.file_id
+
+
+def _safe_positive_int(value: str | None) -> int | None:
+    """Parse a positive integer environment value."""
+
+    if value is None or not value.strip():
+        return None
+    try:
+        parsed = int(value)
+    except ValueError:
+        return None
+    return parsed if parsed > 0 else None
 
 
 __all__ = [

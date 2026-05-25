@@ -55,27 +55,41 @@ def rebuild_fts_offline(
             conn.commit()
             return 0
 
-        # 全ファイルを走査（必要なら ids を事前に取ってバッファリング）
-        cursor = conn.execute("SELECT id FROM files WHERE is_present = 1")
         buf: list[tuple[int, str]] = []
-        for (fid,) in cursor.fetchall():
-            rows = conn.execute(
-                """
-                SELECT t.name, ft.score
-                FROM file_tags AS ft
+        cursor = conn.execute(
+            """
+            WITH ranked AS (
+                SELECT
+                    f.id AS file_id,
+                    TRIM(t.name) AS tag_name,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY f.id
+                        ORDER BY ft.score DESC, t.name ASC
+                    ) AS rank
+                FROM files AS f
+                JOIN file_tags AS ft ON ft.file_id = f.id
                 JOIN tags AS t ON t.id = ft.tag_id
-                WHERE ft.file_id = ?
-                ORDER BY ft.score DESC
-                LIMIT ?
-                """,
-                (fid, normalized_topk),
-            ).fetchall()
-            if not rows:
-                continue
-            text = " ".join([str(r["name"]).strip() for r in rows if str(r["name"]).strip()])
+                WHERE f.is_present = 1
+                  AND TRIM(t.name) <> ''
+            ),
+            clipped AS (
+                SELECT file_id, tag_name, rank
+                FROM ranked
+                WHERE rank <= ?
+                ORDER BY file_id ASC, rank ASC
+            )
+            SELECT file_id, GROUP_CONCAT(tag_name, ' ') AS text
+            FROM clipped
+            GROUP BY file_id
+            ORDER BY file_id ASC
+            """,
+            (normalized_topk,),
+        )
+        for row in cursor:
+            text = str(row["text"] or "").strip()
             if not text:
                 continue
-            buf.append((int(fid), text))
+            buf.append((int(row["file_id"]), text))
             if len(buf) >= normalized_batch:
                 fts_replace_rows(conn, buf)  # 既存のユーティリティでまとめて投入
                 total += len(buf)

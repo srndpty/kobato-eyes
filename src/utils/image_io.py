@@ -33,6 +33,8 @@ DEFAULT_THUMBNAIL_SIZE = (320, 320)
 _THUMB_CACHE_LIMIT = 256
 _THUMB_CACHE: "OrderedDict[str, QPixmap]" = OrderedDict()
 _THUMB_CACHE_LOCK = Lock()
+_READABLE_THUMB_CACHE: dict[Path, tuple[int, int]] = {}
+_READABLE_THUMB_CACHE_LOCK = Lock()
 
 
 def _thumb_cache_dir() -> Path:
@@ -180,13 +182,25 @@ def _thumbnail_cache_key(path: Path, size: tuple[int, int], mode: str | None, fm
 def _cached_thumbnail_is_readable(path: Path) -> bool:
     """Return whether an existing thumbnail cache entry can still be decoded."""
     try:
+        stat_result = path.stat()
+    except OSError:
+        return False
+    cache_key = (int(stat_result.st_size), int(stat_result.st_mtime_ns))
+    with _READABLE_THUMB_CACHE_LOCK:
+        if _READABLE_THUMB_CACHE.get(path) == cache_key:
+            return True
+    try:
         with Image.open(path) as image:
             image.verify()
     except (UnidentifiedImageError, OSError):
         logger.warning("Discarding corrupt thumbnail cache entry: %s", path)
         with suppress(OSError):
             path.unlink()
+        with _READABLE_THUMB_CACHE_LOCK:
+            _READABLE_THUMB_CACHE.pop(path, None)
         return False
+    with _READABLE_THUMB_CACHE_LOCK:
+        _READABLE_THUMB_CACHE[path] = cache_key
     return True
 
 
@@ -222,6 +236,13 @@ def generate_thumbnail(
         thumbnail = resize_image(image, size)
         thumbnail.save(tmp_path, format=format)
         os.replace(tmp_path, thumb_path)
+        try:
+            stat_result = thumb_path.stat()
+        except OSError:
+            pass
+        else:
+            with _READABLE_THUMB_CACHE_LOCK:
+                _READABLE_THUMB_CACHE[thumb_path] = (int(stat_result.st_size), int(stat_result.st_mtime_ns))
         return thumb_path
     except OSError as exc:
         logger.warning("Failed to write thumbnail cache for %s: %s", source, exc)

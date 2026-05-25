@@ -14,6 +14,17 @@ from utils.hash import compute_sha256
 logger = logging.getLogger(__name__)
 
 
+def _row_get(row: object, key: str, default: object = None) -> object:
+    """Return a row field from sqlite rows or row-like test doubles."""
+
+    try:
+        if hasattr(row, "keys") and key in row.keys():  # type: ignore[attr-defined]
+            return row[key]  # type: ignore[index]
+        return getattr(row, key, default)
+    except (AttributeError, KeyError, TypeError):
+        return default
+
+
 class ScanStageDeps(Protocol):
     """Protocol for database operations required by :class:`ScanStage`."""
 
@@ -37,6 +48,9 @@ class ScanStageDeps(Protocol):
 
     def has_tag(self, conn: "DBConnection", file_id: int) -> bool:
         """Return ``True`` if at least one tag exists for the file."""
+
+    def fetch_files_by_path(self, conn: "DBConnection", paths: list[str]) -> dict[str, object]:
+        """Fetch file rows keyed by path, including tag-existence metadata."""
 
 
 class DBConnection(Protocol):
@@ -89,6 +103,26 @@ class _DefaultScanStageDeps:
         cursor = conn.execute("SELECT 1 FROM file_tags WHERE file_id = ? LIMIT 1", (file_id,))
         return cursor.fetchone() is not None
 
+    def fetch_files_by_path(self, conn: DBConnection, paths: list[str]) -> dict[str, object]:
+        """Fetch existing file rows for many paths in chunks."""
+
+        out: dict[str, object] = {}
+        for start in range(0, len(paths), 500):
+            chunk = paths[start : start + 500]
+            if not chunk:
+                continue
+            placeholders = ", ".join("?" for _ in chunk)
+            rows = conn.execute(
+                "SELECT f.*, "
+                "EXISTS(SELECT 1 FROM file_tags ft WHERE ft.file_id = f.id LIMIT 1) AS _tag_exists "
+                "FROM files f "
+                f"WHERE f.path IN ({placeholders})",
+                chunk,
+            ).fetchall()
+            for row in rows:
+                out[str(row["path"])] = row
+        return out
+
 
 @dataclass(slots=True)
 class ScanStageResult:
@@ -124,7 +158,13 @@ class ScanStage:
         records: list[_FileRecord] = []
         try:
             logger.info("Scanning %d root(s) for eligible images", len(roots))
-            for image_path in iter_images(roots, excluded=excluded_paths, extensions=allow_exts):
+            image_paths = list(iter_images(roots, excluded=excluded_paths, extensions=allow_exts))
+            existing_by_path: dict[str, object] = {}
+            fetch_many = getattr(self._deps, "fetch_files_by_path", None)
+            if callable(fetch_many):
+                existing_by_path = fetch_many(conn, [str(path) for path in image_paths])
+
+            for image_path in image_paths:
                 if emitter.cancelled(ctx.is_cancelled):
                     break
 
@@ -143,11 +183,14 @@ class ScanStage:
                     logger.warning("Failed to stat %s: %s", image_path, exc)
                     continue
 
-                row = self._deps.fetch_file(conn, str(image_path))
+                path_str = str(image_path)
+                row = existing_by_path.get(path_str)
+                if row is None and not existing_by_path:
+                    row = self._deps.fetch_file(conn, path_str)
                 is_new = row is None
                 if row is not None:
-                    size_changed = int(row["size"] or 0) != stat.st_size
-                    mtime_changed = float(row["mtime"] or 0.0) != stat.st_mtime
+                    size_changed = int(_row_get(row, "size", 0) or 0) != stat.st_size
+                    mtime_changed = float(_row_get(row, "mtime", 0.0) or 0.0) != stat.st_mtime
                 else:
                     size_changed = True
                     mtime_changed = True
@@ -158,24 +201,28 @@ class ScanStage:
                     except OSError as exc:
                         logger.warning("Failed to hash %s: %s", image_path, exc)
                         continue
-                    changed = True if is_new else (str(row["sha256"] or "") != sha)  # type: ignore[index]
+                    changed = True if is_new else (str(_row_get(row, "sha256", "") or "") != sha)
                 else:
-                    sha = str(row["sha256"] or "")  # type: ignore[index]
+                    sha = str(_row_get(row, "sha256", "") or "")
                     changed = False
 
-                indexed_at = None if changed else (row["indexed_at"] if row else None)
+                indexed_at = None if changed else (_row_get(row, "indexed_at") if row else None)
                 file_id = self._deps.upsert_file(
                     conn,
-                    path=str(image_path),
+                    path=path_str,
                     size=stat.st_size,
                     mtime=stat.st_mtime,
                     sha256=sha,
                     indexed_at=indexed_at,
                 )
 
-                tag_exists = self._deps.has_tag(conn, file_id)
-                stored_sig = str(row["tagger_sig"]) if (row is not None and row["tagger_sig"] is not None) else None
-                stored_tagged_at = row["last_tagged_at"] if row is not None else None
+                tag_exists_value = _row_get(row, "_tag_exists") if row is not None else None
+                tag_exists = (
+                    bool(tag_exists_value) if tag_exists_value is not None else self._deps.has_tag(conn, file_id)
+                )
+                tagger_sig_value = _row_get(row, "tagger_sig") if row is not None else None
+                stored_sig = str(tagger_sig_value) if tagger_sig_value is not None else None
+                stored_tagged_at = _row_get(row, "last_tagged_at") if row is not None else None
                 last_tagged_at = float(stored_tagged_at) if stored_tagged_at is not None else None
                 needs_tagging = is_new or changed or (not tag_exists) or (stored_sig != ctx.tagger_sig)
 

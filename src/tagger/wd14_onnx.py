@@ -422,6 +422,13 @@ class WD14Tagger(ITagger):
         batch_size = logits.shape[0]
         total_ms = (0.0) + ort_ms + post_ms
         imgs_per_second = batch_size / (total_ms / 1000.0) if total_ms > 0.0 else float("inf")
+        self._last_infer_metrics = {
+            "batch_size": int(batch_size),
+            "ort_ms": float(ort_ms),
+            "post_ms": float(post_ms),
+            "total_ms": float(total_ms),
+            "imgs_per_second": float(imgs_per_second),
+        }
 
         self._last_batch_end = perf_counter()
         self._batch_seq += 1
@@ -874,6 +881,14 @@ class WD14Tagger(ITagger):
 
         batch_size = len(image_list)
         imgs_per_second = batch_size / (total_ms / 1000.0) if total_ms > 0.0 else float("inf")
+        self._last_infer_metrics = {
+            "batch_size": int(batch_size),
+            "preprocess_ms": float(preprocess_ms),
+            "ort_ms": float(ort_ms),
+            "post_ms": float(post_ms),
+            "total_ms": float(total_ms),
+            "imgs_per_second": float(imgs_per_second),
+        }
         logger.info(
             "WD14 batch=%d preprocess=%.2fms ort=%.2fms post=%.2fms total=%.2fms imgs/s=%.2f",
             batch_size,
