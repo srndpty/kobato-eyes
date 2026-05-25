@@ -20,7 +20,8 @@ from tagger.labels_util import load_selected_tags
 from tagger.onnx_backend import (
     CPU_PROVIDER,
     CUDA_PROVIDER,
-    cuda_provider_options,
+    TENSORRT_PROVIDER,
+    onnx_provider_options,
     plan_provider_attempts,
     resolve_existing_file,
     validate_label_count,
@@ -138,9 +139,9 @@ class WD14Tagger(ITagger):
         last_error: Exception | None = None
         session = None
         chosen_providers: list[str] | None = None
-        for provider_list in provider_attempts:
+        for attempt_index, provider_list in enumerate(provider_attempts):
             try:
-                provider_options = cuda_provider_options(provider_list)
+                provider_options = onnx_provider_options(provider_list)
                 session_kwargs: dict[str, object] = {
                     "sess_options": session_options,
                     "providers": provider_list,
@@ -152,9 +153,29 @@ class WD14Tagger(ITagger):
                     **session_kwargs,
                 )
             except Exception as exc:  # pragma: no cover - handled in tests via mocks
-                # Failure policy: automatic CUDA attempt may fall back to CPU;
-                # explicit provider/session failures propagate to the caller.
+                # Failure policy: automatic CUDA may fall back to CPU. The
+                # explicit TensorRT mode is a chained TensorRT -> CUDA -> CPU
+                # preference, so each failed attempt retries the next provider.
                 last_error = exc
+                if TENSORRT_PROVIDER in provider_list:
+                    logger.warning(
+                        "WD14: %s unavailable, falling back to %s",
+                        TENSORRT_PROVIDER,
+                        _CUDA_PROVIDER,
+                    )
+                    continue
+                if (
+                    requested_providers is not None
+                    and TENSORRT_PROVIDER in requested_providers
+                    and provider_list == [_CUDA_PROVIDER]
+                    and attempt_index < len(provider_attempts) - 1
+                ):
+                    logger.warning(
+                        "WD14: %s unavailable, falling back to %s",
+                        _CUDA_PROVIDER,
+                        _CPU_PROVIDER,
+                    )
+                    continue
                 if requested_providers is None and provider_list == [_CUDA_PROVIDER]:
                     logger.warning(
                         "WD14: %s unavailable, falling back to %s",
@@ -422,6 +443,13 @@ class WD14Tagger(ITagger):
         batch_size = logits.shape[0]
         total_ms = (0.0) + ort_ms + post_ms
         imgs_per_second = batch_size / (total_ms / 1000.0) if total_ms > 0.0 else float("inf")
+        self._last_infer_metrics = {
+            "batch_size": int(batch_size),
+            "ort_ms": float(ort_ms),
+            "post_ms": float(post_ms),
+            "total_ms": float(total_ms),
+            "imgs_per_second": float(imgs_per_second),
+        }
 
         self._last_batch_end = perf_counter()
         self._batch_seq += 1
@@ -874,6 +902,14 @@ class WD14Tagger(ITagger):
 
         batch_size = len(image_list)
         imgs_per_second = batch_size / (total_ms / 1000.0) if total_ms > 0.0 else float("inf")
+        self._last_infer_metrics = {
+            "batch_size": int(batch_size),
+            "preprocess_ms": float(preprocess_ms),
+            "ort_ms": float(ort_ms),
+            "post_ms": float(post_ms),
+            "total_ms": float(total_ms),
+            "imgs_per_second": float(imgs_per_second),
+        }
         logger.info(
             "WD14 batch=%d preprocess=%.2fms ort=%.2fms post=%.2fms total=%.2fms imgs/s=%.2f",
             batch_size,

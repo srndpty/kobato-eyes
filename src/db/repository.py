@@ -367,20 +367,29 @@ def search_files(
     execute_params = (*base_params, *where_params, limit, offset)
     cursor = conn.execute(query, execute_params)
     rows = cursor.fetchall()
+    file_ids = [int(row["id"]) for row in rows]
+    tags_by_file: dict[int, list[tuple[str, float, int | None]]] = {file_id: [] for file_id in file_ids}
+    if file_ids:
+        for block in (file_ids[i : i + 900] for i in range(0, len(file_ids), 900)):
+            placeholders = ", ".join("?" for _ in block)
+            tag_rows = conn.execute(
+                "SELECT ft.file_id, t.name, t.category, ft.score "
+                "FROM file_tags ft "
+                "JOIN tags t ON t.id = ft.tag_id "
+                f"WHERE ft.file_id IN ({placeholders}) "
+                "ORDER BY ft.file_id ASC, ft.score DESC",
+                tuple(block),
+            ).fetchall()
+            for tag_row in tag_rows:
+                file_id = int(tag_row["file_id"])
+                score = float(tag_row["score"])
+                category = _normalise_category(tag_row["category"])
+                tags_by_file.setdefault(file_id, []).append((tag_row["name"], score, category))
 
     results: list[dict[str, object]] = []
     for row in rows:
-        file_id = row["id"]
-        tag_rows = conn.execute(
-            "SELECT t.name, t.category, ft.score FROM file_tags ft JOIN tags t ON t.id = ft.tag_id "
-            "WHERE ft.file_id = ? ORDER BY ft.score DESC",
-            (file_id,),
-        ).fetchall()
-        tags: list[tuple[str, float, int | None]] = []
-        for tag_row in tag_rows:
-            score = float(tag_row["score"])
-            category = _normalise_category(tag_row["category"])
-            tags.append((tag_row["name"], score, category))
+        file_id = int(row["id"])
+        tags = tags_by_file.get(file_id, [])
         results.append(
             {
                 "id": file_id,

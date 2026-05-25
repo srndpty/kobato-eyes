@@ -49,15 +49,7 @@ def test_prefetch_loader_pil_fallback_and_cleanup(tmp_path, monkeypatch) -> None
     def _failing_imdecode(data: np.ndarray, flags: int):  # type: ignore[override]
         return None
 
-    class _FailingTJ:
-        def decode_header(self, buf: bytes) -> tuple[int, int, int, int]:
-            return (64, 48, 0, 0)
-
-        def decode(self, buf: bytes, *, pixel_format=None, scaling_factor=None):  # type: ignore[override]
-            raise RuntimeError("decode failed")
-
     monkeypatch.setattr(loaders.cv2, "imdecode", _failing_imdecode)
-    monkeypatch.setattr(loaders, "_TJ", _FailingTJ())
 
     loader = loaders.PrefetchLoaderPrepared(
         [str(png_path), str(jpeg_path)],
@@ -143,6 +135,13 @@ def test_prefetch_loader_skips_corrupt_images_without_failing_batch(tmp_path: Pa
     assert paths == [str(good_path)]
     assert np_batch.shape[0] == 1
     assert sizes == [(64, 48)]
+    metrics = loader.metrics_snapshot()
+    assert metrics.submitted == 2
+    assert metrics.loaded == 1
+    assert metrics.failed == 1
+    assert metrics.batches == 1
+    assert metrics.route_counts["failed"] == 1
+    assert metrics.prepare_seconds >= 0.0
 
 
 def test_prefetch_loader_falls_back_when_alpha_blend_runs_out_of_memory(

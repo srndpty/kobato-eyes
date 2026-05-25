@@ -15,7 +15,7 @@ from utils.paths import get_db_path as _get_db_path
 
 logger = logging.getLogger(__name__)
 
-TaggerDevice = Literal["auto", "cuda", "cpu"]
+TaggerDevice = Literal["auto", "tensorrt", "cuda", "cpu"]
 
 
 class _ResetDatabase(Protocol):
@@ -35,7 +35,7 @@ def _normalise_tagger_device(value: str | None) -> TaggerDevice:
     """Return a supported tagger execution-device setting."""
 
     normalized = str(value or "auto").strip().lower()
-    if normalized in {"auto", "cuda", "cpu"}:
+    if normalized in {"auto", "tensorrt", "cuda", "cpu"}:
         return cast(TaggerDevice, normalized)
     return "auto"
 

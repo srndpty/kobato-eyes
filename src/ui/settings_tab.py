@@ -206,6 +206,7 @@ class SettingsTab(QWidget):
 
         self._device_combo = QComboBox(self)
         self._device_combo.addItem("Auto", "auto")
+        self._device_combo.addItem("TensorRT then CUDA", "tensorrt")
         self._device_combo.addItem("CUDA only", "cuda")
         self._device_combo.addItem("CPU only", "cpu")
 

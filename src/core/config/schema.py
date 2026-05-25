@@ -62,7 +62,7 @@ class TaggerSettings(BaseModel):
     model_path: str | None = None
     tags_csv: str | None = None
     provider: Literal["auto", "wd14", "pixai"] = "auto"
-    device: Literal["auto", "cuda", "cpu"] = "auto"
+    device: Literal["auto", "tensorrt", "cuda", "cpu"] = "auto"
     thresholds: dict[str, float] = Field(default_factory=_default_thresholds)
 
     @field_validator("model_path", "tags_csv", mode="before")
@@ -84,7 +84,7 @@ class TaggerSettings(BaseModel):
     @classmethod
     def _validate_device(cls, value: Any) -> str:
         normalized = str(value or "auto").strip().lower()
-        if normalized in {"auto", "cuda", "cpu"}:
+        if normalized in {"auto", "tensorrt", "cuda", "cpu"}:
             return normalized
         return "auto"
 
