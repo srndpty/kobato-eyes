@@ -172,15 +172,6 @@ class ScanStage:
                     if emitter.cancelled(ctx.is_cancelled):
                         break
 
-                    stats["scanned"] += 1
-                    emitter.emit(
-                        IndexProgress(
-                            phase=IndexPhase.SCAN,
-                            done=stats["scanned"],
-                            total=-1,
-                            message=str(image_path),
-                        )
-                    )
                     try:
                         stat = image_path.stat()
                     except OSError as exc:
@@ -253,6 +244,18 @@ class ScanStage:
                     pending_paths = []
                     break
                 pending_paths.append(image_path)
+                stats["scanned"] += 1
+                emitter.emit(
+                    IndexProgress(
+                        phase=IndexPhase.SCAN,
+                        done=stats["scanned"],
+                        total=-1,
+                        message=str(image_path),
+                    )
+                )
+                if emitter.cancelled(ctx.is_cancelled):
+                    pending_paths = []
+                    break
                 if len(pending_paths) >= _SCAN_FETCH_CHUNK_SIZE:
                     _process_paths(pending_paths)
                     pending_paths = []

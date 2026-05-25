@@ -110,7 +110,6 @@ def test_scan_stage_keeps_iteration_streaming_for_cancellation(monkeypatch, tmp_
         nonlocal cancelled
         cancelled = True
 
-    monkeypatch.setattr(scan_stage, "_SCAN_FETCH_CHUNK_SIZE", 1)
     monkeypatch.setattr(scan_stage, "iter_images", _iter_images)
 
     ctx = PipelineContext(
