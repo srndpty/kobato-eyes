@@ -14,6 +14,7 @@ def test_defaults_are_applied() -> None:
 
     assert settings.hamming_threshold == 10
     assert settings.batch_size == 8
+    assert settings.prefetch_depth == 4
     assert settings.ssim_threshold == pytest.approx(0.92)
     assert settings.allow_exts == {
         ".jpg",

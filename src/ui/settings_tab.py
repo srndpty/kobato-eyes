@@ -193,30 +193,44 @@ class SettingsTab(QWidget):
         self._inspection_timer.setSingleShot(True)
         self._inspection_timer.setInterval(350)
         self._inspection_timer.timeout.connect(self._start_model_inspection)
+        self._loading_settings = False
+        self._dirty = False
 
         self._roots_edit = QPlainTextEdit(self)
         self._roots_edit.setPlaceholderText("One path per line")
+        self._roots_edit.textChanged.connect(self._mark_dirty)
         self._excluded_edit = QPlainTextEdit(self)
         self._excluded_edit.setPlaceholderText("Paths to ignore")
+        self._excluded_edit.textChanged.connect(self._mark_dirty)
 
         self._batch_size_spin = QSpinBox(self)
         self._batch_size_spin.setRange(1, 512)
         self._batch_size_spin.setValue(8)
         self._batch_size_spin.setToolTip("Number of images processed per inference batch")
+        self._batch_size_spin.valueChanged.connect(self._mark_dirty)
+
+        self._prefetch_depth_spin = QSpinBox(self)
+        self._prefetch_depth_spin.setRange(1, 64)
+        self._prefetch_depth_spin.setValue(4)
+        self._prefetch_depth_spin.setToolTip("Number of batches prepared ahead of the tagger")
+        self._prefetch_depth_spin.valueChanged.connect(self._mark_dirty)
 
         self._device_combo = QComboBox(self)
         self._device_combo.addItem("Auto", "auto")
         self._device_combo.addItem("TensorRT then CUDA", "tensorrt")
         self._device_combo.addItem("CUDA only", "cuda")
         self._device_combo.addItem("CPU only", "cpu")
+        self._device_combo.currentIndexChanged.connect(self._mark_dirty)
 
         self._tagger_combo = QComboBox(self)
         self._tagger_combo.addItems(["dummy", "wd14-onnx"])
         self._tagger_combo.currentTextChanged.connect(self._update_tagger_inputs)
+        self._tagger_combo.currentTextChanged.connect(self._mark_dirty)
 
         self._tagger_model_edit = QLineEdit(self)
         self._tagger_model_edit.setPlaceholderText("Path to WD14 ONNX model")
         self._tagger_model_edit.textChanged.connect(self._schedule_model_inspection)
+        self._tagger_model_edit.textChanged.connect(self._mark_dirty)
         self._tagger_model_button = QPushButton("Browse...", self)
         self._tagger_model_button.clicked.connect(self._on_browse_model)
         tagger_model_row = QWidget(self)
@@ -231,8 +245,9 @@ class SettingsTab(QWidget):
         self._model_info_edit.setMaximumHeight(180)
         self._model_info_edit.setPlaceholderText("Model diagnostics will appear here.")
 
-        apply_button = QPushButton("Apply", self)
-        apply_button.clicked.connect(self._emit_settings)
+        self._status_label = QLabel("Settings are up to date.", self)
+        self._apply_button = QPushButton("Apply", self)
+        self._apply_button.clicked.connect(self._emit_settings)
 
         self._reset_button = QPushButton("Reset database...", self)
         self._reset_button.clicked.connect(self._on_reset_database)
@@ -241,6 +256,7 @@ class SettingsTab(QWidget):
         form.addRow(QLabel("Roots"), self._roots_edit)
         form.addRow(QLabel("Excluded"), self._excluded_edit)
         form.addRow("Batch size", self._batch_size_spin)
+        form.addRow("Prefetch depth", self._prefetch_depth_spin)
         form.addRow("Device", self._device_combo)
         form.addRow("Tagger", self._tagger_combo)
         form.addRow("Model path", tagger_model_row)
@@ -252,8 +268,9 @@ class SettingsTab(QWidget):
         layout.addWidget(self._model_info_edit)
         buttons = QHBoxLayout()
         buttons.addWidget(self._reset_button)
+        buttons.addWidget(self._status_label)
         buttons.addStretch()
-        buttons.addWidget(apply_button)
+        buttons.addWidget(self._apply_button)
         layout.addLayout(buttons)
 
         self._current_settings: PipelineSettings = self._view_model.current_settings
@@ -262,23 +279,35 @@ class SettingsTab(QWidget):
         self.load_settings(self._current_settings)
 
     def load_settings(self, settings: PipelineSettings) -> None:
-        self._current_settings = settings
-        self._view_model.set_current_settings(settings)
-        self._roots_edit.setPlainText("\n".join(str(path) for path in settings.roots))
-        self._excluded_edit.setPlainText("\n".join(str(path) for path in settings.excluded))
-        self._batch_size_spin.setValue(settings.batch_size)
-        device_index = self._device_combo.findData(settings.tagger.device)
-        self._device_combo.setCurrentIndex(device_index if device_index >= 0 else 0)
+        self._loading_settings = True
+        try:
+            self._current_settings = settings
+            self._view_model.set_current_settings(settings)
+            self._roots_edit.setPlainText("\n".join(str(path) for path in settings.roots))
+            self._excluded_edit.setPlainText("\n".join(str(path) for path in settings.excluded))
+            self._batch_size_spin.setValue(settings.batch_size)
+            self._prefetch_depth_spin.setValue(settings.prefetch_depth)
+            device_index = self._device_combo.findData(settings.tagger.device)
+            self._device_combo.setCurrentIndex(device_index if device_index >= 0 else 0)
 
-        tagger_index = self._tagger_combo.findText(settings.tagger.name)
-        if tagger_index >= 0:
-            self._tagger_combo.setCurrentIndex(tagger_index)
-        else:
-            self._tagger_combo.setCurrentText(settings.tagger.name)
-        self._tagger_model_edit.setText(settings.tagger.model_path or "")
-        self._update_tagger_inputs(self._tagger_combo.currentText())
+            tagger_index = self._tagger_combo.findText(settings.tagger.name)
+            if tagger_index >= 0:
+                self._tagger_combo.setCurrentIndex(tagger_index)
+            else:
+                self._tagger_combo.setCurrentText(settings.tagger.name)
+            self._tagger_model_edit.setText(settings.tagger.model_path or "")
+            self._update_tagger_inputs(self._tagger_combo.currentText())
+        finally:
+            self._loading_settings = False
+            self._set_dirty(False)
 
     def _emit_settings(self) -> None:
+        settings = self._collect_settings()
+        self._current_settings = settings
+        self._view_model.apply_settings(settings)
+        self._set_dirty(False)
+
+    def _collect_settings(self) -> PipelineSettings:
         current = self._current_settings or PipelineSettings()
         previous_tagger = current.tagger if current else TaggerSettings()
         tagger_name = self._tagger_combo.currentText()
@@ -289,17 +318,37 @@ class SettingsTab(QWidget):
             roots=[Path(line) for line in self._lines(self._roots_edit) if line],
             excluded=[Path(line) for line in self._lines(self._excluded_edit) if line],
             batch_size=self._batch_size_spin.value(),
+            prefetch_depth=self._prefetch_depth_spin.value(),
             tagger_name=tagger_name,
             model_path=model_path,
             device=str(self._device_combo.currentData() or "auto"),
             previous_tagger=previous_tagger,
+            previous_settings=current,
         )
-        self._current_settings = settings
-        self._view_model.apply_settings(settings)
+        return settings
 
     @staticmethod
     def _lines(edit: QPlainTextEdit) -> Iterable[str]:
         return (line.strip() for line in edit.toPlainText().splitlines())
+
+    def _mark_dirty(self, *_args: object) -> None:
+        if not self._loading_settings:
+            self._set_dirty(True)
+
+    def _set_dirty(self, dirty: bool) -> None:
+        self._dirty = dirty
+        self._apply_button.setEnabled(dirty)
+        if dirty:
+            self._status_label.setText("Unapplied changes will be saved when leaving this tab.")
+        else:
+            self._status_label.setText("Settings are up to date.")
+
+    def hideEvent(self, event) -> None:  # noqa: N802 - Qt override
+        """Auto-apply pending edits when the user leaves the Settings tab."""
+
+        if self._dirty:
+            self._emit_settings()
+        super().hideEvent(event)
 
     def _update_tagger_inputs(self, name: str) -> None:
         is_wd14 = name.lower() == "wd14-onnx"
