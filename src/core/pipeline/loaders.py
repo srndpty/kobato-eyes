@@ -34,7 +34,10 @@ _DECODE_FALLBACK_ERRORS: tuple[type[BaseException], ...] = (OSError, ValueError,
 _TARGET = 448
 _LOAD_ROUTE_KEYS = ("input_cache", "opencv", "pil_fallback", "failed")
 _SLOW_DECODE_LIMIT = 20
-_INPUT_CACHE_VERSION = "rgb-resize-v1"
+# Bump this whenever decode, alpha-composite, resize, orientation, or RGB
+# conversion semantics change. Cache entries store prepared RGB tagger inputs,
+# not raw source image bytes.
+_INPUT_CACHE_VERSION = "opencv-pil-white-bg-rgb-resize-448-v1"
 LoadRoute = Literal["input_cache", "opencv", "pil_fallback", "failed"]
 
 
@@ -203,8 +206,17 @@ class PrefetchLoaderPrepared:
         env_cache_dir = os.getenv("KE_TAGGER_INPUT_CACHE_DIR")
         if cache_enabled:
             cache_root = Path(env_cache_dir or input_cache_dir or (get_cache_dir() / "tagger-input"))
-            self._input_cache_dir: Path | None = cache_root.expanduser()
-            self._input_cache_dir.mkdir(parents=True, exist_ok=True)
+            cache_dir = cache_root.expanduser()
+            try:
+                cache_dir.mkdir(parents=True, exist_ok=True)
+                self._input_cache_dir: Path | None = cache_dir
+            except OSError as exc:
+                logger.warning(
+                    "Disabling tagger input cache; failed to create cache dir %s: %s",
+                    cache_dir,
+                    exc,
+                )
+                self._input_cache_dir = None
         else:
             self._input_cache_dir = None
         default_cache_exts = input_cache_extensions or {".png"}
@@ -219,16 +231,21 @@ class PrefetchLoaderPrepared:
         self._th = threading.Thread(target=self._producer, name="PL-Feeder", daemon=True)
         self._th.start()
         logger.info(
-            "PrefetchLoaderPrepared: start (B=%d, depth=%d, io_workers=%d, input_cache=%s)",
+            "PrefetchLoaderPrepared: start (B=%d, depth=%d, io_workers=%d, input_cache=%s, input_cache_exts=%s)",
             self._B,
             self._depth,
             self._io_workers,
             bool(self._input_cache_dir),
+            sorted(self._input_cache_extensions),
         )
 
     # --- 1 枚ロード（OpenCV 優先、失敗したら PIL） ---
     def _record_route(self, route: LoadRoute, seconds: float, *, ok: bool, path: str, byte_count: int) -> None:
-        """Record one decode attempt in the loader metrics."""
+        """Record one loader input in the metrics.
+
+        ``submitted`` counts files routed through the loader, including input
+        cache hits. It is not an actual decoder submission count.
+        """
 
         ext = _path_extension(path)
         slow_entry = {
@@ -317,6 +334,10 @@ class PrefetchLoaderPrepared:
             with np.load(cache_path, allow_pickle=False) as cached:
                 rgb = cached["rgb"]
                 size_arr = cached["size"]
+                version_arr = cached["version"]
+            version = str(version_arr.item() if hasattr(version_arr, "item") else version_arr)
+            if version != _INPUT_CACHE_VERSION:
+                raise ValueError("stale cache version")
             if rgb.dtype != np.uint8 or rgb.ndim != 3 or rgb.shape[2] != 3:
                 raise ValueError("invalid cached RGB array")
             if max(rgb.shape[:2]) > _TARGET:
@@ -337,16 +358,27 @@ class PrefetchLoaderPrepared:
     def _write_input_cache(self, cache_path: Path, rgb: np.ndarray, size: tuple[int, int]) -> None:
         """Write a cached tagger input image atomically."""
 
+        tmp_path: Path | None = None
         try:
             cache_path.parent.mkdir(parents=True, exist_ok=True)
             tmp_path = cache_path.with_name(f"{cache_path.name}.{threading.get_ident()}.tmp")
             with tmp_path.open("wb") as handle:
-                np.savez(handle, rgb=np.asarray(rgb, dtype=np.uint8), size=np.asarray(size, dtype=np.int32))
+                np.savez(
+                    handle,
+                    rgb=np.asarray(rgb, dtype=np.uint8),
+                    size=np.asarray(size, dtype=np.int32),
+                    version=np.asarray(_INPUT_CACHE_VERSION),
+                )
             os.replace(tmp_path, cache_path)
             self._record_input_cache("write")
-        except OSError as exc:
+        except Exception as exc:
             logger.debug("Failed to write tagger input cache %s: %s", cache_path, exc)
             self._record_input_cache("error")
+            if tmp_path is not None:
+                try:
+                    tmp_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
 
     def _load_one(self, p: str) -> tuple[str, np.ndarray | None, tuple[int, int] | None, LoadRoute]:
         route: LoadRoute = "opencv"

@@ -20,6 +20,7 @@ param(
     [string[]] $Extension = @(),
     [switch] $InputCache,
     [string] $InputCacheDir = "",
+    [Alias("InputCacheExtensions")]
     [string[]] $InputCacheExtension = @(),
     [string] $Output = "tmp\bench\tagger-bench.json"
 )

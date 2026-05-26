@@ -226,7 +226,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--extension", dest="extensions", action="append")
     parser.add_argument("--input-cache", action="store_true")
     parser.add_argument("--input-cache-dir", type=Path)
-    parser.add_argument("--input-cache-extension", dest="input_cache_extensions", action="append")
+    parser.add_argument(
+        "--input-cache-extension", "--input-cache-extensions", dest="input_cache_extensions", action="append"
+    )
     parser.add_argument("--exclude", action="append", default=[])
     parser.add_argument("--output", type=Path, default=PROJECT_ROOT / "tmp" / "bench" / "tagger-bench.json")
     return parser.parse_args(argv)
