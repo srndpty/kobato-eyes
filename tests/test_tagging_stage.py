@@ -141,7 +141,7 @@ def test_tagging_stage_with_fakes():
     emitter = ProgressEmitter(lambda p: prog.append((p.phase, p.done, p.total)))
     fake_db = FakeDBWriter()
     deps = TaggingDeps(
-        loader_factory=lambda paths, tagger, B, depth, io: FakeLoader(paths),
+        loader_factory=lambda paths, tagger, B, depth, io, *args: FakeLoader(paths),
         dbwriter_factory=lambda **kw: fake_db,
         quiesce=NoopQuiesce(),
     )
@@ -163,7 +163,7 @@ def test_tagging_stage_env_invalid_values(monkeypatch):
 
     captured: dict[str, int | None] = {}
 
-    def _loader_factory(paths, tagger, batch_size, prefetch_batches, io_workers):
+    def _loader_factory(paths, tagger, batch_size, prefetch_batches, io_workers, *args):
         captured["prefetch_batches"] = prefetch_batches
         captured["io_workers"] = io_workers
         return FakeLoader(paths)

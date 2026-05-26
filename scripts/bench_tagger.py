@@ -74,6 +74,13 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
         os.environ["KE_IO_WORKERS"] = str(args.io_workers)
     if args.topk_cap is not None:
         os.environ["KE_PIXAI_TOPK_CAP"] = str(args.topk_cap)
+    input_cache_enabled = bool(args.input_cache or args.input_cache_dir)
+    if input_cache_enabled:
+        os.environ["KE_TAGGER_INPUT_CACHE"] = "1"
+    if args.input_cache_dir is not None:
+        os.environ["KE_TAGGER_INPUT_CACHE_DIR"] = str(args.input_cache_dir)
+    if args.input_cache_extensions:
+        os.environ["KE_TAGGER_INPUT_CACHE_EXTENSIONS"] = ",".join(args.input_cache_extensions)
 
     resolve_started = time.perf_counter()
     settings = _build_settings(args)
@@ -96,6 +103,8 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
         batch_size=int(args.batch_size),
         prefetch_batches=int(args.prefetch_depth or 4),
         io_workers=args.io_workers,
+        input_cache_dir=args.input_cache_dir if input_cache_enabled else None,
+        input_cache_extensions=set(args.input_cache_extensions or [".png"]),
     )
     try:
         loader_iter = iter(loader)
@@ -168,6 +177,9 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
         "warmup_batches": int(args.warmup_batches),
         "prefetch_batches": int(args.prefetch_depth or 4),
         "io_workers": args.io_workers,
+        "input_cache": input_cache_enabled,
+        "input_cache_dir": str(args.input_cache_dir.expanduser()) if args.input_cache_dir else None,
+        "input_cache_extensions": list(args.input_cache_extensions or [".png"]),
         "providers_available": get_available_providers(),
         "providers_session": provider_session,
         "total_seconds": total_seconds,
@@ -212,6 +224,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--io-workers", type=int)
     parser.add_argument("--topk-cap", type=int)
     parser.add_argument("--extension", dest="extensions", action="append")
+    parser.add_argument("--input-cache", action="store_true")
+    parser.add_argument("--input-cache-dir", type=Path)
+    parser.add_argument(
+        "--input-cache-extension", "--input-cache-extensions", dest="input_cache_extensions", action="append"
+    )
     parser.add_argument("--exclude", action="append", default=[])
     parser.add_argument("--output", type=Path, default=PROJECT_ROOT / "tmp" / "bench" / "tagger-bench.json")
     return parser.parse_args(argv)

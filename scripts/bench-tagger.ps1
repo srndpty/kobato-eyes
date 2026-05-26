@@ -17,6 +17,11 @@ param(
     [int] $PrefetchDepth = 4,
     [int] $IoWorkers = 0,
     [int] $TopkCap = 0,
+    [string[]] $Extension = @(),
+    [switch] $InputCache,
+    [string] $InputCacheDir = "",
+    [Alias("InputCacheExtensions")]
+    [string[]] $InputCacheExtension = @(),
     [string] $Output = "tmp\bench\tagger-bench.json"
 )
 
@@ -58,6 +63,22 @@ if ($IoWorkers -gt 0) {
 }
 if ($TopkCap -gt 0) {
     $argsList += @("--topk-cap", "$TopkCap")
+}
+foreach ($ext in $Extension) {
+    if ($ext) {
+        $argsList += @("--extension", $ext)
+    }
+}
+if ($InputCache) {
+    $argsList += "--input-cache"
+}
+if ($InputCacheDir) {
+    $argsList += @("--input-cache-dir", $InputCacheDir)
+}
+foreach ($ext in $InputCacheExtension) {
+    if ($ext) {
+        $argsList += @("--input-cache-extension", $ext)
+    }
 }
 
 & $python @argsList

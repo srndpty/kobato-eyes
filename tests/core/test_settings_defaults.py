@@ -15,6 +15,7 @@ def test_defaults_are_applied() -> None:
     assert settings.hamming_threshold == 10
     assert settings.batch_size == 8
     assert settings.prefetch_depth == 4
+    assert settings.tagger_input_cache is False
     assert settings.ssim_threshold == pytest.approx(0.92)
     assert settings.allow_exts == {
         ".jpg",
@@ -41,6 +42,11 @@ def test_explicit_empty_excluded_disables_default_exclusions() -> None:
 def test_prefetch_depth_is_clamped() -> None:
     assert PipelineSettings(prefetch_depth=0).prefetch_depth == 1
     assert PipelineSettings(prefetch_depth=999).prefetch_depth == 64
+
+
+def test_tagger_input_cache_bool_coercion() -> None:
+    assert PipelineSettings(tagger_input_cache="yes").tagger_input_cache is True
+    assert PipelineSettings(tagger_input_cache="0").tagger_input_cache is False
 
 
 def test_legacy_mapping_fills_missing_fields(tmp_path: Path) -> None:

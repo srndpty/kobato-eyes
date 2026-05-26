@@ -99,6 +99,7 @@ def test_settings_tab_auto_applies_pending_changes_on_hide(qapp: QApplication) -
     try:
         widget._batch_size_spin.setValue(12)  # type: ignore[attr-defined]
         widget._prefetch_depth_spin.setValue(7)  # type: ignore[attr-defined]
+        widget._tagger_input_cache_check.setChecked(True)  # type: ignore[attr-defined]
 
         widget.hideEvent(QHideEvent())  # type: ignore[attr-defined]
         qapp.processEvents()
@@ -106,6 +107,7 @@ def test_settings_tab_auto_applies_pending_changes_on_hide(qapp: QApplication) -
         assert applied
         assert applied[-1].batch_size == 12
         assert applied[-1].prefetch_depth == 7
+        assert applied[-1].tagger_input_cache is True
         assert widget._dirty is False  # type: ignore[attr-defined]
     finally:
         widget.deleteLater()
