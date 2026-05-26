@@ -16,6 +16,7 @@ from core.db_writer import DBItem
 from core.pipeline.types import IndexPhase, IndexProgress, PipelineContext, ProgressEmitter, _FileRecord
 from tagger.base import TagCategory
 from utils.env import safe_int
+from utils.paths import get_cache_dir
 
 from ..resolver import _resolve_tagger
 
@@ -40,6 +41,8 @@ class LoaderFactory(Protocol):
         batch_size: int,
         prefetch_batches: int,
         io_workers: int | None,
+        input_cache_dir: str | Path | None = None,
+        input_cache_extensions: set[str] | None = None,
     ) -> LoaderIterable: ...
 
 
@@ -53,6 +56,8 @@ class TagStageDeps(Protocol):
         batch_size: int,
         prefetch_batches: int,
         io_workers: int | None,
+        input_cache_dir: str | Path | None = None,
+        input_cache_extensions: set[str] | None = None,
     ) -> LoaderIterable: ...
 
 
@@ -66,6 +71,8 @@ class _DefaultTagStageDeps:
         batch_size: int,
         prefetch_batches: int,
         io_workers: int | None,
+        input_cache_dir: str | Path | None = None,
+        input_cache_extensions: set[str] | None = None,
     ) -> LoaderIterable:
         from ..loaders import PrefetchLoaderPrepared
 
@@ -75,6 +82,8 @@ class _DefaultTagStageDeps:
             batch_size=batch_size,
             prefetch_batches=prefetch_batches,
             io_workers=io_workers,
+            input_cache_dir=input_cache_dir,
+            input_cache_extensions=input_cache_extensions,
         )
 
 
@@ -168,8 +177,22 @@ class TagStage:
             min_value=1,
         )
         io_workers = safe_int(os.environ.get("KE_IO_WORKERS"), 12, min_value=1)
+        cache_env = os.environ.get("KE_TAGGER_INPUT_CACHE")
+        if cache_env is None:
+            input_cache_enabled = bool(getattr(settings, "tagger_input_cache", False))
+        else:
+            input_cache_enabled = cache_env.strip().lower() in {"1", "true", "yes", "on", "enabled"}
+        input_cache_dir = get_cache_dir() / "tagger-input" if input_cache_enabled else None
 
-        loader = self._deps.loader_factory(tag_paths, tagger, current_batch, prefetch_depth, io_workers)
+        loader = self._deps.loader_factory(
+            tag_paths,
+            tagger,
+            current_batch,
+            prefetch_depth,
+            io_workers,
+            input_cache_dir,
+            {".png"},
+        )
 
         supports_prepared = callable(getattr(tagger, "infer_batch_prepared", None))
 

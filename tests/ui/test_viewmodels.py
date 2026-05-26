@@ -311,6 +311,7 @@ def test_settings_view_model_build_and_reset(tmp_path: Path) -> None:
         excluded=[Path("/ignore")],
         batch_size=16,
         prefetch_depth=6,
+        tagger_input_cache=True,
         tagger_name="wd14-onnx",
         model_path="/model.onnx",
         device="cpu",
@@ -323,6 +324,7 @@ def test_settings_view_model_build_and_reset(tmp_path: Path) -> None:
     assert emitted[-1].tagger.device == "cpu"
     assert emitted[-1].batch_size == 16
     assert emitted[-1].prefetch_depth == 6
+    assert emitted[-1].tagger_input_cache is True
 
     message = view_model.check_tagger_environment()
     assert "ONNX providers" in message

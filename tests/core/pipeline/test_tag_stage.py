@@ -157,6 +157,7 @@ class _RetryingDeps(TagStageDeps):
     def __init__(self) -> None:
         self.batch_sizes: list[int] = []
         self.prefetch_batches: list[int] = []
+        self.input_cache_dirs: list[Path | None] = []
 
     def loader_factory(
         self,
@@ -165,9 +166,12 @@ class _RetryingDeps(TagStageDeps):
         batch_size: int,
         prefetch_batches: int,
         io_workers: int | None,
+        input_cache_dir=None,
+        input_cache_extensions=None,
     ) -> _RetryingLoader:
         self.batch_sizes.append(batch_size)
         self.prefetch_batches.append(prefetch_batches)
+        self.input_cache_dirs.append(input_cache_dir)
         return _RetryingLoader(list(paths))
 
 
@@ -208,14 +212,31 @@ class _DummyTaggerSettings:
 
 
 class _DummySettings:
-    def __init__(self, *, batch_size: int = 8, prefetch_depth: int = 4) -> None:
+    def __init__(
+        self,
+        *,
+        batch_size: int = 8,
+        prefetch_depth: int = 4,
+        tagger_input_cache: bool = False,
+    ) -> None:
         self.tagger = _DummyTaggerSettings()
         self.batch_size = batch_size
         self.prefetch_depth = prefetch_depth
+        self.tagger_input_cache = tagger_input_cache
 
 
-def _make_context(tagger: ITagger, *, batch_size: int = 8, prefetch_depth: int = 4) -> PipelineContext:
-    settings = _DummySettings(batch_size=batch_size, prefetch_depth=prefetch_depth)
+def _make_context(
+    tagger: ITagger,
+    *,
+    batch_size: int = 8,
+    prefetch_depth: int = 4,
+    tagger_input_cache: bool = False,
+) -> PipelineContext:
+    settings = _DummySettings(
+        batch_size=batch_size,
+        prefetch_depth=prefetch_depth,
+        tagger_input_cache=tagger_input_cache,
+    )
     return PipelineContext(
         db_path=":memory:",
         settings=settings,
@@ -380,3 +401,52 @@ def test_tag_stage_invalid_prefetch_depth_env_falls_back_to_settings(monkeypatch
     stage.run(ctx, ProgressEmitter(lambda _p: None), records)
 
     assert deps.prefetch_batches == [9]
+
+
+def test_tag_stage_passes_configured_input_cache_dir(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(_tag_stage_module, "get_cache_dir", lambda: tmp_path / "cache")
+    records = [
+        _FileRecord(
+            file_id=1,
+            path=Path("single.png"),
+            size=1,
+            mtime=time.time(),
+            sha="sha1",
+            is_new=True,
+            changed=False,
+            tag_exists=False,
+            needs_tagging=True,
+        )
+    ]
+    deps = _RetryingDeps()
+    stage = TagStage(deps=deps)
+    ctx = _make_context(_FlakyTagger(), tagger_input_cache=True)
+
+    stage.run(ctx, ProgressEmitter(lambda _p: None), records)
+
+    assert deps.input_cache_dirs == [tmp_path / "cache" / "tagger-input"]
+
+
+def test_tag_stage_input_cache_env_overrides_settings(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("KE_TAGGER_INPUT_CACHE", "0")
+    monkeypatch.setattr(_tag_stage_module, "get_cache_dir", lambda: tmp_path / "cache")
+    records = [
+        _FileRecord(
+            file_id=1,
+            path=Path("single.png"),
+            size=1,
+            mtime=time.time(),
+            sha="sha1",
+            is_new=True,
+            changed=False,
+            tag_exists=False,
+            needs_tagging=True,
+        )
+    ]
+    deps = _RetryingDeps()
+    stage = TagStage(deps=deps)
+    ctx = _make_context(_FlakyTagger(), tagger_input_cache=True)
+
+    stage.run(ctx, ProgressEmitter(lambda _p: None), records)
+
+    assert deps.input_cache_dirs == [None]

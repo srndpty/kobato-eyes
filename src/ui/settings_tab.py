@@ -215,6 +215,12 @@ class SettingsTab(QWidget):
         self._prefetch_depth_spin.setToolTip("Number of batches prepared ahead of the tagger")
         self._prefetch_depth_spin.valueChanged.connect(self._mark_dirty)
 
+        self._tagger_input_cache_check = QCheckBox("Cache prepared PNG tagger inputs", self)
+        self._tagger_input_cache_check.setToolTip(
+            "Store resized PNG inputs in the app cache to speed up repeated tagging"
+        )
+        self._tagger_input_cache_check.stateChanged.connect(self._mark_dirty)
+
         self._device_combo = QComboBox(self)
         self._device_combo.addItem("Auto", "auto")
         self._device_combo.addItem("TensorRT then CUDA", "tensorrt")
@@ -257,6 +263,7 @@ class SettingsTab(QWidget):
         form.addRow(QLabel("Excluded"), self._excluded_edit)
         form.addRow("Batch size", self._batch_size_spin)
         form.addRow("Prefetch depth", self._prefetch_depth_spin)
+        form.addRow("Input cache", self._tagger_input_cache_check)
         form.addRow("Device", self._device_combo)
         form.addRow("Tagger", self._tagger_combo)
         form.addRow("Model path", tagger_model_row)
@@ -287,6 +294,7 @@ class SettingsTab(QWidget):
             self._excluded_edit.setPlainText("\n".join(str(path) for path in settings.excluded))
             self._batch_size_spin.setValue(settings.batch_size)
             self._prefetch_depth_spin.setValue(settings.prefetch_depth)
+            self._tagger_input_cache_check.setChecked(settings.tagger_input_cache)
             device_index = self._device_combo.findData(settings.tagger.device)
             self._device_combo.setCurrentIndex(device_index if device_index >= 0 else 0)
 
@@ -319,6 +327,7 @@ class SettingsTab(QWidget):
             excluded=[Path(line) for line in self._lines(self._excluded_edit) if line],
             batch_size=self._batch_size_spin.value(),
             prefetch_depth=self._prefetch_depth_spin.value(),
+            tagger_input_cache=self._tagger_input_cache_check.isChecked(),
             tagger_name=tagger_name,
             model_path=model_path,
             device=str(self._device_combo.currentData() or "auto"),

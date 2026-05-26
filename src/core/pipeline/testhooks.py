@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Callable, Iterable, List, Optional, Tuple
 
 import numpy as np
@@ -12,7 +13,8 @@ from .loaders import PrefetchLoaderPrepared
 
 # ---- Loader / DBWriter / Quiesce の注入ポイント ----
 LoaderFactory = Callable[
-    [List[str], object, int, int, Optional[int]], Iterable[Tuple[list[str], np.ndarray, list[tuple[int, int]]]]
+    [List[str], object, int, int, Optional[int], str | Path | None, set[str] | None],
+    Iterable[Tuple[list[str], np.ndarray, list[tuple[int, int]]]],
 ]
 DBWriterFactory = Callable[..., "IDBWriterLike"]
 
@@ -34,13 +36,23 @@ class _DefaultQuiesceCtrl(IQuiesceCtrl):
         end_quiesce()
 
 
-def default_loader_factory(paths: List[str], tagger, batch_size: int, prefetch_batches: int, io_workers: Optional[int]):
+def default_loader_factory(
+    paths: List[str],
+    tagger,
+    batch_size: int,
+    prefetch_batches: int,
+    io_workers: Optional[int],
+    input_cache_dir: str | Path | None = None,
+    input_cache_extensions: set[str] | None = None,
+):
     return PrefetchLoaderPrepared(
         paths,
         tagger=tagger,
         batch_size=batch_size,
         prefetch_batches=prefetch_batches,
         io_workers=io_workers,
+        input_cache_dir=input_cache_dir,
+        input_cache_extensions=input_cache_extensions,
     )
 
 

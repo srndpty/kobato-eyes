@@ -141,7 +141,85 @@ def test_prefetch_loader_skips_corrupt_images_without_failing_batch(tmp_path: Pa
     assert metrics.failed == 1
     assert metrics.batches == 1
     assert metrics.route_counts["failed"] == 1
+    assert metrics.extension_counts[".png"] == 2
+    assert metrics.extension_bytes[".png"] > 0
+    assert len(metrics.slow_decode_files) == 2
+    assert metrics.slow_decode_files[0]["seconds"] >= metrics.slow_decode_files[-1]["seconds"]
+    assert {entry["extension"] for entry in metrics.slow_decode_files} == {".png"}
     assert metrics.prepare_seconds >= 0.0
+
+
+def test_prefetch_loader_limits_slow_decode_file_metrics(tmp_path: Path) -> None:
+    paths = []
+    for index in range(25):
+        path = tmp_path / f"sample-{index}.jpg"
+        _create_jpeg(path)
+        paths.append(str(path))
+
+    loader = loaders.PrefetchLoaderPrepared(
+        paths,
+        tagger=_DummyTagger(),
+        batch_size=5,
+        prefetch_batches=1,
+        io_workers=1,
+    )
+
+    try:
+        list(loader)
+    finally:
+        loader.close()
+
+    metrics = loader.metrics_snapshot()
+    assert metrics.extension_counts[".jpg"] == 25
+    assert len(metrics.slow_decode_files) == 20
+    assert all(entry["extension"] == ".jpg" for entry in metrics.slow_decode_files)
+
+
+def test_prefetch_loader_uses_input_cache_for_png(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.delenv("KE_TAGGER_INPUT_CACHE", raising=False)
+    monkeypatch.delenv("KE_TAGGER_INPUT_CACHE_DIR", raising=False)
+    monkeypatch.delenv("KE_TAGGER_INPUT_CACHE_EXTENSIONS", raising=False)
+    png_path = tmp_path / "sample.png"
+    cache_dir = tmp_path / "input-cache"
+    _create_png(png_path)
+
+    first = loaders.PrefetchLoaderPrepared(
+        [str(png_path)],
+        tagger=_DummyTagger(),
+        batch_size=1,
+        prefetch_batches=1,
+        io_workers=1,
+        input_cache_dir=cache_dir,
+    )
+    try:
+        first_batches = list(first)
+    finally:
+        first.close()
+
+    assert len(first_batches) == 1
+    first_metrics = first.metrics_snapshot()
+    assert first_metrics.input_cache_misses == 1
+    assert first_metrics.input_cache_writes == 1
+    assert first_metrics.route_counts["opencv"] == 1
+
+    second = loaders.PrefetchLoaderPrepared(
+        [str(png_path)],
+        tagger=_DummyTagger(),
+        batch_size=1,
+        prefetch_batches=1,
+        io_workers=1,
+        input_cache_dir=cache_dir,
+    )
+    try:
+        second_batches = list(second)
+    finally:
+        second.close()
+
+    assert len(second_batches) == 1
+    second_metrics = second.metrics_snapshot()
+    assert second_metrics.input_cache_hits == 1
+    assert second_metrics.route_counts["input_cache"] == 1
+    assert second_batches[0][2] == [(64, 48)]
 
 
 def test_prefetch_loader_falls_back_when_alpha_blend_runs_out_of_memory(

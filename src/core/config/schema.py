@@ -112,6 +112,7 @@ class PipelineSettings(BaseModel):
     allow_exts: set[str] = Field(default_factory=_default_allow_exts)
     batch_size: int = 8
     prefetch_depth: int = 4
+    tagger_input_cache: bool = False
     hamming_threshold: int = 10
     ssim_threshold: float = 0.92
     tagger: TaggerSettings = Field(default_factory=TaggerSettings)
@@ -171,6 +172,16 @@ class PipelineSettings(BaseModel):
         except (TypeError, ValueError):
             return 4
         return min(64, max(1, prefetch_depth))
+
+    @field_validator("tagger_input_cache", mode="before")
+    @classmethod
+    def _coerce_tagger_input_cache(cls, value: Any) -> bool:
+        if isinstance(value, bool):
+            return value
+        if value is None:
+            return False
+        normalized = str(value).strip().lower()
+        return normalized in {"1", "true", "yes", "on", "enabled"}
 
     @field_validator("hamming_threshold", mode="before")
     @classmethod

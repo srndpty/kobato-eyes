@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
 import queue
@@ -9,6 +10,7 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Iterator, List, Literal, Tuple
 
 import cv2
@@ -16,6 +18,7 @@ import numpy as np
 from PIL import Image
 
 from utils.env import safe_int
+from utils.paths import get_cache_dir
 
 logger = logging.getLogger(__name__)
 
@@ -29,8 +32,10 @@ _DECODE_FALLBACK_ERRORS: tuple[type[BaseException], ...] = (OSError, ValueError,
 # separate optimization target rather than a dependency to ship by default.
 
 _TARGET = 448
-_LOAD_ROUTE_KEYS = ("opencv", "pil_fallback", "failed")
-LoadRoute = Literal["opencv", "pil_fallback", "failed"]
+_LOAD_ROUTE_KEYS = ("input_cache", "opencv", "pil_fallback", "failed")
+_SLOW_DECODE_LIMIT = 20
+_INPUT_CACHE_VERSION = "rgb-resize-v1"
+LoadRoute = Literal["input_cache", "opencv", "pil_fallback", "failed"]
 
 
 @dataclass(slots=True)
@@ -43,6 +48,14 @@ class LoaderMetrics:
     batches: int = 0
     route_counts: dict[str, int] = field(default_factory=lambda: {key: 0 for key in _LOAD_ROUTE_KEYS})
     route_seconds: dict[str, float] = field(default_factory=lambda: {key: 0.0 for key in _LOAD_ROUTE_KEYS})
+    extension_counts: dict[str, int] = field(default_factory=dict)
+    extension_seconds: dict[str, float] = field(default_factory=dict)
+    extension_bytes: dict[str, int] = field(default_factory=dict)
+    slow_decode_files: list[dict[str, object]] = field(default_factory=list)
+    input_cache_hits: int = 0
+    input_cache_misses: int = 0
+    input_cache_writes: int = 0
+    input_cache_errors: int = 0
     prepare_seconds: float = 0.0
     queue_put_wait_seconds: float = 0.0
 
@@ -56,9 +69,47 @@ class LoaderMetrics:
             "batches": self.batches,
             "route_counts": dict(self.route_counts),
             "route_seconds": dict(self.route_seconds),
+            "extension_counts": dict(self.extension_counts),
+            "extension_seconds": dict(self.extension_seconds),
+            "extension_bytes": dict(self.extension_bytes),
+            "slow_decode_files": list(self.slow_decode_files),
+            "input_cache_hits": self.input_cache_hits,
+            "input_cache_misses": self.input_cache_misses,
+            "input_cache_writes": self.input_cache_writes,
+            "input_cache_errors": self.input_cache_errors,
             "prepare_seconds": self.prepare_seconds,
             "queue_put_wait_seconds": self.queue_put_wait_seconds,
         }
+
+
+def _path_extension(path: str) -> str:
+    """Return a normalised file extension for diagnostics."""
+
+    suffix = os.path.splitext(path)[1].lower()
+    return suffix or "<none>"
+
+
+def _slow_decode_seconds(entry: dict[str, object]) -> float:
+    """Return the decode seconds field from a slow-file metrics entry."""
+
+    value = entry.get("seconds", 0.0)
+    return float(value) if isinstance(value, (int, float)) else 0.0
+
+
+def _parse_extensions(value: str | None, default: set[str]) -> set[str]:
+    """Parse a comma/semicolon-separated extension list."""
+
+    if value is None:
+        return set(default)
+    out: set[str] = set()
+    for part in value.replace(";", ",").split(","):
+        ext = part.strip().lower()
+        if not ext:
+            continue
+        if not ext.startswith("."):
+            ext = f".{ext}"
+        out.add(ext)
+    return out or set(default)
 
 
 def _alpha_to_white_bgr(bg_or_bgra: np.ndarray) -> np.ndarray:
@@ -131,6 +182,8 @@ class PrefetchLoaderPrepared:
         batch_size: int,
         prefetch_batches: int = 2,
         io_workers: int | None = None,
+        input_cache_dir: str | Path | None = None,
+        input_cache_extensions: set[str] | None = None,
     ) -> None:
         self._paths = list(paths)
         self._B = int(batch_size)
@@ -146,6 +199,19 @@ class PrefetchLoaderPrepared:
         self._producer_error: BaseException | None = None
         self._metrics = LoaderMetrics()
         self._metrics_lock = threading.Lock()
+        cache_enabled = os.getenv("KE_TAGGER_INPUT_CACHE", "0") == "1" or input_cache_dir is not None
+        env_cache_dir = os.getenv("KE_TAGGER_INPUT_CACHE_DIR")
+        if cache_enabled:
+            cache_root = Path(env_cache_dir or input_cache_dir or (get_cache_dir() / "tagger-input"))
+            self._input_cache_dir: Path | None = cache_root.expanduser()
+            self._input_cache_dir.mkdir(parents=True, exist_ok=True)
+        else:
+            self._input_cache_dir = None
+        default_cache_exts = input_cache_extensions or {".png"}
+        self._input_cache_extensions = _parse_extensions(
+            os.getenv("KE_TAGGER_INPUT_CACHE_EXTENSIONS"),
+            default_cache_exts,
+        )
 
         # (paths, np_batch, sizes) or None(sentinal)
         self._q: "queue.Queue[tuple[list[str], np.ndarray, list[tuple[int,int]]] | None]" = queue.Queue(self._depth)
@@ -153,13 +219,26 @@ class PrefetchLoaderPrepared:
         self._th = threading.Thread(target=self._producer, name="PL-Feeder", daemon=True)
         self._th.start()
         logger.info(
-            "PrefetchLoaderPrepared: start (B=%d, depth=%d, io_workers=%d)", self._B, self._depth, self._io_workers
+            "PrefetchLoaderPrepared: start (B=%d, depth=%d, io_workers=%d, input_cache=%s)",
+            self._B,
+            self._depth,
+            self._io_workers,
+            bool(self._input_cache_dir),
         )
 
     # --- 1 枚ロード（OpenCV 優先、失敗したら PIL） ---
-    def _record_route(self, route: LoadRoute, seconds: float, *, ok: bool) -> None:
+    def _record_route(self, route: LoadRoute, seconds: float, *, ok: bool, path: str, byte_count: int) -> None:
         """Record one decode attempt in the loader metrics."""
 
+        ext = _path_extension(path)
+        slow_entry = {
+            "path": path,
+            "extension": ext,
+            "route": route,
+            "seconds": float(seconds),
+            "bytes": int(byte_count),
+            "ok": bool(ok),
+        }
         with self._metrics_lock:
             self._metrics.submitted += 1
             if ok:
@@ -168,6 +247,12 @@ class PrefetchLoaderPrepared:
                 self._metrics.failed += 1
             self._metrics.route_counts[route] = self._metrics.route_counts.get(route, 0) + 1
             self._metrics.route_seconds[route] = self._metrics.route_seconds.get(route, 0.0) + float(seconds)
+            self._metrics.extension_counts[ext] = self._metrics.extension_counts.get(ext, 0) + 1
+            self._metrics.extension_seconds[ext] = self._metrics.extension_seconds.get(ext, 0.0) + float(seconds)
+            self._metrics.extension_bytes[ext] = self._metrics.extension_bytes.get(ext, 0) + int(byte_count)
+            self._metrics.slow_decode_files.append(slow_entry)
+            self._metrics.slow_decode_files.sort(key=_slow_decode_seconds, reverse=True)
+            del self._metrics.slow_decode_files[_SLOW_DECODE_LIMIT:]
 
     def metrics_snapshot(self) -> LoaderMetrics:
         """Return a stable copy of diagnostic loader metrics."""
@@ -180,15 +265,120 @@ class PrefetchLoaderPrepared:
                 batches=self._metrics.batches,
                 route_counts=dict(self._metrics.route_counts),
                 route_seconds=dict(self._metrics.route_seconds),
+                extension_counts=dict(self._metrics.extension_counts),
+                extension_seconds=dict(self._metrics.extension_seconds),
+                extension_bytes=dict(self._metrics.extension_bytes),
+                slow_decode_files=list(self._metrics.slow_decode_files),
+                input_cache_hits=self._metrics.input_cache_hits,
+                input_cache_misses=self._metrics.input_cache_misses,
+                input_cache_writes=self._metrics.input_cache_writes,
+                input_cache_errors=self._metrics.input_cache_errors,
                 prepare_seconds=self._metrics.prepare_seconds,
                 queue_put_wait_seconds=self._metrics.queue_put_wait_seconds,
             )
 
+    def _record_input_cache(self, event: Literal["hit", "miss", "write", "error"]) -> None:
+        """Record an input-cache event."""
+
+        with self._metrics_lock:
+            if event == "hit":
+                self._metrics.input_cache_hits += 1
+            elif event == "miss":
+                self._metrics.input_cache_misses += 1
+            elif event == "write":
+                self._metrics.input_cache_writes += 1
+            else:
+                self._metrics.input_cache_errors += 1
+
+    def _input_cache_path(self, path: str, stat_result: os.stat_result) -> Path | None:
+        """Return the cache file path for a source image, if caching applies."""
+
+        if self._input_cache_dir is None:
+            return None
+        ext = _path_extension(path)
+        if ext not in self._input_cache_extensions:
+            return None
+        key_material = "|".join(
+            (
+                os.path.normcase(os.path.abspath(path)),
+                str(int(stat_result.st_size)),
+                str(int(stat_result.st_mtime_ns)),
+                str(_TARGET),
+                _INPUT_CACHE_VERSION,
+            )
+        )
+        digest = hashlib.sha256(key_material.encode("utf-8", errors="surrogatepass")).hexdigest()
+        return self._input_cache_dir / digest[:2] / f"{digest}.npz"
+
+    def _load_input_cache(self, cache_path: Path) -> tuple[np.ndarray, tuple[int, int]] | None:
+        """Load a cached tagger input image, returning ``None`` on cache miss/corruption."""
+
+        try:
+            with np.load(cache_path, allow_pickle=False) as cached:
+                rgb = cached["rgb"]
+                size_arr = cached["size"]
+            if rgb.dtype != np.uint8 or rgb.ndim != 3 or rgb.shape[2] != 3:
+                raise ValueError("invalid cached RGB array")
+            if max(rgb.shape[:2]) > _TARGET:
+                raise ValueError("cached RGB array exceeds target side")
+            if size_arr.shape[0] != 2:
+                raise ValueError("invalid cached size")
+            size = (int(size_arr[0]), int(size_arr[1]))
+            return rgb, size
+        except Exception as exc:
+            logger.debug("Discarding invalid tagger input cache %s: %s", cache_path, exc)
+            self._record_input_cache("error")
+            try:
+                cache_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+            return None
+
+    def _write_input_cache(self, cache_path: Path, rgb: np.ndarray, size: tuple[int, int]) -> None:
+        """Write a cached tagger input image atomically."""
+
+        try:
+            cache_path.parent.mkdir(parents=True, exist_ok=True)
+            tmp_path = cache_path.with_name(f"{cache_path.name}.{threading.get_ident()}.tmp")
+            with tmp_path.open("wb") as handle:
+                np.savez(handle, rgb=np.asarray(rgb, dtype=np.uint8), size=np.asarray(size, dtype=np.int32))
+            os.replace(tmp_path, cache_path)
+            self._record_input_cache("write")
+        except OSError as exc:
+            logger.debug("Failed to write tagger input cache %s: %s", cache_path, exc)
+            self._record_input_cache("error")
+
     def _load_one(self, p: str) -> tuple[str, np.ndarray | None, tuple[int, int] | None, LoadRoute]:
         route: LoadRoute = "opencv"
         started = time.perf_counter()
+        byte_count = 0
+        cache_path: Path | None = None
         try:
+            try:
+                stat_result = os.stat(p)
+            except OSError:
+                stat_result = None
+            if stat_result is not None:
+                byte_count = int(stat_result.st_size)
+                cache_path = self._input_cache_path(p, stat_result)
+            if cache_path is not None and cache_path.exists():
+                cached = self._load_input_cache(cache_path)
+                if cached is not None:
+                    rgb, size = cached
+                    self._record_input_cache("hit")
+                    self._record_route(
+                        "input_cache",
+                        time.perf_counter() - started,
+                        ok=True,
+                        path=p,
+                        byte_count=byte_count,
+                    )
+                    return (p, rgb, size, "input_cache")
+            elif cache_path is not None:
+                self._record_input_cache("miss")
+
             data = np.fromfile(p, dtype=np.uint8)  # Windows で速い
+            byte_count = int(data.nbytes)
             im = cv2.imdecode(data, cv2.IMREAD_UNCHANGED)
             if im is None:
                 raise RuntimeError("cv2.imdecode failed")
@@ -196,7 +386,9 @@ class PrefetchLoaderPrepared:
             bgr = _alpha_to_white_then_resize_bgr(im)
             rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
             # 元サイズは im の生サイズ（アルファ有無に関係なし）
-            self._record_route(route, time.perf_counter() - started, ok=True)
+            if cache_path is not None:
+                self._write_input_cache(cache_path, rgb, (int(W0), int(H0)))
+            self._record_route(route, time.perf_counter() - started, ok=True, path=p, byte_count=byte_count)
             return (p, rgb, (int(W0), int(H0)), route)
 
         except _DECODE_FALLBACK_ERRORS as e:
@@ -204,6 +396,11 @@ class PrefetchLoaderPrepared:
             # --- フォールバック: PIL ---
             try:
                 route = "pil_fallback"
+                if byte_count <= 0:
+                    try:
+                        byte_count = int(os.path.getsize(p))
+                    except OSError:
+                        byte_count = 0
                 with Image.open(p) as pil_image:
                     w, h = pil_image.size
                     rgba = pil_image.convert("RGBA")
@@ -213,11 +410,13 @@ class PrefetchLoaderPrepared:
                     rgb_image.thumbnail((_TARGET, _TARGET), Image.Resampling.LANCZOS)
                     # bgr = np.asarray(rgb)[:, :, ::-1]  # RGB->BGR
                     rgb_arr = np.asarray(rgb_image)  # ここはそのままRGB
-                    self._record_route(route, time.perf_counter() - started, ok=True)
+                    if cache_path is not None:
+                        self._write_input_cache(cache_path, rgb_arr, (int(w), int(h)))
+                    self._record_route(route, time.perf_counter() - started, ok=True, path=p, byte_count=byte_count)
                     return (p, rgb_arr, (w, h), route)
             except _DECODE_FALLBACK_ERRORS as e2:
                 logger.warning("PrefetchLoaderPrepared: PIL fallback also failed %s: %s", p, e2)
-                self._record_route("failed", time.perf_counter() - started, ok=False)
+                self._record_route("failed", time.perf_counter() - started, ok=False, path=p, byte_count=byte_count)
                 return (p, None, None, "failed")
 
     def qsize(self) -> int:
