@@ -94,8 +94,7 @@ source = ["src"]
 [tool.coverage.report]
 show_missing = true
 skip_covered = true
-# TODO: Restore to 80 after split UI module coverage is raised.
-fail_under = 78
+fail_under = 80
 omit = [
     "src/tagger/pixai_onnx.py",
     "src/tagger/wd14_onnx.py",
