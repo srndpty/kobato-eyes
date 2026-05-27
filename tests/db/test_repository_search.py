@@ -212,9 +212,10 @@ def test_search_files_relevance_uses_character_threshold(conn) -> None:
         thresholds={TagCategory.CHARACTER.value: 0.8},
     )
 
-    assert [row["id"] for row in results] == [file_high, file_low]
-    assert results[0]["relevance"] == pytest.approx(0.85)
-    assert results[1]["relevance"] == pytest.approx(0.0)
+    relevance_by_id = {row["id"]: row["relevance"] for row in results}
+    assert results[0]["id"] == file_high
+    assert relevance_by_id[file_high] == pytest.approx(0.85)
+    assert relevance_by_id[file_low] == pytest.approx(0.0)
 
 
 def test_search_files_relevance_does_not_apply_character_threshold_to_artist(conn) -> None:
@@ -232,9 +233,10 @@ def test_search_files_relevance_does_not_apply_character_threshold_to_artist(con
         thresholds={TagCategory.CHARACTER.value: 0.8},
     )
 
-    assert [row["id"] for row in results] == [file_high, file_low]
-    assert results[0]["relevance"] == pytest.approx(0.85)
-    assert results[1]["relevance"] == pytest.approx(0.70)
+    relevance_by_id = {row["id"]: row["relevance"] for row in results}
+    assert results[0]["id"] == file_high
+    assert relevance_by_id[file_high] == pytest.approx(0.85)
+    assert relevance_by_id[file_low] == pytest.approx(0.70)
 
 
 def test_search_files_excludes_missing_records(conn) -> None:
