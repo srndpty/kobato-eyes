@@ -168,80 +168,6 @@ class TagsAutocompleteMixin:
         settings = self._view_model.load_settings()
         self.reload_autocomplete(settings)
 
-    def _open_connection(self) -> None:
-        if self._conn is not None:
-            return
-        self._conn = self._view_model.open_connection()
-
-    def _db_has_files(self) -> bool:
-        if self._conn is None:
-            return False
-        try:
-            row = self._conn.execute("SELECT 1 FROM files LIMIT 1").fetchone()
-        except Exception:
-            return False
-        return bool(row)
-
-    def _bootstrap_results_if_any(self) -> None:
-        if self._db_has_files():
-            self._debug_where.setText("WHERE: 1=1\nORDER: f.mtime DESC")
-            self._debug_params.setText("Params: []\nRelevance terms: []")
-            self._debug_group.setVisible(False)
-            self._show_placeholder(False)
-            self._current_query = "*"
-            self._current_where = "1=1"
-            self._current_params = []
-            self._highlight_terms = []
-            self._positive_terms = []
-            self._use_relevance = False
-            self._relevance_thresholds = {}
-            self._search_state.begin_query()
-            self._status_label.setText("Searching...")
-            self._search_overlay.show("Loading latest... (Esc to cancel)")
-            self._set_busy(True)
-            self._start_async_search(reset=True)
-        else:
-            self._show_placeholder(True)
-            self._status_label.setText("No results yet. Click 'Index now' to scan your library.")
-
-    def _close_connection(self) -> None:
-        if self._conn is None:
-            return
-        try:
-            self._conn.close()
-        finally:
-            self._conn = None
-
-    def prepare_for_database_reset(self) -> None:
-        self._cancel_active_search()
-        self._close_connection()
-
-    def handle_database_reset(self) -> None:
-        self._open_connection()
-        self._db_path = self._resolve_db_path()
-        self._results_cache.clear()
-        self._table_model.removeRows(0, self._table_model.rowCount())
-        self._grid_model.removeRows(0, self._grid_model.rowCount())
-        self._offset = 0
-        self._current_query = ""
-        self._current_where = ""
-        self._current_params = []
-        self._pending_thumbs.clear()
-        self._status_label.setText("Database reset. Run indexing to populate results.")
-        self._show_placeholder(True)
-        self.reload_autocomplete(self._view_model.load_settings())
-
-    def restore_connection(self) -> None:
-        self._open_connection()
-        self._db_path = self._resolve_db_path()
-        self._update_control_states()
-
-    def is_indexing_active(self) -> bool:
-        return bool(self._indexing_active)
-
-    def start_indexing_now(self) -> None:
-        self._on_index_now()
-
     def _on_query_text_edited(self, text: str) -> None:
         self._pending_completion_text = text
         if not self._completion_candidates:
@@ -303,7 +229,7 @@ class TagsAutocompleteMixin:
         start, end = self._current_completion_range
         # インデックスがベース文字列からはみ出す場合の保険
         if start > len(base_text) or end > len(base_text):
-            token, start, end = replace_completion_token.extract_completion_token(base_text, len(base_text))
+            token, start, end = extract_completion_token(base_text, len(base_text))
 
         new_text, cursor = replace_completion_token(base_text, start, end, completion_text)
         logger.debug(f"base_text:{base_text}, new_text:{new_text}, cursor:{cursor}")

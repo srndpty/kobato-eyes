@@ -512,6 +512,16 @@ class TagsResultsMixin:
         self._table_view.viewport().update()
         self._grid_view.viewport().update()
 
+    def _on_table_toggled(self, checked: bool) -> None:
+        if checked:
+            self._stack.setCurrentWidget(self._table_view)
+            self._grid_button.setChecked(False)
+
+    def _on_grid_toggled(self, checked: bool) -> None:
+        if checked:
+            self._stack.setCurrentWidget(self._grid_view)
+            self._table_button.setChecked(False)
+
     def _update_control_states(self) -> None:
         availability = compute_tags_control_availability(
             TagsActivityState(

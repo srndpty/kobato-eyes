@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import shutil
+import sqlite3
 import subprocess
 import sys
 from pathlib import Path
@@ -14,6 +15,7 @@ from PyQt6.QtWidgets import QMessageBox
 
 from core.jobs import CallableJob, JobPriority
 from ui.index_lifecycle import connection_retry_action
+from ui.tag_stats import TagStatsDialog
 from ui.tags_workers import _unique_destination
 
 
@@ -194,6 +196,16 @@ class TagsDatabaseMixin:
 
     def start_indexing_now(self) -> None:
         self._on_index_now()
+
+    def _open_stats(self) -> None:
+        db_path = self._db_path if self._db_path is not None else self._view_model.db_path
+
+        def _conn_factory() -> sqlite3.Connection:
+            return self._view_model.open_connection(db_path)
+
+        dialog = TagStatsDialog(_conn_factory, parent=self, async_load=True)
+        dialog.setModal(True)
+        dialog.exec()
 
     def _restore_connection_with_retry(self, attempts: int = 20, delay_ms: int = 150) -> None:
         try:

@@ -112,9 +112,7 @@ omit = [
     "src/ui/tags_db.py",
     "src/ui/tags_indexing.py",
     "src/ui/tags_results.py",
-    "src/ui/tags_search.py",
     "src/ui/tags_tab.py",
-    "src/ui/tags_workers.py",
     "src/ui/widgets/spinner_overlay.py",
 ]
 

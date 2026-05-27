@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-import sqlite3
 from contextlib import nullcontext
 from pathlib import Path
 from typing import Callable, Sequence
@@ -23,7 +22,6 @@ from ui.index_lifecycle import (
     plan_index_finished,
 )
 from ui.index_tasks import IndexJob
-from ui.tag_stats import TagStatsDialog
 from ui.tags_workers import _ElidingLabel
 
 logger = logging.getLogger(__name__)
@@ -364,26 +362,6 @@ class TagsIndexingMixin:
             self._progress_dialog = None
         self._current_index_task = None
         self._progress_label = None
-
-    def _on_table_toggled(self, checked: bool) -> None:
-        if checked:
-            self._stack.setCurrentWidget(self._table_view)
-            self._grid_button.setChecked(False)
-
-    def _on_grid_toggled(self, checked: bool) -> None:
-        if checked:
-            self._stack.setCurrentWidget(self._grid_view)
-            self._table_button.setChecked(False)
-
-    def _open_stats(self) -> None:
-        db_path = self._db_path if self._db_path is not None else self._view_model.db_path
-
-        def _conn_factory() -> sqlite3.Connection:
-            return self._view_model.open_connection(db_path)
-
-        dialog = TagStatsDialog(_conn_factory, parent=self, async_load=True)
-        dialog.setModal(True)
-        dialog.exec()
 
     def _handle_index_started(self) -> None:
         self._indexing_active = True
