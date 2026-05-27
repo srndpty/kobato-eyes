@@ -108,10 +108,8 @@ omit = [
     "src/ui/settings_tab.py",
     "src/ui/splash_screen.py",
     "src/ui/tag_stats.py",
-    "src/ui/tags_autocomplete.py",
     "src/ui/tags_db.py",
     "src/ui/tags_indexing.py",
-    "src/ui/tags_results.py",
     "src/ui/tags_tab.py",
     "src/ui/widgets/spinner_overlay.py",
 ]
