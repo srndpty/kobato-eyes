@@ -16,10 +16,10 @@ _PIXAI_EXPECTED_LABEL_COUNT = 13461
 
 _CATEGORY_LABELS: dict[int, str] = {
     0: "general",
-    1: "character",
+    1: "artist",
     2: "rating",
     3: "copyright",
-    4: "artist",
+    4: "character",
     5: "meta",
 }
 

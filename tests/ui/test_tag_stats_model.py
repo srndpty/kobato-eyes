@@ -11,7 +11,7 @@ from pathlib import Path
 from types import ModuleType
 
 import pytest
-from PyQt6.QtCore import QEvent, QModelIndex, Qt, QThread
+from PyQt6.QtCore import QEvent, QModelIndex, Qt
 from PyQt6.QtGui import QCloseEvent, QKeyEvent
 
 from ui.tag_stats import (
@@ -62,6 +62,32 @@ def _make_stats_db(path: Path) -> None:
             target.close()
     finally:
         source.close()
+
+
+class _FakeThread:
+    """Minimal thread double for close/wait bookkeeping tests."""
+
+    def __init__(self) -> None:
+        self.quit_calls = 0
+        self.wait_timeout: int | None = None
+        self._running = True
+
+    def isRunning(self) -> bool:  # noqa: N802 - Qt-style test double method
+        """Return whether the fake worker is still running."""
+
+        return self._running
+
+    def quit(self) -> None:
+        """Record a quit request and mark the fake as stopped."""
+
+        self.quit_calls += 1
+        self._running = False
+
+    def wait(self, timeout: int) -> bool:
+        """Record the wait timeout and report a clean stop."""
+
+        self.wait_timeout = timeout
+        return True
 
 
 def test_load_thresholds_merges_fallbacks_and_database_values() -> None:
@@ -285,14 +311,14 @@ def test_tag_stats_dialog_enter_with_no_selection_is_noop(qtbot) -> None:  # typ
 
 
 @pytest.mark.gui
-def test_tag_stats_dialog_waits_for_running_worker_thread(qtbot) -> None:  # type: ignore[no-untyped-def]
-    thread = QThread()
-    thread.start()
-    qtbot.waitUntil(thread.isRunning, timeout=1000)
+def test_tag_stats_dialog_waits_for_running_worker_thread() -> None:
+    thread = _FakeThread()
 
     assert TagStatsDialog._wait_for_thread(thread)
 
     assert not thread.isRunning()
+    assert thread.quit_calls == 1
+    assert thread.wait_timeout is not None
 
 
 @pytest.mark.gui
@@ -300,15 +326,13 @@ def test_tag_stats_dialog_waits_for_all_tracked_worker_threads(qtbot) -> None:  
     conn = _make_stats_conn()
     dialog = TagStatsDialog(lambda: conn)
     qtbot.addWidget(dialog)
-    threads = [QThread(), QThread()]
-    for thread in threads:
-        thread.start()
-    qtbot.waitUntil(lambda: all(thread.isRunning() for thread in threads), timeout=1000)
+    threads = [_FakeThread(), _FakeThread()]
     dialog._load_threads = list(threads)
 
     assert dialog._wait_for_worker_threads()
 
     assert all(not thread.isRunning() for thread in threads)
+    assert all(thread.quit_calls == 1 for thread in threads)
 
 
 @pytest.mark.gui

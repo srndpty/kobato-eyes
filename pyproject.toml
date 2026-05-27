@@ -56,6 +56,7 @@ package-dir = {"" = "src"}
 
 [tool.setuptools.package-data]
 "ui.assets.icons" = ["*.png", "*.ico"]
+"ui.assets.splash" = ["*.png"]
 
 [tool.setuptools.packages.find]
 where = ["src"]

@@ -8,8 +8,9 @@ from typing import Iterable, Iterator
 
 import pytest
 
-pytest.importorskip("PyQt6.QtCore", reason="PyQt6 core required", exc_type=ImportError)
-from PyQt6.QtCore import QCoreApplication, Qt
+pytest.importorskip("PyQt6.QtWidgets", reason="PyQt6 widgets required", exc_type=ImportError)
+from PyQt6.QtCore import Qt
+from PyQt6.QtWidgets import QApplication
 
 from db.schema import apply_schema
 from ui.tag_stats import _load_thresholds, _TagStatsModel
@@ -21,9 +22,9 @@ pytestmark = pytest.mark.gui
 def _headless_qapp() -> Iterable[None]:
     os.environ.setdefault("KOE_HEADLESS", "1")
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-    app = QCoreApplication.instance()
+    app = QApplication.instance()
     if app is None:
-        app = QCoreApplication([])
+        app = QApplication([])
     yield
 
 
