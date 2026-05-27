@@ -217,24 +217,24 @@ def test_search_files_relevance_uses_character_threshold(conn) -> None:
     assert results[1]["relevance"] == pytest.approx(0.0)
 
 
-def test_search_files_relevance_uses_legacy_character_threshold(conn) -> None:
-    file_low = _insert_file(conn, path="legacy-character-low.png", size=100, mtime=30.0, sha="legacy-character-low")
-    file_high = _insert_file(conn, path="legacy-character-high.png", size=100, mtime=20.0, sha="legacy-character-high")
-    _insert_tag(conn, "alice", 0.70, file_low, category=1)
-    _insert_tag(conn, "alice", 0.85, file_high, category=1)
+def test_search_files_relevance_does_not_apply_character_threshold_to_artist(conn) -> None:
+    file_low = _insert_file(conn, path="artist-low.png", size=100, mtime=30.0, sha="artist-low")
+    file_high = _insert_file(conn, path="artist-high.png", size=100, mtime=20.0, sha="artist-high")
+    _insert_tag(conn, "artist_name", 0.70, file_low, category=TagCategory.ARTIST.value)
+    _insert_tag(conn, "artist_name", 0.85, file_high, category=TagCategory.ARTIST.value)
 
     results = search_files(
         conn,
         "1=1",
         [],
         order="relevance",
-        tags_for_relevance=["alice"],
-        thresholds={1: 0.8},
+        tags_for_relevance=["artist_name"],
+        thresholds={TagCategory.CHARACTER.value: 0.8},
     )
 
     assert [row["id"] for row in results] == [file_high, file_low]
     assert results[0]["relevance"] == pytest.approx(0.85)
-    assert results[1]["relevance"] == pytest.approx(0.0)
+    assert results[1]["relevance"] == pytest.approx(0.70)
 
 
 def test_search_files_excludes_missing_records(conn) -> None:

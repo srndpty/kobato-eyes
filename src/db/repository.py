@@ -23,7 +23,6 @@ _ALLOWED_SEARCH_ORDER_BY = {
     "f.id ASC": "f.id ASC",
     "f.id DESC": "f.id DESC",
 }
-_LEGACY_CHARACTER_CATEGORY = 1
 
 # ----------------------------------------
 # files テーブル
@@ -275,7 +274,7 @@ def upsert_signatures(conn: sqlite3.Connection, *, file_id: int, phash_u64: int,
 
 def _resolve_relevance_thresholds(
     thresholds: Mapping[int, float] | None,
-) -> tuple[float, float, float, float, float]:
+) -> tuple[float, float, float, float]:
     values: dict[int, float] = dict(DEFAULT_CATEGORY_THRESHOLDS)
     if thresholds:
         for key, value in thresholds.items():
@@ -288,10 +287,9 @@ def _resolve_relevance_thresholds(
                 continue
     general = float(values.get(TagCategory.GENERAL.value, 0.0))
     character = float(values.get(TagCategory.CHARACTER.value, 0.0))
-    legacy_character = float(values.get(_LEGACY_CHARACTER_CATEGORY, character))
     copyright = float(values.get(TagCategory.COPYRIGHT.value, 0.0))
     default = float(values.get(-1, 0.0))
-    return general, legacy_character, character, copyright, default
+    return general, character, copyright, default
 
 
 def search_files(
@@ -317,9 +315,7 @@ def search_files(
     base_params: list[object] = []
     if use_relevance:
         placeholders = ", ".join("?" for _ in tag_terms)
-        general_thr, legacy_character_thr, character_thr, copyright_thr, default_thr = _resolve_relevance_thresholds(
-            thresholds
-        )
+        general_thr, character_thr, copyright_thr, default_thr = _resolve_relevance_thresholds(thresholds)
         cte = (
             "WITH q AS ("
             "SELECT ft.file_id AS fid, SUM(ft.score) AS rel "
@@ -328,7 +324,6 @@ def search_files(
             f"WHERE t.name IN ({placeholders}) "
             "AND ft.score >= CASE t.category "
             f"WHEN {TagCategory.GENERAL.value} THEN ? "
-            f"WHEN {_LEGACY_CHARACTER_CATEGORY} THEN ? "
             f"WHEN {TagCategory.CHARACTER.value} THEN ? "
             f"WHEN {TagCategory.COPYRIGHT.value} THEN ? "
             "ELSE ? "
@@ -337,7 +332,7 @@ def search_files(
         )
         query_prefix = cte
         base_params.extend(tag_terms)
-        base_params.extend([general_thr, legacy_character_thr, character_thr, copyright_thr, default_thr])
+        base_params.extend([general_thr, character_thr, copyright_thr, default_thr])
         relevance_select = "COALESCE(q.rel, 0.0) AS relevance"
         join_clause = "LEFT JOIN q ON q.fid = f.id "
     else:

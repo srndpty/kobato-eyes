@@ -95,16 +95,15 @@ def test_category_and_score_filters() -> None:
 def test_character_threshold_uses_character_category_id() -> None:
     fragment = translate_query("alice", file_alias=ALIAS, thresholds={TagCategory.CHARACTER.value: 0.8})
 
-    assert fragment.params == ["alice", 0.35, 0.8, 0.8, 0.25, 0.0]
-    assert "WHEN 1 THEN ?" in fragment.where
+    assert fragment.params == ["alice", 0.35, 0.8, 0.25, 0.0]
     assert f"WHEN {TagCategory.CHARACTER.value} THEN ?" in fragment.where
 
 
-def test_legacy_character_threshold_id_is_accepted_for_tag_filter() -> None:
-    fragment = translate_query("alice", file_alias=ALIAS, thresholds={1: 0.8})
+def test_artist_category_is_not_filtered_by_character_threshold() -> None:
+    fragment = translate_query("artist_tag", file_alias=ALIAS, thresholds={TagCategory.CHARACTER.value: 0.8})
 
-    assert fragment.params == ["alice", 0.35, 0.8, 0.25, 0.25, 0.0]
-    assert "WHEN 1 THEN ?" in fragment.where
+    assert "WHEN 1 THEN ?" not in fragment.where
+    assert fragment.params == ["artist_tag", 0.35, 0.8, 0.25, 0.0]
 
 
 def test_parentheses_override_precedence() -> None:

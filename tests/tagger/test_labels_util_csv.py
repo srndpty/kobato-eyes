@@ -15,18 +15,18 @@ def test_load_selected_tags_two_columns(tmp_path: Path) -> None:
     csv_path.write_text("123,1girl\ncharacter:kobato,character\n", encoding="utf-8")
     tags = load_selected_tags(csv_path)
     assert TagMeta(name="1girl", category=0, count=0) in tags
-    assert TagMeta(name="character:kobato", category=1, count=0) in tags
+    assert TagMeta(name="character:kobato", category=4, count=0) in tags
 
 
 def test_load_selected_tags_four_columns(tmp_path: Path) -> None:
     csv_path = tmp_path / "selected_tags_four.csv"
     csv_path.write_text(
-        "id,tag_id,name,category,count,ips\n1,1,solo,0,1000,[]\n2,2,artist:name,4,50,[]\n",
+        "id,tag_id,name,category,count,ips\n1,1,solo,0,1000,[]\n2,2,artist:name,1,50,[]\n",
         encoding="utf-8",
     )
     tags = load_selected_tags(csv_path)
     assert TagMeta(name="solo", category=0, count=1000) in tags
-    assert TagMeta(name="artist:name", category=4, count=50) in tags
+    assert TagMeta(name="artist:name", category=1, count=50) in tags
 
 
 def test_load_selected_tags_wd14_tag_id_name_category_count(tmp_path: Path) -> None:
