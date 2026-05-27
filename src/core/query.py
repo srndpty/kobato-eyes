@@ -302,6 +302,7 @@ _FALLBACK_THRESHOLDS: dict[int, float] = {
     TagCategory.COPYRIGHT.value: 0.25,
     -1: 0.0,
 }
+_LEGACY_CHARACTER_CATEGORY = 1
 
 
 def _normalize_thresholds(thresholds: Mapping[int, float]) -> dict[int, float]:
@@ -314,11 +315,13 @@ def _normalize_thresholds(thresholds: Mapping[int, float]) -> dict[int, float]:
     return mapping
 
 
-def _threshold_tuple(thresholds: Mapping[int, float]) -> tuple[float, float, float, float]:
+def _threshold_tuple(thresholds: Mapping[int, float]) -> tuple[float, float, float, float, float]:
     normalized = _normalize_thresholds(thresholds)
+    character_threshold = normalized.get(TagCategory.CHARACTER.value, 0.0)
     return (
         normalized.get(TagCategory.GENERAL.value, 0.0),
-        normalized.get(TagCategory.CHARACTER.value, 0.0),
+        normalized.get(_LEGACY_CHARACTER_CATEGORY, character_threshold),
+        character_threshold,
         normalized.get(TagCategory.COPYRIGHT.value, 0.0),
         normalized.get(-1, 0.0),
     )
@@ -356,7 +359,7 @@ def _compile_expression(
             )
             return clause, [expr.name]
         else:
-            general_thr, character_thr, copyright_thr, default_thr = _threshold_tuple(thresholds)
+            general_thr, legacy_character_thr, character_thr, copyright_thr, default_thr = _threshold_tuple(thresholds)
             clause = (
                 "EXISTS ("
                 "SELECT 1 FROM file_tags ft JOIN tags t ON t.id = ft.tag_id "
@@ -364,6 +367,7 @@ def _compile_expression(
                 "AND t.name = ? "
                 "AND ft.score >= CASE t.category "
                 f"WHEN {TagCategory.GENERAL.value} THEN ? "
+                f"WHEN {_LEGACY_CHARACTER_CATEGORY} THEN ? "
                 f"WHEN {TagCategory.CHARACTER.value} THEN ? "
                 f"WHEN {TagCategory.COPYRIGHT.value} THEN ? "
                 "ELSE ? "
@@ -374,6 +378,7 @@ def _compile_expression(
                 [
                     expr.name,
                     general_thr,
+                    legacy_character_thr,
                     character_thr,
                     copyright_thr,
                     default_thr,
