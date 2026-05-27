@@ -59,7 +59,9 @@ def test_coerce_result_path_rejects_empty_or_non_string_values() -> None:
     assert TagsTab._coerce_result_path("") is None
     assert TagsTab._coerce_result_path("   ") is None
     assert TagsTab._coerce_result_path(None) is None
-    assert str(TagsTab._coerce_result_path("C:/images/a.png")) == "C:\\images\\a.png"
+    path = TagsTab._coerce_result_path("images/a.png")
+    assert path is not None
+    assert path.parts[-2:] == ("images", "a.png")
 
 
 def test_tag_list_model_exposes_display_name_and_count_roles() -> None:
@@ -196,6 +198,57 @@ def test_refresh_completions_hides_popup_when_prefix_has_no_matches() -> None:
 
     assert dummy._current_completion_range == (0, 7)
     assert dummy._tag_model.rowCount() == 0
+    assert dummy.hide_calls == 1
+
+
+def test_completion_activated_falls_back_when_stored_range_is_stale() -> None:
+    class FakeQueryEdit:
+        def __init__(self) -> None:
+            self._text = "rating:safe ta"
+            self.cursor = -1
+            self.blocks: list[bool] = []
+
+        def text(self) -> str:
+            return self._text
+
+        def setText(self, text: str) -> None:
+            self._text = text
+
+        def blockSignals(self, blocked: bool) -> bool:
+            self.blocks.append(blocked)
+            return False
+
+        def setCursorPosition(self, cursor: int) -> None:
+            self.cursor = cursor
+
+    class FakeTimer:
+        def __init__(self) -> None:
+            self.stopped = 0
+
+        def stop(self) -> None:
+            self.stopped += 1
+
+    class DummyAutocomplete(TagsAutocompleteMixin):
+        def __init__(self) -> None:
+            self._tag_model = TagListModel([TagMeta(name="tag_high", category=0, count=100)])
+            self._pending_completion_text = "rating:safe ta"
+            self._current_completion_range = (999, 1000)
+            self._query_edit = FakeQueryEdit()
+            self._autocomplete_timer = FakeTimer()
+            self.hide_calls = 0
+
+        def _hide_completion_popup(self) -> None:
+            self.hide_calls += 1
+
+    dummy = DummyAutocomplete()
+    index = dummy._tag_model.index(0, 0)
+
+    dummy._on_completion_activated(index)
+
+    assert dummy._query_edit.text() == "rating:safe tag_high "
+    assert dummy._query_edit.cursor == len("rating:safe tag_high ")
+    assert dummy._pending_completion_text == "rating:safe tag_high "
+    assert dummy._autocomplete_timer.stopped == 1
     assert dummy.hide_calls == 1
 
 
