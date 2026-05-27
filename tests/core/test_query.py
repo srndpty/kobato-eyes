@@ -92,6 +92,13 @@ def test_category_and_score_filters() -> None:
     assert fragment.params == [TagCategory.CHARACTER.value, 0.75]
 
 
+def test_character_threshold_uses_character_category_id() -> None:
+    fragment = translate_query("alice", file_alias=ALIAS, thresholds={TagCategory.CHARACTER.value: 0.8})
+
+    assert fragment.params == ["alice", 0.35, 0.8, 0.25, 0.0]
+    assert f"WHEN {TagCategory.CHARACTER.value} THEN ?" in fragment.where
+
+
 def test_parentheses_override_precedence() -> None:
     clause = expected_tag_exists()
     expected = f"({clause}) OR (({clause}) AND ({clause}))"

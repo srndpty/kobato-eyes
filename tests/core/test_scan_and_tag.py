@@ -17,13 +17,6 @@ SRC_DIR = PROJECT_ROOT / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
-sys.modules.pop("core.pipeline", None)
-sys.modules.pop("core", None)
-sys.modules.pop("db.connection", None)
-sys.modules.pop("db", None)
-sys.modules.pop("db.schema", None)
-sys.modules.pop("db.repository", None)
-
 import core.pipeline.manual_refresh as manual_refresh
 from core.config import AppPaths, PipelineSettings
 from core.pipeline.manual_refresh import scan_and_tag
