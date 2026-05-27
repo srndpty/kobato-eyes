@@ -50,7 +50,7 @@ def test_inspect_model_reports_labels_metadata_and_providers(tmp_path: Path) -> 
     labels_path = tmp_path / "selected_tags.csv"
     model_path.write_bytes(b"onnx")
     labels_path.write_text(
-        "tag_id,name,category,count\n1,1girl,0,100\n2,kobato,1,50\n3,series,3,20\n",
+        "tag_id,name,category,count\n1,1girl,0,100\n2,kobato,4,50\n3,series,3,20\n",
         encoding="utf-8",
     )
 

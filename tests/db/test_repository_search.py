@@ -11,20 +11,11 @@ SRC_DIR = Path(__file__).resolve().parents[2] / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
-for module_name in (
-    "core",
-    "core.query",
-    "db",
-    "db.connection",
-    "db.repository",
-    "db.schema",
-):
-    sys.modules.pop(module_name, None)
-
 from core.query import translate_query
 from db.connection import get_conn
 from db.repository import search_files
 from db.schema import apply_schema
+from tagger.base import TagCategory
 
 
 @pytest.fixture()
@@ -188,7 +179,7 @@ def test_search_files_includes_tag_categories(conn) -> None:
     file_id = _insert_file(conn, path="F.png", size=222, mtime=20.0, sha="f")
 
     _insert_tag(conn, "1girl", 0.95, file_id, category=0)
-    _insert_tag(conn, "original_character", 0.85, file_id, category=1)
+    _insert_tag(conn, "original_character", 0.85, file_id, category=TagCategory.CHARACTER.value)
 
     where_sql = (
         "EXISTS (SELECT 1 FROM file_tags ft JOIN tags t ON t.id = ft.tag_id WHERE ft.file_id = f.id AND t.name = ?)"
@@ -203,7 +194,49 @@ def test_search_files_includes_tag_categories(conn) -> None:
     assert record["tags"][0][2] == 0
     assert record["tags"][1][0] == "original_character"
     assert record["tags"][1][1] == pytest.approx(0.85)
-    assert record["tags"][1][2] == 1
+    assert record["tags"][1][2] == TagCategory.CHARACTER.value
+
+
+def test_search_files_relevance_uses_character_threshold(conn) -> None:
+    file_low = _insert_file(conn, path="character-low.png", size=100, mtime=30.0, sha="character-low")
+    file_high = _insert_file(conn, path="character-high.png", size=100, mtime=20.0, sha="character-high")
+    _insert_tag(conn, "alice", 0.70, file_low, category=TagCategory.CHARACTER.value)
+    _insert_tag(conn, "alice", 0.85, file_high, category=TagCategory.CHARACTER.value)
+
+    results = search_files(
+        conn,
+        "1=1",
+        [],
+        order="relevance",
+        tags_for_relevance=["alice"],
+        thresholds={TagCategory.CHARACTER.value: 0.8},
+    )
+
+    relevance_by_id = {row["id"]: row["relevance"] for row in results}
+    assert results[0]["id"] == file_high
+    assert relevance_by_id[file_high] == pytest.approx(0.85)
+    assert relevance_by_id[file_low] == pytest.approx(0.0)
+
+
+def test_search_files_relevance_does_not_apply_character_threshold_to_artist(conn) -> None:
+    file_low = _insert_file(conn, path="artist-low.png", size=100, mtime=30.0, sha="artist-low")
+    file_high = _insert_file(conn, path="artist-high.png", size=100, mtime=20.0, sha="artist-high")
+    _insert_tag(conn, "artist_name", 0.70, file_low, category=TagCategory.ARTIST.value)
+    _insert_tag(conn, "artist_name", 0.85, file_high, category=TagCategory.ARTIST.value)
+
+    results = search_files(
+        conn,
+        "1=1",
+        [],
+        order="relevance",
+        tags_for_relevance=["artist_name"],
+        thresholds={TagCategory.CHARACTER.value: 0.8},
+    )
+
+    relevance_by_id = {row["id"]: row["relevance"] for row in results}
+    assert results[0]["id"] == file_high
+    assert relevance_by_id[file_high] == pytest.approx(0.85)
+    assert relevance_by_id[file_low] == pytest.approx(0.70)
 
 
 def test_search_files_excludes_missing_records(conn) -> None:

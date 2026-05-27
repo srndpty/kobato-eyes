@@ -297,9 +297,9 @@ class _Parser:
 
 
 _FALLBACK_THRESHOLDS: dict[int, float] = {
-    0: 0.35,
-    1: 0.25,
-    3: 0.25,
+    TagCategory.GENERAL.value: 0.35,
+    TagCategory.CHARACTER.value: 0.25,
+    TagCategory.COPYRIGHT.value: 0.25,
     -1: 0.0,
 }
 
@@ -317,9 +317,9 @@ def _normalize_thresholds(thresholds: Mapping[int, float]) -> dict[int, float]:
 def _threshold_tuple(thresholds: Mapping[int, float]) -> tuple[float, float, float, float]:
     normalized = _normalize_thresholds(thresholds)
     return (
-        normalized.get(0, 0.0),
-        normalized.get(1, 0.0),
-        normalized.get(3, 0.0),
+        normalized.get(TagCategory.GENERAL.value, 0.0),
+        normalized.get(TagCategory.CHARACTER.value, 0.0),
+        normalized.get(TagCategory.COPYRIGHT.value, 0.0),
         normalized.get(-1, 0.0),
     )
 
@@ -363,9 +363,9 @@ def _compile_expression(
                 f"WHERE ft.file_id = {file_pk(file_alias)} "
                 "AND t.name = ? "
                 "AND ft.score >= CASE t.category "
-                "WHEN 0 THEN ? "
-                "WHEN 4 THEN ? "
-                "WHEN 3 THEN ? "
+                f"WHEN {TagCategory.GENERAL.value} THEN ? "
+                f"WHEN {TagCategory.CHARACTER.value} THEN ? "
+                f"WHEN {TagCategory.COPYRIGHT.value} THEN ? "
                 "ELSE ? "
                 "END)"
             )

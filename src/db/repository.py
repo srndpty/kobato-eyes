@@ -6,6 +6,8 @@ import sqlite3
 from collections.abc import Iterable, Mapping, Sequence
 from typing import Any, Dict, Iterator, List, Optional, Tuple
 
+from tagger.base import TagCategory
+
 from .common import DEFAULT_CATEGORY_THRESHOLDS
 from .common import load_tag_thresholds as _load_tag_thresholds
 from .common import normalise_category as _normalise_category
@@ -283,9 +285,9 @@ def _resolve_relevance_thresholds(
                 values[category] = float(value)
             except (TypeError, ValueError):
                 continue
-    general = float(values.get(0, 0.0))
-    character = float(values.get(1, 0.0))
-    copyright = float(values.get(3, 0.0))
+    general = float(values.get(TagCategory.GENERAL.value, 0.0))
+    character = float(values.get(TagCategory.CHARACTER.value, 0.0))
+    copyright = float(values.get(TagCategory.COPYRIGHT.value, 0.0))
     default = float(values.get(-1, 0.0))
     return general, character, copyright, default
 
@@ -321,9 +323,9 @@ def search_files(
             "JOIN tags t ON t.id = ft.tag_id "
             f"WHERE t.name IN ({placeholders}) "
             "AND ft.score >= CASE t.category "
-            "WHEN 0 THEN ? "
-            "WHEN 1 THEN ? "
-            "WHEN 3 THEN ? "
+            f"WHEN {TagCategory.GENERAL.value} THEN ? "
+            f"WHEN {TagCategory.CHARACTER.value} THEN ? "
+            f"WHEN {TagCategory.COPYRIGHT.value} THEN ? "
             "ELSE ? "
             "END "
             "GROUP BY ft.file_id) "
