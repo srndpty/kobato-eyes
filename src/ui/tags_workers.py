@@ -123,7 +123,7 @@ def _unique_destination(dest_dir: Path, filename: str) -> Path:
             return candidate
 
 
-# --- バックグラウンドコピー ---------------------------------------------
+# Legacy runnable retained for older callers; TagsDatabaseMixin now uses CallableJob.
 class _CopyRunnable(QRunnable):
     def __init__(
         self,
