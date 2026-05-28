@@ -140,13 +140,25 @@ class DBWritingService(DBWriteQueue):
     def _put_shutdown_message(self, message: object, operation: str, *, retry_while_alive: bool = False) -> None:
         """Queue shutdown messages while preserving worker failures after join."""
 
+        next_log_at = time.monotonic() + self._SHUTDOWN_LOG_INTERVAL_SECONDS
         while True:
             try:
                 self._queue.put(message, timeout=1.0)
                 return
             except queue.Full as exc:
                 if retry_while_alive and self._thread.is_alive():
-                    self._log_best_effort_failure(operation, exc, level=logging.DEBUG)
+                    now = time.monotonic()
+                    if now >= next_log_at:
+                        self._log.warning(
+                            "DBWritingService: still waiting to enqueue %s (qsize=%s, written=%s, flush_count=%s)",
+                            operation,
+                            self.qsize(),
+                            self._written,
+                            self._flush_count,
+                        )
+                        next_log_at = now + self._SHUTDOWN_LOG_INTERVAL_SECONDS
+                    else:
+                        self._log_best_effort_failure(operation, exc, level=logging.DEBUG)
                     continue
                 self._log_best_effort_failure(operation, exc, level=logging.WARNING)
                 return

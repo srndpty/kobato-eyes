@@ -41,6 +41,7 @@ class DBWritingPragmas:
             conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
         except Exception as exc:  # pragma: no cover - defensive
             self._log.warning("DBWritingService: wal_checkpoint failed: %s", exc)
+        last_locked: sqlite3.OperationalError | None = None
         for _ in range(5):
             try:
                 conn.execute("PRAGMA journal_mode=MEMORY")
@@ -48,7 +49,11 @@ class DBWritingPragmas:
             except sqlite3.OperationalError as exc:
                 if "locked" not in str(exc).lower():
                     raise
+                last_locked = exc
                 time.sleep(0.25)
+        else:
+            if last_locked is not None:
+                raise last_locked
         conn.execute("PRAGMA synchronous=OFF")
 
     def restore_normal_mode(self, conn: sqlite3.Connection, log_best_effort_failure) -> None:

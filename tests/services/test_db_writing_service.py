@@ -555,6 +555,28 @@ def test_apply_pragmas_falls_back_when_unsafe_fast_lock_unavailable() -> None:
 
 
 @pytest.mark.db_stress
+def test_apply_pragmas_falls_back_when_memory_journal_stays_locked() -> None:
+    class _FakeConn:
+        def __init__(self) -> None:
+            self.statements: list[str] = []
+
+        def execute(self, sql: str):
+            self.statements.append(sql)
+            if sql == "PRAGMA journal_mode=MEMORY":
+                raise db_writing_module.sqlite3.OperationalError("database is locked")
+            return None
+
+    conn = _FakeConn()
+    service = DBWritingService("ignored.db", unsafe_fast=True)
+
+    service._apply_pragmas(conn)  # type: ignore[arg-type]
+
+    assert service._unsafe_fast is False
+    assert service._stage_tags_in_temp is False
+    assert "PRAGMA journal_mode=WAL" in conn.statements
+
+
+@pytest.mark.db_stress
 def test_unsafe_fast_lock_fallback_uses_standard_write_and_fts(tmp_path: Path) -> None:
     db_path = tmp_path / "unsafe-fallback-standard.db"
     file_id = _prepare_db(str(db_path), "C:/images/unsafe-fallback-standard.png")
@@ -829,6 +851,48 @@ def test_stop_wait_forever_logs_periodic_shutdown_diagnostics(
 
     assert "still waiting for worker shutdown (qsize=7, written=42, flush_count=3)" in caplog.text
     assert thread.join_calls == 2
+
+
+def test_stop_wait_forever_logs_when_queue_full_before_join(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    service = DBWritingService("ignored.db")
+    service._written = 9
+    service._flush_count = 2
+    monkeypatch.setattr(service, "_SHUTDOWN_LOG_INTERVAL_SECONDS", 0.0)
+
+    class _FullThenOpenQueue:
+        def __init__(self) -> None:
+            self.stop_attempts = 0
+
+        def qsize(self) -> int:
+            return 5
+
+        def put(self, item: object, block: bool = True, timeout: float | None = None) -> None:
+            if isinstance(item, DBStop) and self.stop_attempts < 2:
+                self.stop_attempts += 1
+                raise queue.Full("queue blocked")
+
+    class _Thread:
+        def __init__(self) -> None:
+            self.alive = True
+
+        def join(self, timeout: float | None = None) -> None:
+            self.alive = False
+
+        def is_alive(self) -> bool:
+            return self.alive
+
+    fake_queue = _FullThenOpenQueue()
+    service._queue = fake_queue  # type: ignore[assignment]
+    service._thread = _Thread()  # type: ignore[assignment]
+
+    with caplog.at_level(logging.WARNING, logger="services.db_writing"):
+        service.stop(wait_forever=True)
+
+    assert fake_queue.stop_attempts == 2
+    assert "still waiting to enqueue queue stop sentinel (qsize=5, written=9, flush_count=2)" in caplog.text
 
 
 def test_process_queue_exits_after_stop_event_when_sentinel_is_missing(monkeypatch: pytest.MonkeyPatch) -> None:

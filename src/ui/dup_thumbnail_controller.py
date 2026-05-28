@@ -176,8 +176,17 @@ class DupThumbnailController:
         except Exception:
             pix = None
 
+        live_targets: list[ThumbTile] = []
         for tile in targets:
-            tile.set_pixmap(pix, self._placeholder_icon)
+            try:
+                tile.set_pixmap(pix, self._placeholder_icon)
+                live_targets.append(tile)
+            except RuntimeError:
+                continue
+        if live_targets:
+            self.bindings[path_str] = live_targets
+        else:
+            self.bindings.pop(path_str, None)
 
         self.done.add(path_str)
         self.maybe_start_more()

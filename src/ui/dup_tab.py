@@ -805,32 +805,12 @@ class DupTab(QWidget):
         )
 
     def _on_mark_keep_largest(self) -> None:
-        for top_idx in range(self._tree.topLevelItemCount()):
-            top = self._tree.topLevelItem(top_idx)
-            if top is None:
-                continue
-            # 未構築なら展開相当の構築だけ行う（UI上は閉じたまま）
-            if top.childCount() == 1 and top.child(0).data(0, Qt.ItemDataRole.UserRole) == "__placeholder__":
-                cluster = top.data(0, Qt.ItemDataRole.UserRole)
-                top.takeChildren()
-                self._build_children_for_cluster(top, cluster)
-            # ここから従来通り
-            cluster: DuplicateCluster = top.data(0, Qt.ItemDataRole.UserRole)
-            for i in range(top.childCount()):
-                child = top.child(i)
-                entry = child.data(0, Qt.ItemDataRole.UserRole)
-                if not isinstance(entry, DuplicateClusterEntry):
-                    continue
-                state = Qt.CheckState.Unchecked if entry.file.file_id == cluster.keeper_id else Qt.CheckState.Checked
-                child.setCheckState(0, state)
+        self._tree_controller.mark_non_keepers_checked(self._ensure_panel_built_if_visible)
         self._schedule_visible_thumbs()
         self._update_action_states()
 
     def _on_uncheck_all(self) -> None:
-        for item, entry in self._iter_tree_entries():
-            if entry is None:
-                continue
-            item.setCheckState(0, Qt.CheckState.Unchecked)
+        self._tree_controller.set_all_tiles_checked(False, self._ensure_panel_built_if_visible)
         self._update_action_states()
 
     def _on_trash_checked(self) -> None:

@@ -42,15 +42,17 @@ class DupTreeController:
         height = viewport.height()
         y = 0
         items: list[QTreeWidgetItem] = []
-        seen: set[QTreeWidgetItem] = set()
+        seen_ids: set[int] = set()
         while y < height:
             index = self._tree.indexAt(QPoint(10, y))
             if not index.isValid():
-                break
+                y += max(16, self._icon_size.height() // 4)
+                continue
             item = self._tree.itemFromIndex(index)
-            if item and item not in seen:
+            item_id = id(item) if item is not None else None
+            if item is not None and item_id not in seen_ids:
                 items.append(item)
-                seen.add(item)
+                seen_ids.add(item_id)
             rect = self._tree.visualItemRect(item)
             step = rect.height() if rect.height() > 0 else (self._icon_size.height() + 12)
             y += step
@@ -77,6 +79,37 @@ class DupTreeController:
             for entry in default_checked_entries(cluster):
                 yield entry
 
+    def mark_non_keepers_checked(self, ensure_panel: Callable[[QTreeWidgetItem, bool], None]) -> None:
+        """Check non-keeper tiles and uncheck keeper tiles for all groups."""
+
+        for index in range(self._tree.topLevelItemCount()):
+            top = self._tree.topLevelItem(index)
+            if top is None:
+                continue
+            cluster = top.data(0, Qt.ItemDataRole.UserRole)
+            if not isinstance(cluster, DuplicateCluster):
+                continue
+            ensure_panel(top, True)
+            panel = self.panel_of_group(top)
+            if panel is None:
+                continue
+            for tile in panel.tiles:
+                tile.set_checked(tile.entry.file.file_id != cluster.keeper_id)
+
+    def set_all_tiles_checked(self, checked: bool, ensure_panel: Callable[[QTreeWidgetItem, bool], None]) -> None:
+        """Set all duplicate tiles to ``checked`` for all groups."""
+
+        for index in range(self._tree.topLevelItemCount()):
+            top = self._tree.topLevelItem(index)
+            if top is None:
+                continue
+            ensure_panel(top, True)
+            panel = self.panel_of_group(top)
+            if panel is None:
+                continue
+            for tile in panel.tiles:
+                tile.set_checked(checked)
+
     def build_children_for_cluster(
         self,
         parent_item: QTreeWidgetItem,
@@ -87,6 +120,7 @@ class DupTreeController:
     ) -> None:
         """Build and bind the thumbnail panel for one duplicate cluster."""
 
+        parent_item.takeChildren()
         entries = sort_entries_for_display(cluster.files, cluster.keeper_id)
         panel_item = QTreeWidgetItem(parent_item)
         panel_item.setFirstColumnSpanned(True)

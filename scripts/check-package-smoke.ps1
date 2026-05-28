@@ -1,4 +1,6 @@
-param()
+param(
+    [switch]$CheckWorkingTreeArtifacts
+)
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
@@ -39,32 +41,73 @@ $ForbiddenPatterns = @(
     ".coverage"
 )
 
-if (Test-Path -LiteralPath ".git") {
-    $TrackedFiles = @(git ls-files)
-    $TrackedHit = $TrackedFiles | Where-Object {
-        $Name = Split-Path -Leaf $_
-        $Normalized = $_ -replace "\\", "/"
-        $Normalized -like "__pycache__/*" -or
-        $Normalized -like "*/__pycache__/*" -or
-        $Normalized -like ".pytest_cache/*" -or
-        $Normalized -like "*/.pytest_cache/*" -or
-        $Normalized -like "*.egg-info/*" -or
-        $Normalized -like "*/*.egg-info/*" -or
+$IgnoredArtifactRoots = @(
+    ".git",
+    ".hypothesis",
+    ".mypy_cache",
+    ".pytest_cache",
+    ".ruff_cache",
+    ".venv",
+    "build",
+    "dist",
+    "tmp"
+)
+
+$ForbiddenPathPatterns = @(
+    "*/__pycache__/*",
+    "*/.egg-info/*",
+    "*/.pytest_cache/*"
+)
+
+function Test-GeneratedArtifactPath {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$PathText
+    )
+
+    $Normalized = $PathText -replace "\\", "/"
+    $Name = Split-Path -Leaf $Normalized
+    foreach ($IgnoredRoot in $IgnoredArtifactRoots) {
+        if ($Normalized -eq $IgnoredRoot -or $Normalized -like "$IgnoredRoot/*") {
+            return $false
+        }
+    }
+    foreach ($Pattern in $ForbiddenPathPatterns) {
+        if ($Normalized -like $Pattern) {
+            return $true
+        }
+    }
+    return (
         $Name -like "*.pyc" -or
         $Name -like "*.pyo" -or
+        $Name -like "*.egg-info" -or
         $Name -eq ".coverage"
-    } | Select-Object -First 1
+    )
+}
+
+if (Test-Path -LiteralPath ".git") {
+    $TrackedFiles = @(git ls-files)
+    $TrackedHit = $TrackedFiles | Where-Object { Test-GeneratedArtifactPath $_ } | Select-Object -First 1
     if ($TrackedHit) {
         throw "Forbidden generated artifact is tracked: $TrackedHit"
     }
-} else {
+}
+
+if ($CheckWorkingTreeArtifacts -or -not (Test-Path -LiteralPath ".git")) {
     foreach ($Pattern in $ForbiddenPatterns) {
         $Hit = Get-ChildItem -Path . -Recurse -Force -ErrorAction SilentlyContinue -Filter $Pattern |
+            Where-Object {
+                $Relative = Resolve-Path -LiteralPath $_.FullName -Relative
+                $Relative = $Relative -replace "^\.[\\/]", ""
+                Test-GeneratedArtifactPath $Relative
+            } |
             Select-Object -First 1 -ExpandProperty FullName
         if ($Hit) {
             throw "Forbidden generated artifact is included: $Hit"
         }
     }
+} elseif (Test-Path -LiteralPath ".git") {
+    Write-Host "    working tree generated artifacts skipped (use -CheckWorkingTreeArtifacts to include untracked files)"
 }
 
 Write-Host "==> compile package smoke" -ForegroundColor Cyan
