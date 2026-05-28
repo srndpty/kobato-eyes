@@ -9,11 +9,19 @@ import sqlite3
 import threading
 import time
 from collections.abc import Callable, Sequence
-from typing import Any, Dict, List, Mapping, Optional
+from typing import Dict, List, Optional
 
 from core.pipeline.contracts import DBFlush, DBItem, DBStop, DBWriteQueue
 from db.connection import get_conn
 from db.fts import fts_replace_rows
+from services.db_writing_lifecycle import DBWritingPragmas
+from services.db_writing_staging import StagingBatchWriter, StagingMerger, chunked_table, rowid_windows
+from services.db_writing_standard import (
+    StandardBatchWriter,
+    bulk_update_files_meta_by_id_uncommitted,
+    chunked,
+    upsert_tags_uncommitted,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -57,6 +65,9 @@ class DBWritingService(DBWriteQueue):
         self._tag_cache: Dict[str, int] = {}
         self._stage_tags_in_temp = True
         self._debug = os.environ.get("KE_DBWRITER_DEBUG") == "1"
+        self._pragmas = DBWritingPragmas(self._log)
+        self._standard_writer = StandardBatchWriter(fts_replace_rows)
+        self._staging_writer = StagingBatchWriter()
         if os.environ.get("KE_SKIP_FTS_DURING_TAG") == "1" or self._fts_topk <= 0:
             self._skip_fts = True
 
@@ -210,41 +221,10 @@ class DBWritingService(DBWriteQueue):
             self._apply_wal_pragmas(conn)
 
     def _apply_unsafe_fast_pragmas(self, conn: sqlite3.Connection) -> None:
-        conn.execute("PRAGMA busy_timeout=60000")
-        conn.execute("PRAGMA temp_store=MEMORY")
-        conn.execute("PRAGMA cache_size=-262144")
-        try:
-            conn.execute("PRAGMA mmap_size=268435456")
-        except Exception as exc:  # pragma: no cover - depends on environment
-            # Failure policy: mmap tuning is environment-dependent and optional.
-            self._log.warning("DBWritingService: pragma mmap_size failed: %s", exc)
-        conn.execute("PRAGMA locking_mode=EXCLUSIVE")
-        conn.execute("BEGIN EXCLUSIVE")
-        conn.execute("COMMIT")
-        try:
-            conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-        except Exception as exc:  # pragma: no cover - defensive
-            # Failure policy: preflight checkpoint improves WAL shape but is not
-            # required for the main write transaction.
-            self._log.warning("DBWritingService: wal_checkpoint failed: %s", exc)
-        for _ in range(5):
-            try:
-                conn.execute("PRAGMA journal_mode=MEMORY")
-                break
-            except sqlite3.OperationalError as exc:
-                if "locked" not in str(exc).lower():
-                    raise
-                time.sleep(0.25)
-        conn.execute("PRAGMA synchronous=OFF")
+        self._pragmas.apply_unsafe_fast(conn)
 
     def _apply_wal_pragmas(self, conn: sqlite3.Connection) -> None:
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA synchronous=OFF")
-        conn.execute("PRAGMA wal_autocheckpoint=0")
-        conn.execute("PRAGMA busy_timeout=5000")
-        conn.execute("PRAGMA temp_store=MEMORY")
-        conn.execute("PRAGMA mmap_size=268435456")
-        conn.execute("PRAGMA cache_size=-262144")
+        self._pragmas.apply_wal(conn)
 
     def _process_queue(self, conn: sqlite3.Connection) -> None:
         batch: List[DBItem] = []
@@ -296,46 +276,8 @@ class DBWritingService(DBWriteQueue):
             )
 
     def _flush_into_temp_tables(self, conn: sqlite3.Connection, items: Sequence[DBItem]) -> None:
-        conn.execute("BEGIN")
         try:
-            now = time.time()
-            defs_set: set[tuple[str, int]] = set()
-            for it in items:
-                for name, _score, category in it.tags:
-                    defs_set.add((name, int(category)))
-            if defs_set:
-                conn.executemany(
-                    "INSERT OR IGNORE INTO temp.tmp_tag_defs(name, category) VALUES(?, ?)",
-                    list(defs_set),
-                )
-            tag_rows: list[tuple[int, str, float, int]] = []
-            for it in items:
-                for name, score, category in it.tags:
-                    tag_rows.append((it.file_id, name, float(score), int(category)))
-            if tag_rows:
-                conn.executemany(
-                    "INSERT INTO temp.tmp_file_tags(file_id, tag_name, score, category) VALUES(?, ?, ?, ?)",
-                    tag_rows,
-                )
-            metas: list[tuple[int, int | None, int | None, str | None, float]] = []
-            for it in items:
-                sig = it.tagger_sig or self._default_tagger_sig
-                ts = it.tagged_at or now
-                metas.append((it.file_id, it.width, it.height, sig, ts))
-            if metas:
-                conn.executemany(
-                    """
-                    INSERT INTO temp.tmp_files_meta(file_id, width, height, tagger_sig, tagged_at)
-                    VALUES(?, ?, ?, ?, ?)
-                    ON CONFLICT(file_id) DO UPDATE SET
-                      width      = COALESCE(excluded.width,  width),
-                      height     = COALESCE(excluded.height, height),
-                      tagger_sig = excluded.tagger_sig,
-                      tagged_at  = excluded.tagged_at
-                    """,
-                    metas,
-                )
-            conn.commit()
+            self._staging_writer.flush(conn, items, default_tagger_sig=self._default_tagger_sig)
         except Exception:
             # Failure policy: temp batch transaction failures are fatal; rollback
             # is best effort and the original failure is re-raised.
@@ -343,50 +285,15 @@ class DBWritingService(DBWriteQueue):
             raise
 
     def _flush_standard(self, conn: sqlite3.Connection, items: Sequence[DBItem]) -> None:
-        conn.execute("BEGIN IMMEDIATE")
-        tag_cache = dict(self._tag_cache)
         try:
-            new_defs: list[dict[str, object]] = []
-            for it in items:
-                for name, _score, category in it.tags:
-                    if name not in tag_cache:
-                        new_defs.append({"name": name, "category": int(category)})
-            if new_defs:
-                tag_cache.update(self._upsert_tags_uncommitted(conn, new_defs))
-            file_ids = [it.file_id for it in items]
-            for chunk in self._chunked(file_ids, 900):
-                if not chunk:
-                    continue
-                placeholders = ",".join(["?"] * len(chunk))
-                conn.execute(f"DELETE FROM file_tags WHERE file_id IN ({placeholders})", chunk)
-            tag_rows: list[tuple[int, int, float]] = []
-            for it in items:
-                for name, score, _category in it.tags:
-                    tag_id = tag_cache.get(name)
-                    if tag_id is not None:
-                        tag_rows.append((it.file_id, int(tag_id), float(score)))
-            if tag_rows:
-                conn.executemany(
-                    "INSERT INTO file_tags (file_id, tag_id, score) VALUES (?, ?, ?)",
-                    tag_rows,
-                )
-            if not self._skip_fts:
-                fts_rows: list[tuple[int, str]] = []
-                for it in items:
-                    top = sorted(it.tags, key=lambda t: t[1], reverse=True)[: self._fts_topk]
-                    text = " ".join([name for (name, _score, _category) in top])
-                    if text:
-                        fts_rows.append((it.file_id, text))
-                if fts_rows:
-                    fts_replace_rows(conn, fts_rows)
-            now = time.time()
-            meta_rows: list[tuple[int | None, int | None, str | None, float | None, int]] = []
-            for it in items:
-                sig = it.tagger_sig or self._default_tagger_sig
-                ts = it.tagged_at or now
-                meta_rows.append((it.width, it.height, sig, ts, it.file_id))
-            self._bulk_update_files_meta_by_id_uncommitted(conn, meta_rows, coalesce_wh=True)
-            conn.commit()
+            tag_cache = self._standard_writer.flush(
+                conn,
+                items,
+                tag_cache=self._tag_cache,
+                default_tagger_sig=self._default_tagger_sig,
+                skip_fts=self._skip_fts,
+                fts_topk=self._fts_topk,
+            )
         except Exception:
             # Failure policy: standard batch transaction failures are fatal;
             # rollback is best effort and the original failure is re-raised.
@@ -398,24 +305,11 @@ class DBWritingService(DBWriteQueue):
     def _upsert_tags_uncommitted(
         self,
         conn: sqlite3.Connection,
-        tags: Sequence[Mapping[str, Any]],
+        tags,
     ) -> dict[str, int]:
         """Upsert tag definitions without committing the caller's transaction."""
 
-        results: dict[str, int] = {}
-        query = (
-            "INSERT INTO tags (name, category) "
-            "VALUES (?, ?) "
-            "ON CONFLICT(name) DO UPDATE SET category = excluded.category "
-            "RETURNING id"
-        )
-        for tag in tags:
-            name = str(tag["name"]).strip()
-            category = int(tag.get("category", 0))
-            cursor = conn.execute(query, (name, category))
-            tag_id = cursor.fetchone()[0]
-            results[name] = int(tag_id)
-        return results
+        return upsert_tags_uncommitted(conn, tags)
 
     def _bulk_update_files_meta_by_id_uncommitted(
         self,
@@ -426,20 +320,7 @@ class DBWritingService(DBWriteQueue):
     ) -> None:
         """Update file metadata without committing the caller's transaction."""
 
-        if not rows:
-            return
-        if coalesce_wh:
-            sql = (
-                "UPDATE files "
-                "SET width = COALESCE(?, width), "
-                "    height = COALESCE(?, height), "
-                "    tagger_sig = COALESCE(?, tagger_sig), "
-                "    last_tagged_at = COALESCE(?, last_tagged_at) "
-                "WHERE id = ?"
-            )
-        else:
-            sql = "UPDATE files SET width = ?, height = ?, tagger_sig = ?, last_tagged_at = ? WHERE id = ?"
-        conn.executemany(sql, rows)
+        bulk_update_files_meta_by_id_uncommitted(conn, rows, coalesce_wh=coalesce_wh)
 
     def _rollback_safely(self, conn: sqlite3.Connection) -> None:
         """Rollback a failed batch while preserving the original exception."""
@@ -477,133 +358,15 @@ class DBWritingService(DBWriteQueue):
             return 0
 
     def _create_temp_staging(self, conn: sqlite3.Connection) -> None:
-        conn.execute(
-            """
-            CREATE TEMP TABLE IF NOT EXISTS tmp_file_tags(
-                file_id  INTEGER,
-                tag_name TEXT,
-                score    REAL,
-                category INTEGER
-            )
-            """
-        )
-        conn.execute(
-            """
-            CREATE TEMP TABLE IF NOT EXISTS tmp_files_meta(
-                file_id    INTEGER PRIMARY KEY,
-                width      INTEGER,
-                height     INTEGER,
-                tagger_sig TEXT,
-                tagged_at  REAL
-            )
-            """
-        )
-        conn.execute(
-            """
-            CREATE TEMP TABLE IF NOT EXISTS tmp_tag_defs(
-                name     TEXT PRIMARY KEY,
-                category INTEGER
-            )
-            """
-        )
+        self._staging_writer.create_tables(conn)
 
     def _merge_staging_into_persistent(self, conn: sqlite3.Connection) -> None:
-        try:
-            row = conn.execute("SELECT count(*) FROM temp.tmp_file_tags").fetchone()
-        except sqlite3.OperationalError:
-            return
-        if not row or int(row[0]) == 0:
-            return
-        total_tags = int(row[0])
-        total_files = int(conn.execute("SELECT count(DISTINCT file_id) FROM temp.tmp_file_tags").fetchone()[0])
-        total_meta = int(conn.execute("SELECT count(*) FROM temp.tmp_files_meta").fetchone()[0])
-        self._log.info("DBWritingService: offline merge start (tmp->disk)")
-        self._emit_progress("merge.start", 0, total_tags)
-        try:
-            conn.execute("DROP INDEX IF EXISTS idx_file_tags_tag_score")
-            conn.execute("DROP INDEX IF EXISTS idx_file_tags_tag_id")
-        except Exception as exc:
-            # Failure policy: index drops are an unsafe-fast optimisation; merge
-            # can still proceed and later recreate indexes best effort.
-            self._log.warning("DBWritingService: drop index failed: %s", exc)
-        conn.execute("BEGIN IMMEDIATE")
-        try:
-            rows = conn.execute("SELECT name, MAX(category) FROM temp.tmp_tag_defs GROUP BY name").fetchall()
-            if rows:
-                defs = [{"name": r[0], "category": int(r[1] or 0)} for r in rows]
-                self._upsert_tags_uncommitted(conn, defs)
-            conn.execute("DROP TABLE IF EXISTS temp.tmp_file_ids")
-            conn.execute("CREATE TABLE temp.tmp_file_ids AS SELECT DISTINCT file_id FROM temp.tmp_file_tags")
-            self._emit_progress("merge.delete", 0, total_files)
-            done = 0
-            for chunk in self._chunked_table(conn, "temp.tmp_file_ids", step=5000):
-                placeholders = ",".join(["?"] * len(chunk))
-                conn.execute(f"DELETE FROM file_tags WHERE file_id IN ({placeholders})", chunk)
-                done += len(chunk)
-                self._emit_progress("merge.delete", done, total_files)
-            conn.execute("CREATE INDEX IF NOT EXISTS temp.idx_tmp_ft_name ON tmp_file_tags(tag_name)")
-            conn.execute("CREATE INDEX IF NOT EXISTS temp.idx_tmp_ft_file ON tmp_file_tags(file_id)")
-            conn.execute("CREATE INDEX IF NOT EXISTS temp.idx_tmp_fm_file ON tmp_files_meta(file_id)")
-            self._emit_progress("merge.insert", 0, total_tags)
-            done = 0
-            for start, end in self._rowid_windows(conn, "temp.tmp_file_tags", 100_000):
-                conn.execute(
-                    """
-                    INSERT INTO file_tags (file_id, tag_id, score)
-                    SELECT ft.file_id, t.id, ft.score
-                    FROM temp.tmp_file_tags AS ft
-                    JOIN tags AS t ON t.name = ft.tag_name
-                    WHERE ft.rowid > ? AND ft.rowid <= ?
-                    """,
-                    (start, end),
-                )
-                done = min(done + 100_000, total_tags)
-                self._emit_progress("merge.insert", done, total_tags)
-            self._emit_progress("merge.update", 0, total_meta)
-            done = 0
-            for start, end in self._rowid_windows(conn, "temp.tmp_files_meta", 20_000):
-                conn.execute(
-                    """
-                    UPDATE files
-                    SET width = COALESCE((SELECT m.width FROM temp.tmp_files_meta m WHERE m.file_id = files.id AND m.rowid > ? AND m.rowid <= ?), width),
-                        height = COALESCE((SELECT m.height FROM temp.tmp_files_meta m WHERE m.file_id = files.id AND m.rowid > ? AND m.rowid <= ?), height),
-                        tagger_sig = (SELECT m.tagger_sig FROM temp.tmp_files_meta m WHERE m.file_id = files.id AND m.rowid > ? AND m.rowid <= ?),
-                        last_tagged_at = (SELECT m.tagged_at FROM temp.tmp_files_meta m WHERE m.file_id = files.id AND m.rowid > ? AND m.rowid <= ?)
-                    WHERE id IN (SELECT file_id FROM temp.tmp_files_meta WHERE rowid > ? AND rowid <= ?)
-                    """,
-                    (start, end, start, end, start, end, start, end, start, end),
-                )
-                done = min(done + 20_000, total_meta)
-                self._emit_progress("merge.update", done, total_meta)
-            conn.commit()
-        except Exception:
-            # Failure policy: persistent merge transaction failures are fatal.
-            conn.rollback()
-            raise
-        finally:
-            for ddl in (
-                "DROP INDEX IF EXISTS temp.idx_tmp_ft_name",
-                "DROP INDEX IF EXISTS temp.idx_tmp_ft_file",
-                "DROP INDEX IF EXISTS temp.idx_tmp_fm_file",
-                "DROP TABLE IF EXISTS temp.tmp_file_ids",
-            ):
-                try:
-                    conn.execute(ddl)
-                except Exception as exc:
-                    self._log_best_effort_failure(f"drop temporary merge object: {ddl}", exc, level=logging.DEBUG)
-        try:
-            self._emit_progress("merge.index", 0, 2)
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_file_tags_tag_id ON file_tags(tag_id)")
-            self._emit_progress("merge.index", 1, 2)
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_file_tags_tag_score ON file_tags(tag_id, score)")
-            self._emit_progress("merge.index", 2, 2)
-            conn.commit()
-        except Exception as exc:
-            # Failure policy: post-merge index recreation is important for
-            # performance but should not discard already committed tag data.
-            self._log.warning("DBWritingService: recreate index failed: %s", exc)
-        self._emit_progress("merge.done", 1, 1)
-        self._log.info("DBWritingService: offline merge done")
+        merger = StagingMerger(
+            self._log,
+            self._emit_progress,
+            lambda operation, exc: self._log_best_effort_failure(operation, exc, level=logging.DEBUG),
+        )
+        merger.merge(conn)
 
     def _emit_progress(self, kind: str, done: int, total: int) -> None:
         cb = self._progress_cb
@@ -614,18 +377,7 @@ class DBWritingService(DBWriteQueue):
                 self._log_best_effort_failure("progress callback", exc, level=logging.WARNING)
 
     def _restore_normal_mode(self, conn: sqlite3.Connection) -> None:
-        for statement, level in (
-            ("END", logging.DEBUG),
-            ("PRAGMA locking_mode=NORMAL", logging.WARNING),
-            ("PRAGMA journal_mode=DELETE", logging.WARNING),
-            ("PRAGMA journal_mode=WAL", logging.WARNING),
-            ("PRAGMA wal_checkpoint(TRUNCATE)", logging.DEBUG),
-            ("PRAGMA synchronous=NORMAL", logging.WARNING),
-        ):
-            try:
-                conn.execute(statement)
-            except Exception as exc:
-                self._log_best_effort_failure(f"restore normal mode: {statement}", exc, level=level)
+        self._pragmas.restore_normal_mode(conn, self._log_best_effort_failure)
 
     def _log_best_effort_failure(self, operation: str, exc: BaseException, *, level: int) -> None:
         """Log cleanup/maintenance failures that must not mask the primary result."""
@@ -642,30 +394,13 @@ class DBWritingService(DBWriteQueue):
     # Iteration helpers
     # ------------------------------------------------------------------
     def _chunked(self, seq: Sequence[int], size: int) -> List[List[int]]:
-        return [list(seq[i : i + size]) for i in range(0, len(seq), size)]
+        return chunked(seq, size)
 
     def _chunked_table(self, conn: sqlite3.Connection, table: str, *, step: int) -> List[List[int]]:
-        rows = conn.execute(f"SELECT file_id FROM {table}").fetchall()
-        result: List[List[int]] = []
-        buf: List[int] = []
-        for (fid,) in rows:
-            buf.append(int(fid))
-            if len(buf) >= step:
-                result.append(buf[:])
-                buf.clear()
-        if buf:
-            result.append(buf)
-        return result
+        return chunked_table(conn, table, step=step)
 
     def _rowid_windows(self, conn: sqlite3.Connection, table: str, window: int) -> List[tuple[int, int]]:
-        max_rowid = conn.execute(f"SELECT max(rowid) FROM {table}").fetchone()[0] or 0
-        start = 0
-        windows: List[tuple[int, int]] = []
-        while start < max_rowid:
-            end = min(start + window, max_rowid)
-            windows.append((start, end))
-            start = end
-        return windows
+        return rowid_windows(conn, table, window)
 
 
 __all__ = ["DBWritingService"]

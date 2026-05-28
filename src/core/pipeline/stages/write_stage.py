@@ -20,6 +20,15 @@ from .tag_stage import TagStageResult
 logger = logging.getLogger(__name__)
 
 
+def _unsafe_fast_enabled() -> bool:
+    """Return whether WriteStage should use the unsafe-fast DB writer path."""
+
+    value = os.environ.get("KE_DB_UNSAFE_FAST")
+    if value is None:
+        return True
+    return value.strip().lower() not in {"0", "false", "no", "off"}
+
+
 class WriteStageDeps(Protocol):
     """Protocol describing dependencies required by :class:`WriteStage`."""
 
@@ -48,7 +57,7 @@ class _DefaultWriteStageDeps:
             fts_topk=getattr(settings, "fts_topk", 128),
             queue_size=safe_int(os.environ.get("KE_DB_QUEUE"), 1024, min_value=1),
             default_tagger_sig=ctx.tagger_sig,
-            unsafe_fast=True,
+            unsafe_fast=_unsafe_fast_enabled(),
             skip_fts=True,
             progress_cb=progress_cb,
         )
@@ -196,4 +205,4 @@ class WriteStage:
         return max(previous_processed, rebuilt)
 
 
-__all__ = ["WriteStage", "WriteStageResult", "WriteStageDeps"]
+__all__ = ["WriteStage", "WriteStageResult", "WriteStageDeps", "_unsafe_fast_enabled"]

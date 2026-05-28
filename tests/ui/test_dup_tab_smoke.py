@@ -118,7 +118,7 @@ def test_cluster_enables_actions_and_trash_updates_state(monkeypatch, dup_tab: D
     assert dup_tab._trash_button.isEnabled()  # type: ignore[attr-defined]
 
     dup_tab._view_model.mark_files_absent = lambda conn, ids: marked.append(list(ids))  # type: ignore[attr-defined,assignment]
-    monkeypatch.setattr("ui.dup_tab.trash_duplicate_entries", lambda entries: (list(entries), []))
+    monkeypatch.setattr("ui.dup_actions.trash_duplicate_entries", lambda entries: (list(entries), []))
 
     dup_tab._on_trash_checked()  # type: ignore[attr-defined]
 

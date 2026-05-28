@@ -8,7 +8,7 @@ import pytest
 
 from core.pipeline.stages import write_stage
 from core.pipeline.stages.tag_stage import TagStageResult
-from core.pipeline.stages.write_stage import WriteStage
+from core.pipeline.stages.write_stage import WriteStage, _unsafe_fast_enabled
 from core.pipeline.types import IndexProgress, PipelineContext, ProgressEmitter
 
 
@@ -24,6 +24,20 @@ def _make_ctx(tmp_path) -> PipelineContext:
         progress_cb=None,
         is_cancelled=lambda: False,
     )
+
+
+def test_unsafe_fast_env_opt_out(monkeypatch) -> None:
+    monkeypatch.delenv("KE_DB_UNSAFE_FAST", raising=False)
+    assert _unsafe_fast_enabled() is True
+
+    monkeypatch.setenv("KE_DB_UNSAFE_FAST", "0")
+    assert _unsafe_fast_enabled() is False
+
+    monkeypatch.setenv("KE_DB_UNSAFE_FAST", "off")
+    assert _unsafe_fast_enabled() is False
+
+    monkeypatch.setenv("KE_DB_UNSAFE_FAST", "1")
+    assert _unsafe_fast_enabled() is True
 
 
 def test_write_stage_cleans_up_after_writer_failure(monkeypatch, tmp_path):
