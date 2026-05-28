@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import logging
 import os
-import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -136,7 +135,6 @@ class WriteStage:
             with _quiesced_with(self._deps):
                 writer = self._deps.build_writer(ctx=ctx, progress_cb=_dbw_progress)
                 writer.start()
-                time.sleep(0.2)
                 writer.raise_if_failed()
 
                 for item in tag_result.db_items:

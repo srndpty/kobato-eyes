@@ -21,6 +21,9 @@ logger = logging.getLogger(__name__)
 class DBWritingService(DBWriteQueue):
     """Thread-backed queue that persists tagging results in batches."""
 
+    _STARTUP_WAIT_TIMEOUT_SECONDS = 5.0
+    _SHUTDOWN_LOG_INTERVAL_SECONDS = 60.0
+
     def __init__(
         self,
         db_path: str,
@@ -46,6 +49,7 @@ class DBWritingService(DBWriteQueue):
         self._exc: BaseException | None = None
         self._exc_lock = threading.Lock()
         self._stop_evt = threading.Event()
+        self._ready_evt = threading.Event()
         self._thread = threading.Thread(target=self._thread_main, name="DBWritingService", daemon=True)
         self._started = False
         self._written = 0
@@ -66,6 +70,12 @@ class DBWritingService(DBWriteQueue):
         if not self._thread.is_alive():
             self._started = True
             self._thread.start()
+            if not self._ready_evt.wait(self._STARTUP_WAIT_TIMEOUT_SECONDS):
+                self._log.warning(
+                    "DBWritingService: worker startup is still pending after %.1f seconds",
+                    self._STARTUP_WAIT_TIMEOUT_SECONDS,
+                )
+            self.raise_if_failed()
 
     def raise_if_failed(self) -> None:
         with self._exc_lock:
@@ -94,8 +104,18 @@ class DBWritingService(DBWriteQueue):
         self._stop_evt.set()
 
         if wait_forever:
+            next_log_at = time.monotonic() + self._SHUTDOWN_LOG_INTERVAL_SECONDS
             while self._thread.is_alive():
                 self._thread.join(timeout=1.0)
+                now = time.monotonic()
+                if now >= next_log_at:
+                    self._log.warning(
+                        "DBWritingService: still waiting for worker shutdown (qsize=%s, written=%s, flush_count=%s)",
+                        self.qsize(),
+                        self._written,
+                        self._flush_count,
+                    )
+                    next_log_at = now + self._SHUTDOWN_LOG_INTERVAL_SECONDS
         else:
             try:
                 self._thread.join(timeout=10.0)
@@ -142,6 +162,7 @@ class DBWritingService(DBWriteQueue):
                 self._apply_pragmas(conn)
                 if self._unsafe_fast and self._stage_tags_in_temp:
                     self._create_temp_staging(conn)
+                self._ready_evt.set()
                 self._process_queue(conn)
                 if self._unsafe_fast and self._stage_tags_in_temp:
                     self._merge_staging_into_persistent(conn)
@@ -158,6 +179,7 @@ class DBWritingService(DBWriteQueue):
             # Failure policy: worker-thread failures are fatal to the service and
             # are stored for caller-side propagation.
             self._record_failure(exc)
+            self._ready_evt.set()
             self._log.exception("DBWritingService crashed: %s", exc)
             self._stop_evt.set()
 

@@ -40,3 +40,6 @@ def test_spinner_overlay_updates_message_and_tracks_parent(qtbot) -> None:  # ty
     parent.resize(480, 240)
     overlay.eventFilter(parent, QEvent(QEvent.Type.Resize))
     assert overlay.geometry() == parent.rect()
+
+    overlay._remove_parent_event_filter()
+    assert overlay._event_filter_parent is None
