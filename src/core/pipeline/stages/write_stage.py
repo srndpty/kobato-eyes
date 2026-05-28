@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import logging
 import os
-import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -19,6 +18,15 @@ from ..testhooks import IDBWriterLike, TaggingDeps
 from .tag_stage import TagStageResult
 
 logger = logging.getLogger(__name__)
+
+
+def _unsafe_fast_enabled() -> bool:
+    """Return whether WriteStage should use the unsafe-fast DB writer path."""
+
+    value = os.environ.get("KE_DB_UNSAFE_FAST")
+    if value is None:
+        return True
+    return value.strip().lower() not in {"0", "false", "no", "off"}
 
 
 class WriteStageDeps(Protocol):
@@ -49,7 +57,7 @@ class _DefaultWriteStageDeps:
             fts_topk=getattr(settings, "fts_topk", 128),
             queue_size=safe_int(os.environ.get("KE_DB_QUEUE"), 1024, min_value=1),
             default_tagger_sig=ctx.tagger_sig,
-            unsafe_fast=True,
+            unsafe_fast=_unsafe_fast_enabled(),
             skip_fts=True,
             progress_cb=progress_cb,
         )
@@ -136,7 +144,6 @@ class WriteStage:
             with _quiesced_with(self._deps):
                 writer = self._deps.build_writer(ctx=ctx, progress_cb=_dbw_progress)
                 writer.start()
-                time.sleep(0.2)
                 writer.raise_if_failed()
 
                 for item in tag_result.db_items:
@@ -198,4 +205,4 @@ class WriteStage:
         return max(previous_processed, rebuilt)
 
 
-__all__ = ["WriteStage", "WriteStageResult", "WriteStageDeps"]
+__all__ = ["WriteStage", "WriteStageResult", "WriteStageDeps", "_unsafe_fast_enabled"]

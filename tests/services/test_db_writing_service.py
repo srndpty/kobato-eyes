@@ -254,6 +254,7 @@ def test_start_spawns_worker_and_processes_queue(monkeypatch: pytest.MonkeyPatch
 
     service.start()
     assert start_evt.wait(1.0)
+    assert service._ready_evt.is_set()
 
     item = DBItem(1, [("tag", 0.5, 0)], None, None, None, None)
     service.put(item)
@@ -278,6 +279,7 @@ def test_start_spawns_worker_and_processes_queue(monkeypatch: pytest.MonkeyPatch
 
 def test_start_is_idempotent_while_worker_is_running(monkeypatch: pytest.MonkeyPatch) -> None:
     service = DBWritingService("ignored.db")
+    service._ready_evt.set()
     start_calls = 0
     running = False
 
@@ -301,6 +303,7 @@ def test_start_is_idempotent_while_worker_is_running(monkeypatch: pytest.MonkeyP
 
 def test_start_after_stop_does_not_restart_used_thread(monkeypatch: pytest.MonkeyPatch) -> None:
     service = DBWritingService("ignored.db")
+    service._ready_evt.set()
     start_calls = 0
 
     class _DummyThread:
@@ -427,8 +430,10 @@ def test_worker_failure_is_rejected_by_public_api(monkeypatch: pytest.MonkeyPatc
     monkeypatch.setattr(DBWritingService, "_open_connection", fail_open_connection)
 
     service = DBWritingService("ignored.db")
-    service.start()
+    with pytest.raises(RuntimeError, match="database writer cannot start"):
+        service.start()
     assert started.wait(1.0)
+    assert service._ready_evt.is_set()
 
     for _ in range(100):
         if service._stop_evt.is_set():
@@ -526,6 +531,53 @@ def test_flush_batch_unsafe_fast_merges_into_persistent(tmp_path: Path) -> None:
 
 
 @pytest.mark.db_stress
+def test_flush_batch_unsafe_fast_empty_tags_delete_existing_tags(tmp_path: Path) -> None:
+    db_path = tmp_path / "unsafe-empty-tags.db"
+    file_id = _prepare_db(str(db_path), "C:/images/unsafe-empty-tags.png")
+
+    seed_service = DBWritingService(str(db_path), flush_chunk=1, unsafe_fast=False, fts_topk=4)
+    seed_conn = seed_service._open_connection()
+    try:
+        seed_service._apply_pragmas(seed_conn)
+        seed_service._flush_batch(seed_conn, [_make_item(file_id)])
+        assert seed_conn.execute("SELECT COUNT(*) FROM file_tags WHERE file_id = ?", (file_id,)).fetchone()[0] == 2
+    finally:
+        seed_conn.close()
+
+    service = DBWritingService(str(db_path), flush_chunk=1, unsafe_fast=True, fts_topk=4)
+    conn = service._open_connection()
+    try:
+        service._apply_pragmas(conn)
+        service._create_temp_staging(conn)
+        service._flush_batch(
+            conn,
+            [
+                DBItem(
+                    file_id=file_id,
+                    tags=[],
+                    width=128,
+                    height=96,
+                    tagger_sig="sig:empty",
+                    tagged_at=2345.6,
+                )
+            ],
+        )
+        service._merge_staging_into_persistent(conn)
+
+        assert conn.execute("SELECT COUNT(*) FROM file_tags WHERE file_id = ?", (file_id,)).fetchone()[0] == 0
+        meta = conn.execute(
+            "SELECT width, height, tagger_sig, last_tagged_at FROM files WHERE id = ?",
+            (file_id,),
+        ).fetchone()
+        assert meta["width"] == 128
+        assert meta["height"] == 96
+        assert meta["tagger_sig"] == "sig:empty"
+        assert meta["last_tagged_at"] == pytest.approx(2345.6)
+    finally:
+        conn.close()
+
+
+@pytest.mark.db_stress
 def test_apply_pragmas_falls_back_when_unsafe_fast_lock_unavailable() -> None:
     class _FakeConn:
         def __init__(self) -> None:
@@ -546,7 +598,33 @@ def test_apply_pragmas_falls_back_when_unsafe_fast_lock_unavailable() -> None:
 
     assert service._unsafe_fast is False
     assert service._stage_tags_in_temp is False
+    assert "PRAGMA locking_mode=NORMAL" in conn.statements
     assert "PRAGMA journal_mode=WAL" in conn.statements
+    assert conn.statements.index("PRAGMA locking_mode=NORMAL") < conn.statements.index("PRAGMA journal_mode=WAL")
+
+
+@pytest.mark.db_stress
+def test_apply_pragmas_falls_back_when_memory_journal_stays_locked() -> None:
+    class _FakeConn:
+        def __init__(self) -> None:
+            self.statements: list[str] = []
+
+        def execute(self, sql: str):
+            self.statements.append(sql)
+            if sql == "PRAGMA journal_mode=MEMORY":
+                raise db_writing_module.sqlite3.OperationalError("database is locked")
+            return None
+
+    conn = _FakeConn()
+    service = DBWritingService("ignored.db", unsafe_fast=True)
+
+    service._apply_pragmas(conn)  # type: ignore[arg-type]
+
+    assert service._unsafe_fast is False
+    assert service._stage_tags_in_temp is False
+    assert "PRAGMA locking_mode=NORMAL" in conn.statements
+    assert "PRAGMA journal_mode=WAL" in conn.statements
+    assert conn.statements.index("PRAGMA locking_mode=NORMAL") < conn.statements.index("PRAGMA journal_mode=WAL")
 
 
 @pytest.mark.db_stress
@@ -786,6 +864,86 @@ def test_stop_retries_stop_sentinel_while_worker_is_alive() -> None:
     assert [type(item) for item in queued] == [DBFlush, DBStop]
     assert fake_queue.stop_attempts == 1
     assert fake_thread.join_timeouts == [1.0]
+
+
+def test_stop_wait_forever_logs_periodic_shutdown_diagnostics(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    service = DBWritingService("ignored.db")
+    service._written = 42
+    service._flush_count = 3
+    monkeypatch.setattr(service, "_SHUTDOWN_LOG_INTERVAL_SECONDS", 0.0)
+
+    class _DummyQueue:
+        def qsize(self) -> int:
+            return 7
+
+        def put(self, item: object, block: bool = True, timeout: float | None = None) -> None:
+            return None
+
+    class _SlowThread:
+        def __init__(self) -> None:
+            self.join_calls = 0
+
+        def join(self, timeout: float | None = None) -> None:
+            assert timeout == 1.0
+            self.join_calls += 1
+
+        def is_alive(self) -> bool:
+            return self.join_calls < 2
+
+    thread = _SlowThread()
+    service._queue = _DummyQueue()  # type: ignore[assignment]
+    service._thread = thread  # type: ignore[assignment]
+
+    with caplog.at_level(logging.WARNING, logger="services.db_writing"):
+        service.stop(wait_forever=True)
+
+    assert "still waiting for worker shutdown (qsize=7, written=42, flush_count=3)" in caplog.text
+    assert thread.join_calls == 2
+
+
+def test_stop_wait_forever_logs_when_queue_full_before_join(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    service = DBWritingService("ignored.db")
+    service._written = 9
+    service._flush_count = 2
+    monkeypatch.setattr(service, "_SHUTDOWN_LOG_INTERVAL_SECONDS", 0.0)
+
+    class _FullThenOpenQueue:
+        def __init__(self) -> None:
+            self.stop_attempts = 0
+
+        def qsize(self) -> int:
+            return 5
+
+        def put(self, item: object, block: bool = True, timeout: float | None = None) -> None:
+            if isinstance(item, DBStop) and self.stop_attempts < 2:
+                self.stop_attempts += 1
+                raise queue.Full("queue blocked")
+
+    class _Thread:
+        def __init__(self) -> None:
+            self.alive = True
+
+        def join(self, timeout: float | None = None) -> None:
+            self.alive = False
+
+        def is_alive(self) -> bool:
+            return self.alive
+
+    fake_queue = _FullThenOpenQueue()
+    service._queue = fake_queue  # type: ignore[assignment]
+    service._thread = _Thread()  # type: ignore[assignment]
+
+    with caplog.at_level(logging.WARNING, logger="services.db_writing"):
+        service.stop(wait_forever=True)
+
+    assert fake_queue.stop_attempts == 2
+    assert "still waiting to enqueue queue stop sentinel (qsize=5, written=9, flush_count=2)" in caplog.text
 
 
 def test_process_queue_exits_after_stop_event_when_sentinel_is_missing(monkeypatch: pytest.MonkeyPatch) -> None:

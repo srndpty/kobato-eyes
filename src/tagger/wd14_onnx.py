@@ -26,6 +26,13 @@ from tagger.onnx_backend import (
     resolve_existing_file,
     validate_label_count,
 )
+from tagger.wd14_preprocessing import (
+    make_square_bgr,
+    preprocess_pil_to_bgr,
+    preprocess_pil_to_bgr_image,
+    smart_resize_square,
+)
+from tagger.wd14_runtime import configure_session_options, log_provider_details, resolve_profile_dir, safe_positive_int
 
 try:
     import torch
@@ -621,20 +628,7 @@ class WD14Tagger(ITagger):
     # バッチ用の「1枚→(H,W,3) float32」を返す軽量版を追加
     def _preprocess_np(self, image: Image.Image) -> np.ndarray:
         """1枚ぶんを (H, W, 3) float32 (BGR, 0..255) で返す。"""
-        height = int(self._input_height)
-
-        # alpha to white（PillowはC実装でGIL解放）
-        image = image.convert("RGBA")
-        new_image = Image.new("RGBA", image.size, "WHITE")
-        new_image.paste(image, mask=image)
-        image = new_image.convert("RGB")
-        rgb = np.asarray(image)  # HWC, uint8
-        bgr = rgb[:, :, ::-1]  # RGB -> BGR
-
-        bgr = self.make_square(bgr, height)
-        bgr = self.smart_resize(bgr, height)
-        # ここで float32 化。正規化はモデル仕様に合わせ 0..255 のまま（従来どおり）
-        return bgr.astype(np.float32, copy=False)
+        return preprocess_pil_to_bgr_image(image, int(self._input_height))
 
     # ==== 追加: しきい値ベクトルを作る ====
     def _build_threshold_vector(self, thresholds: Mapping[Any, float]) -> np.ndarray:
@@ -731,49 +725,15 @@ class WD14Tagger(ITagger):
         return labels
 
     def make_square(self, img, target_size):
-        old_size = img.shape[:2]
-        desired_size = max(old_size)
-        desired_size = max(desired_size, target_size)
-
-        delta_w = desired_size - old_size[1]
-        delta_h = desired_size - old_size[0]
-        top, bottom = delta_h // 2, delta_h - (delta_h // 2)
-        left, right = delta_w // 2, delta_w - (delta_w // 2)
-
-        color = [255, 255, 255]
-        return cv2.copyMakeBorder(img, top, bottom, left, right, cv2.BORDER_CONSTANT, value=color)
+        return make_square_bgr(img, target_size)
 
     # noinspection PyUnresolvedReferences
     def smart_resize(self, img, size):
-        # Assumes the image has already gone through make_square
-        if img.shape[0] > size:
-            img = cv2.resize(img, (size, size), interpolation=cv2.INTER_AREA)
-        elif img.shape[0] < size:
-            img = cv2.resize(img, (size, size), interpolation=cv2.INTER_CUBIC)
-        else:  # just do nothing
-            pass
-
-        return img
+        return smart_resize_square(img, size)
 
     # borrowed from: https://huggingface.co/spaces/deepghs/wd14_tagging_online/blob/main/app.py
     def _preprocess(self, image: Image.Image) -> np.ndarray:
-        height = int(self._input_height)
-
-        # alpha to white
-        rgba_image = image.convert("RGBA")
-        new_image = Image.new("RGBA", rgba_image.size, "WHITE")
-        new_image.paste(rgba_image, mask=rgba_image)
-        rgb_image = new_image.convert("RGB")
-        arr = np.asarray(rgb_image)
-
-        # PIL RGB to OpenCV BGR
-        arr = arr[:, :, ::-1]
-
-        arr = self.make_square(arr, height)
-        arr = self.smart_resize(arr, height)
-        arr = arr.astype(np.float32)
-        arr = np.expand_dims(arr, 0)
-        return arr
+        return preprocess_pil_to_bgr(image, int(self._input_height))
 
     @staticmethod
     def _resolve_thresholds(
@@ -956,65 +916,25 @@ def end_all_profiles() -> None:
 def _configure_session_options(options: "ort.SessionOptions") -> None:
     """Apply default optimisation, logging, and profiling settings."""
 
-    options.graph_optimization_level = getattr(ort.GraphOptimizationLevel, "ORT_ENABLE_ALL", 99)
-    intra_threads = _safe_positive_int(os.getenv("KE_ORT_INTRA_OP_THREADS"))
-    inter_threads = _safe_positive_int(os.getenv("KE_ORT_INTER_OP_THREADS"))
-    if intra_threads is not None:
-        options.intra_op_num_threads = intra_threads
-    if inter_threads is not None:
-        options.inter_op_num_threads = inter_threads
-
-    options.enable_profiling = bool(int(os.getenv("KE_ORT_PROFILE", "0")))
-    options.log_severity_level = 2
-    profile_dir = _resolve_profile_dir()
-    profile_dir.mkdir(parents=True, exist_ok=True)
-    options.profile_file_prefix = str(profile_dir / "wd14")
-    if options.enable_profiling:
-        logger.info("WD14: profiling enabled (prefix=%s)", options.profile_file_prefix)
+    configure_session_options(options, ort, logger)
 
 
 def _safe_positive_int(value: str | None) -> int | None:
     """Parse a positive integer environment value."""
 
-    if not value:
-        return None
-    try:
-        parsed = int(value)
-    except ValueError:
-        return None
-    return parsed if parsed > 0 else None
+    return safe_positive_int(value)
 
 
 def _log_provider_details(session: "ort.InferenceSession", chosen: Sequence[str]) -> None:
     """Log provider details for diagnostics in a consistent format."""
 
-    try:
-        session_providers = list(session.get_providers())
-    except Exception as exc:  # pragma: no cover - defensive logging
-        # Failure policy: provider detail logging is diagnostic-only.
-        logger.warning("WD14: failed to query session providers: %s", exc)
-        session_providers = []
-    try:
-        provider_options = session.get_provider_options()
-    except Exception as exc:  # pragma: no cover - defensive logging
-        # Failure policy: provider option logging is diagnostic-only.
-        logger.warning("WD14: failed to query provider options: %s", exc)
-        provider_options = {}
-    logger.info(
-        "WD14 providers=%s session_providers=%s options=%s",
-        list(chosen),
-        session_providers,
-        provider_options,
-    )
+    log_provider_details(session, chosen, logger)
 
 
 def _resolve_profile_dir() -> Path:
     """Resolve the directory used for ONNX Runtime profile output files."""
 
-    base = os.environ.get("APPDATA")
-    if base:
-        return Path(base) / "kobato-eyes" / "logs"
-    return Path.home() / "kobato-eyes" / "logs"
+    return resolve_profile_dir()
 
 
 _ACTIVE_TAGGERS = weakref.WeakSet()

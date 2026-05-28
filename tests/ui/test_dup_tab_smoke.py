@@ -118,12 +118,39 @@ def test_cluster_enables_actions_and_trash_updates_state(monkeypatch, dup_tab: D
     assert dup_tab._trash_button.isEnabled()  # type: ignore[attr-defined]
 
     dup_tab._view_model.mark_files_absent = lambda conn, ids: marked.append(list(ids))  # type: ignore[attr-defined,assignment]
-    monkeypatch.setattr("ui.dup_tab.trash_duplicate_entries", lambda entries: (list(entries), []))
+    monkeypatch.setattr("ui.dup_actions.trash_duplicate_entries", lambda entries: (list(entries), []))
 
     dup_tab._on_trash_checked()  # type: ignore[attr-defined]
 
     assert marked == [[2]]
     assert dup_tab._status_label.text() == "Moved 1 file(s) to trash."  # type: ignore[attr-defined]
+
+
+def test_mark_and_uncheck_actions_update_thumb_panel_tiles(dup_tab: DupTab, tmp_path: Path) -> None:
+    cluster = _cluster(tmp_path)
+    dup_tab._clusters = [cluster]  # type: ignore[attr-defined]
+    dup_tab._populate_tree()  # type: ignore[attr-defined]
+    dup_tab._populate_tick()  # type: ignore[attr-defined]
+    top = dup_tab._tree.topLevelItem(0)  # type: ignore[attr-defined]
+    assert top is not None
+
+    dup_tab._build_children_for_cluster(top, cluster)  # type: ignore[attr-defined]
+    panel = dup_tab._panel_of_group(top)  # type: ignore[attr-defined]
+    assert panel is not None
+
+    for tile in panel.tiles:
+        tile.set_checked(False)
+
+    dup_tab._on_mark_keep_largest()  # type: ignore[attr-defined]
+
+    checked_ids = {entry.file.file_id for entry in dup_tab._iter_checked_entries()}  # type: ignore[attr-defined]
+    assert checked_ids == {2}
+    assert {tile.entry.file.file_id: tile.is_checked() for tile in panel.tiles} == {1: False, 2: True}
+
+    dup_tab._on_uncheck_all()  # type: ignore[attr-defined]
+
+    assert list(dup_tab._iter_checked_entries()) == []  # type: ignore[attr-defined]
+    assert all(not tile.is_checked() for tile in panel.tiles)
 
 
 def test_duplicate_thumbnail_queue_deduplicates_pending_work(dup_tab: DupTab, tmp_path: Path) -> None:

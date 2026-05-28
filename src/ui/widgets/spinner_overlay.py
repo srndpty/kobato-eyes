@@ -28,6 +28,7 @@ class SpinnerOverlay(QWidget):
 
     def __init__(self, parent: QWidget) -> None:
         super().__init__(parent)
+        self._event_filter_parent: QWidget | None = parent
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, False)
         self.setAutoFillBackground(False)
@@ -65,6 +66,7 @@ class SpinnerOverlay(QWidget):
         layout.addStretch(1)
         self.hide()
         parent.installEventFilter(self)
+        self.destroyed.connect(lambda _obj=None: self._remove_parent_event_filter())
 
     def paintEvent(self, event) -> None:
         """全面を不透明で塗る。スタイルや属性に依存しないので確実。"""
@@ -94,6 +96,19 @@ class SpinnerOverlay(QWidget):
 
     def hide(self) -> None:  # type: ignore[override]
         super().hide()
+
+    def _remove_parent_event_filter(self) -> None:
+        """Detach the resize event filter from the parent during teardown."""
+
+        parent = self._event_filter_parent
+        if parent is None:
+            return
+        try:
+            parent.removeEventFilter(self)
+        except RuntimeError:
+            pass
+        finally:
+            self._event_filter_parent = None
 
     def _reposition(self) -> None:
         parent = self.parentWidget()
