@@ -531,6 +531,53 @@ def test_flush_batch_unsafe_fast_merges_into_persistent(tmp_path: Path) -> None:
 
 
 @pytest.mark.db_stress
+def test_flush_batch_unsafe_fast_empty_tags_delete_existing_tags(tmp_path: Path) -> None:
+    db_path = tmp_path / "unsafe-empty-tags.db"
+    file_id = _prepare_db(str(db_path), "C:/images/unsafe-empty-tags.png")
+
+    seed_service = DBWritingService(str(db_path), flush_chunk=1, unsafe_fast=False, fts_topk=4)
+    seed_conn = seed_service._open_connection()
+    try:
+        seed_service._apply_pragmas(seed_conn)
+        seed_service._flush_batch(seed_conn, [_make_item(file_id)])
+        assert seed_conn.execute("SELECT COUNT(*) FROM file_tags WHERE file_id = ?", (file_id,)).fetchone()[0] == 2
+    finally:
+        seed_conn.close()
+
+    service = DBWritingService(str(db_path), flush_chunk=1, unsafe_fast=True, fts_topk=4)
+    conn = service._open_connection()
+    try:
+        service._apply_pragmas(conn)
+        service._create_temp_staging(conn)
+        service._flush_batch(
+            conn,
+            [
+                DBItem(
+                    file_id=file_id,
+                    tags=[],
+                    width=128,
+                    height=96,
+                    tagger_sig="sig:empty",
+                    tagged_at=2345.6,
+                )
+            ],
+        )
+        service._merge_staging_into_persistent(conn)
+
+        assert conn.execute("SELECT COUNT(*) FROM file_tags WHERE file_id = ?", (file_id,)).fetchone()[0] == 0
+        meta = conn.execute(
+            "SELECT width, height, tagger_sig, last_tagged_at FROM files WHERE id = ?",
+            (file_id,),
+        ).fetchone()
+        assert meta["width"] == 128
+        assert meta["height"] == 96
+        assert meta["tagger_sig"] == "sig:empty"
+        assert meta["last_tagged_at"] == pytest.approx(2345.6)
+    finally:
+        conn.close()
+
+
+@pytest.mark.db_stress
 def test_apply_pragmas_falls_back_when_unsafe_fast_lock_unavailable() -> None:
     class _FakeConn:
         def __init__(self) -> None:

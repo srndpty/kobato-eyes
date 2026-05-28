@@ -147,14 +147,15 @@ class StagingMerger:
         """Merge temporary staging rows into persistent tables."""
 
         try:
-            row = conn.execute("SELECT count(*) FROM temp.tmp_file_tags").fetchone()
+            tag_row = conn.execute("SELECT count(*) FROM temp.tmp_file_tags").fetchone()
+            meta_row = conn.execute("SELECT count(*) FROM temp.tmp_files_meta").fetchone()
         except sqlite3.OperationalError:
             return
-        if not row or int(row[0]) == 0:
+        if not meta_row or int(meta_row[0]) == 0:
             return
-        total_tags = int(row[0])
-        total_files = int(conn.execute("SELECT count(DISTINCT file_id) FROM temp.tmp_file_tags").fetchone()[0])
-        total_meta = int(conn.execute("SELECT count(*) FROM temp.tmp_files_meta").fetchone()[0])
+        total_tags = int(tag_row[0]) if tag_row else 0
+        total_files = int(conn.execute("SELECT count(DISTINCT file_id) FROM temp.tmp_files_meta").fetchone()[0])
+        total_meta = int(meta_row[0])
         self._log.info("DBWritingService: offline merge start (tmp->disk)")
         self._emit_progress("merge.start", 0, total_tags)
         try:
@@ -169,7 +170,7 @@ class StagingMerger:
                 defs = [{"name": r[0], "category": int(r[1] or 0)} for r in rows]
                 upsert_tags_uncommitted(conn, defs)
             conn.execute("DROP TABLE IF EXISTS temp.tmp_file_ids")
-            conn.execute("CREATE TABLE temp.tmp_file_ids AS SELECT DISTINCT file_id FROM temp.tmp_file_tags")
+            conn.execute("CREATE TABLE temp.tmp_file_ids AS SELECT DISTINCT file_id FROM temp.tmp_files_meta")
             self._emit_progress("merge.delete", 0, total_files)
             done = 0
             for chunk in chunked_table(conn, "temp.tmp_file_ids", step=5000):
