@@ -1,6 +1,9 @@
-"""
-Aggregate public API for core.pipeline (backward compatibility).
-Re-exports are intentional; keep them listed in __all__ to satisfy linters.
+"""Public pipeline API and compatibility re-exports.
+
+``IndexPipeline`` and ``run_index_once`` are the preferred entry points for new
+indexing code.  Stage classes are re-exported for focused tests and advanced
+callers; underscored helpers remain compatibility shims until older UI paths
+are retired.
 """
 
 from core.config import load_settings

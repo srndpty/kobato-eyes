@@ -8,7 +8,7 @@ import time
 from collections import deque
 from contextlib import closing
 from pathlib import Path
-from typing import Iterator
+from typing import Callable, Iterator
 
 from PyQt6.QtCore import QEvent, QPoint, QSize, Qt, QThreadPool, QTimer, QtMsgType, qInstallMessageHandler
 from PyQt6.QtGui import QAction, QColor, QIcon, QImage, QPainter, QPixmap
@@ -60,6 +60,8 @@ from ui.viewmodels import DupViewModel
 
 logger = logging.getLogger(__name__)
 DEBUG_THUMBS = False
+_QT_MESSAGE_HANDLER_DEPTH = 0
+_PREVIOUS_QT_MESSAGE_HANDLER: Callable[..., object] | None = None
 
 
 def _qt_msg(mode, ctx, msg):
@@ -76,7 +78,35 @@ def _qt_msg(mode, ctx, msg):
     logger.warning(f"QT[{level}] {msg} ({ctx.file}:{ctx.line})")
 
 
-qInstallMessageHandler(_qt_msg)
+def _qt_logging_enabled() -> bool:
+    """Return whether duplicate-tab Qt message logging is explicitly enabled."""
+
+    value = os.environ.get("KOE_QT_LOG", "")
+    return DEBUG_THUMBS or value.lower() in {"1", "true", "yes", "on"}
+
+
+def _install_qt_message_handler() -> bool:
+    """Install the debug Qt message handler once and remember the previous one."""
+
+    global _PREVIOUS_QT_MESSAGE_HANDLER, _QT_MESSAGE_HANDLER_DEPTH
+    if not _qt_logging_enabled():
+        return False
+    if _QT_MESSAGE_HANDLER_DEPTH == 0:
+        _PREVIOUS_QT_MESSAGE_HANDLER = qInstallMessageHandler(_qt_msg)
+    _QT_MESSAGE_HANDLER_DEPTH += 1
+    return True
+
+
+def _restore_qt_message_handler() -> None:
+    """Restore the previous Qt message handler when the last debug user exits."""
+
+    global _PREVIOUS_QT_MESSAGE_HANDLER, _QT_MESSAGE_HANDLER_DEPTH
+    if _QT_MESSAGE_HANDLER_DEPTH <= 0:
+        return
+    _QT_MESSAGE_HANDLER_DEPTH -= 1
+    if _QT_MESSAGE_HANDLER_DEPTH == 0:
+        qInstallMessageHandler(_PREVIOUS_QT_MESSAGE_HANDLER)
+        _PREVIOUS_QT_MESSAGE_HANDLER = None
 
 
 class DupTab(QWidget):
@@ -90,6 +120,9 @@ class DupTab(QWidget):
     ) -> None:
         super().__init__(parent)
         self._view_model = view_model or DupViewModel(self)
+        self._qt_message_handler_installed = _install_qt_message_handler()
+        if self._qt_message_handler_installed:
+            self.destroyed.connect(lambda _obj=None: _restore_qt_message_handler())
         self._db_path = self._view_model.db_path
         self._jobs = JobManager(max_workers=1, parent=self)
         self._clusters: list[DuplicateCluster] = []

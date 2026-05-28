@@ -12,7 +12,6 @@ from PyQt6.QtCore import QModelIndex, QSize, Qt, QThread, QThreadPool, QTimer
 from PyQt6.QtGui import QKeySequence, QShortcut, QStandardItemModel
 from PyQt6.QtWidgets import (
     QAbstractItemView,
-    QApplication,
     QButtonGroup,
     QCompleter,
     QGroupBox,
@@ -103,12 +102,8 @@ class TagsTab(
         self._completer.setWidget(self._query_edit)  # ← これ大事
         self._query_edit.setCompleter(None)  # ← QLineEdit のデフォ補完は無効化
 
-        # event filter を “全部” に入れる（行・popup・viewport・アプリ全体）
-        self._query_edit.installEventFilter(self)
-        self._completer.popup().installEventFilter(self)
-        self._completer.popup().viewport().installEventFilter(self)
-
-        QApplication.instance().installEventFilter(self)
+        self._autocomplete_event_filters_installed = False
+        self._install_autocomplete_event_filters()
 
         self._suppress_return_once = False  # 直後の Enter を1回だけ無効化したい時用
 
@@ -379,16 +374,41 @@ class TagsTab(
         self._toast_timer = QTimer(self)
         self._toast_timer.setSingleShot(True)
         self._toast_timer.timeout.connect(lambda: self._toast_label.setVisible(False))
-
-        self._query_edit.installEventFilter(self)
         self._suppress_return_once = False  # Enter誤発火抑止フラグ
         self._progress_label: _ElidingLabel | None = None
 
         self._on_debug_toggled(False)
         self._show_placeholder(True)
         self._update_control_states()
+        self.destroyed.connect(lambda _obj=None: self._remove_autocomplete_event_filters())
         QTimer.singleShot(0, self._initialise_autocomplete)
         QTimer.singleShot(0, self._bootstrap_results_if_any)
+
+    def _install_autocomplete_event_filters(self) -> None:
+        """Install completion event filters only on widgets owned by this tab."""
+
+        if self._autocomplete_event_filters_installed:
+            return
+        self._query_edit.installEventFilter(self)
+        popup = self._completer.popup()
+        popup.installEventFilter(self)
+        popup.viewport().installEventFilter(self)
+        self._autocomplete_event_filters_installed = True
+
+    def _remove_autocomplete_event_filters(self) -> None:
+        """Remove completion event filters during tab teardown."""
+
+        if not self._autocomplete_event_filters_installed:
+            return
+        try:
+            self._query_edit.removeEventFilter(self)
+            popup = self._completer.popup()
+            popup.removeEventFilter(self)
+            popup.viewport().removeEventFilter(self)
+        except RuntimeError:
+            logger.debug("Autocomplete event filter removal skipped during Qt teardown", exc_info=True)
+        finally:
+            self._autocomplete_event_filters_installed = False
 
     def _on_debug_toggled(self, checked: bool) -> None:
         # 中身の表示・非表示
