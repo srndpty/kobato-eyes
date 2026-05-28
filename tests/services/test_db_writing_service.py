@@ -20,14 +20,10 @@ import pytest
 from db.schema import apply_schema
 
 _THIS_FILE = Path(__file__).resolve()
-for _candidate in _THIS_FILE.parents:
-    if (_candidate / "pyproject.toml").exists():
-        PROJECT_ROOT = _candidate
-        break
-else:  # pragma: no cover - defensive fallback for unexpected layouts
-    raise RuntimeError("Project root not found")
-
+PROJECT_ROOT = _THIS_FILE.parents[2]
 SRC_ROOT = PROJECT_ROOT / "src"
+if not (SRC_ROOT / "core").exists():  # pragma: no cover - defensive fallback for unexpected layouts
+    raise RuntimeError(f"Project root not found from {PROJECT_ROOT}")
 
 try:
     importlib.import_module("core.pipeline.contracts")

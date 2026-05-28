@@ -1,4 +1,9 @@
-"""Tagging job orchestration for kobato-eyes."""
+"""Legacy single-image tagging adapter for kobato-eyes.
+
+New indexing code should use :mod:`core.pipeline.stages` through
+``core.pipeline.run_index_once``.  This module remains as a compact
+compatibility API for tests and callers that still execute one image at a time.
+"""
 
 from __future__ import annotations
 
