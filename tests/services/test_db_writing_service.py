@@ -598,7 +598,9 @@ def test_apply_pragmas_falls_back_when_unsafe_fast_lock_unavailable() -> None:
 
     assert service._unsafe_fast is False
     assert service._stage_tags_in_temp is False
+    assert "PRAGMA locking_mode=NORMAL" in conn.statements
     assert "PRAGMA journal_mode=WAL" in conn.statements
+    assert conn.statements.index("PRAGMA locking_mode=NORMAL") < conn.statements.index("PRAGMA journal_mode=WAL")
 
 
 @pytest.mark.db_stress
@@ -620,7 +622,9 @@ def test_apply_pragmas_falls_back_when_memory_journal_stays_locked() -> None:
 
     assert service._unsafe_fast is False
     assert service._stage_tags_in_temp is False
+    assert "PRAGMA locking_mode=NORMAL" in conn.statements
     assert "PRAGMA journal_mode=WAL" in conn.statements
+    assert conn.statements.index("PRAGMA locking_mode=NORMAL") < conn.statements.index("PRAGMA journal_mode=WAL")
 
 
 @pytest.mark.db_stress

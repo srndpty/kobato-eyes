@@ -223,6 +223,14 @@ class DBWritingService(DBWriteQueue):
             except sqlite3.OperationalError as exc:
                 if "locked" in str(exc).lower():
                     self._log.warning("DBWritingService: EXCLUSIVE lock unavailable; falling back to WAL mode")
+                    try:
+                        self._restore_normal_mode(conn)
+                    except Exception as restore_exc:  # pragma: no cover - best effort
+                        # Failure policy: fallback cleanup should not mask the
+                        # locked-mode fallback path.
+                        self._log.warning(
+                            "DBWritingService: restore_normal_mode before fallback failed: %s", restore_exc
+                        )
                     # フォールバック：通常フローで書き込む
                     self._unsafe_fast = False
                     self._stage_tags_in_temp = False
