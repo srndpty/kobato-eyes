@@ -24,7 +24,6 @@ from PyQt6.QtWidgets import (
     QPushButton,
     QSizePolicy,
     QStackedWidget,
-    QTableView,
     QToolButton,
     QVBoxLayout,
     QWidget,
@@ -36,7 +35,7 @@ from db.connection import get_conn
 from tagger import labels_util
 from tagger.base import TagCategory
 from ui.file_actions import trash_path
-from ui.result_delegates import GridThumbDelegate
+from ui.result_delegates import GridThumbDelegate, HoverAwareDelegate, HoverRowTableView
 from ui.result_delegates import HighlightDelegate as _HighlightDelegate
 from ui.result_delegates import WrappingItemDelegate as _WrappingItemDelegate
 from ui.search_worker import SearchWorker
@@ -222,7 +221,7 @@ class TagsTab(
         ]
         self._table_model = QStandardItemModel(0, len(headers), self)
         self._table_model.setHorizontalHeaderLabels(headers)
-        self._table_view = QTableView(self)
+        self._table_view = HoverRowTableView(self)
         self._table_view.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self._table_view.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self._table_view.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
@@ -281,6 +280,7 @@ class TagsTab(
                 self._table_view.setItemDelegateForColumn(1, self._filename_delegate)
                 self._table_view.setItemDelegateForColumn(2, self._folder_delegate)
             self._table_view.setItemDelegateForColumn(tags_col, self._tags_delegate)
+        self._table_view.setItemDelegate(HoverAwareDelegate(self._table_view))
         self._grid_delegate = GridThumbDelegate(self._THUMB_SIZE, self._grid_view)
         self._grid_view.setItemDelegate(self._grid_delegate)
 
