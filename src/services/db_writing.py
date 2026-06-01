@@ -89,17 +89,19 @@ class DBWritingService(DBWriteQueue):
             self._started = True
             self._thread.start()
             timeout_sec = self._startup_timeout()
-            if not self._ready_evt.wait(timeout_sec):
-                exc = TimeoutError(f"DBWritingService startup timed out after {timeout_sec}s")
-                self._record_failure(exc)
-                # 初期化途中の worker を停止し、リソースを回収する
-                self._stop_evt.set()
-                try:
-                    self._queue.put_nowait(DBStop())
-                except Exception:
-                    pass
-                self._thread.join(timeout=1.0)
-                raise exc
+            while not self._ready_evt.wait(timeout_sec):
+                if not self._thread.is_alive():
+                    # スレッドが例外ハンドラを通らずに死んだ場合（通常は起こらないが安全網として）
+                    exc = TimeoutError("DBWritingService: worker thread died before becoming ready")
+                    self._record_failure(exc)
+                    raise exc
+                # スレッドが生きている場合は bootstrap 中（大規模 DB のインデックス構築など）
+                # なので失敗扱いにせず警告して待ち続ける
+                self._log.warning(
+                    "DBWritingService: worker startup still pending after %.1f seconds"
+                    " (thread alive; bootstrap may be running on a large database)",
+                    timeout_sec,
+                )
             self.raise_if_failed()
 
     def raise_if_failed(self) -> None:
