@@ -158,6 +158,7 @@ def test_plan_index_finished_warns_in_status_when_write_failed() -> None:
         or "stale" in plan.status
         or "更新失敗" in plan.status
     )
+    # write_failed でも run_search=True: ファイルレコードは書き込み済みのため検索結果は更新する
     assert plan.run_search is True
     assert plan.retag_active is False
 

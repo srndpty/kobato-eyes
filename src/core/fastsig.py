@@ -84,6 +84,8 @@ def compute_signatures_mp(
         # mapは戻り順が固定されて速い。進捗を出したい場合はas_completedでもOK
         for out in ex.map(_compute_worker, tasks, chunksize=chunksize):
             if cancel_fn and cancel_fn():
+                # with ブロック脱出時に __exit__ が shutdown を再実行するが、
+                # 既に shutdown 済みの executor への呼び出しは無害なため許容する
                 ex.shutdown(wait=False, cancel_futures=True)
                 return results
             done += 1

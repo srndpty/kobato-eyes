@@ -258,8 +258,9 @@ class TagStage:
                 if not rgb_list:
                     continue
 
-                qsz = getattr(loader, "qsize", lambda: -1)()
-                logger.info("PIPE batch=%d wait_batch=%.2fms loader_qsize=%d", len(rgb_list), wait_batch_ms, qsz)
+                qsz = getattr(loader, "qsize", lambda: None)()
+                qsz_str = "?" if qsz is None else str(qsz)
+                logger.info("PIPE batch=%d wait_batch=%.2fms loader_qsize=%s", len(rgb_list), wait_batch_ms, qsz_str)
 
                 try:
                     if supports_prepared:

@@ -92,6 +92,13 @@ class DBWritingService(DBWriteQueue):
             if not self._ready_evt.wait(timeout_sec):
                 exc = TimeoutError(f"DBWritingService startup timed out after {timeout_sec}s")
                 self._record_failure(exc)
+                # 初期化途中の worker を停止し、リソースを回収する
+                self._stop_evt.set()
+                try:
+                    self._queue.put_nowait(DBStop())
+                except Exception:
+                    pass
+                self._thread.join(timeout=1.0)
                 raise exc
             self.raise_if_failed()
 

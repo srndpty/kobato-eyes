@@ -119,7 +119,9 @@ def test_compute_signatures_mp_respects_cancel_fn(monkeypatch) -> None:
     monkeypatch.setattr(fastsig, "ProcessPoolExecutor", CancellableFakeExecutor)
     monkeypatch.setattr(fastsig, "_compute_worker", lambda task: (task[0], 10, 20))
 
-    # 2 番目のアイテム処理前にキャンセルが発動するカウンター
+    # 1 件目の結果を受け取った後（2 回目の cancel_fn 呼び出し時）にキャンセルが発動する
+    # ※ cancel check は各結果の yield 後に行われるため「処理前キャンセル」ではなく
+    #   「結果受取後・次の結果追加前」のキャンセルになる
     call_count = 0
 
     def cancel_after_first() -> bool:
@@ -134,7 +136,7 @@ def test_compute_signatures_mp_respects_cancel_fn(monkeypatch) -> None:
         cancel_fn=cancel_after_first,
     )
 
-    # 最初の1件だけ取得し、残りはキャンセルで早期リターン
+    # 1 件目の結果のみが results に積まれ、2 件目の結果を受け取った時点で早期リターンする
     assert result == [(1, 10, 20)]
     assert shutdown_called == [(False, True)]
 

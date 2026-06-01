@@ -26,6 +26,16 @@ def _row_get(row: object, key: str, default: object = None) -> object:
         return default
 
 
+def _to_float(value: object) -> float | None:
+    """DB row 値を float に変換。None または変換不能な値は None を返す（壊れた DB への耐性）。"""
+    if value is None:
+        return None
+    try:
+        return float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+
+
 class ScanStageDeps(Protocol):
     """Protocol for database operations required by :class:`ScanStage`."""
 
@@ -214,8 +224,7 @@ class ScanStage:
                         sha = str(_row_get(row, "sha256", "") or "")
                         changed = False
 
-                    _raw_at = None if changed else (_row_get(row, "indexed_at") if row else None)
-                    indexed_at: float | None = float(_raw_at) if _raw_at is not None else None  # type: ignore[arg-type]
+                    indexed_at = _to_float(_row_get(row, "indexed_at") if row else None) if not changed else None
                     file_id = self._deps.upsert_file(
                         conn,
                         path=path_str,
@@ -231,8 +240,7 @@ class ScanStage:
                     )
                     tagger_sig_value = _row_get(row, "tagger_sig") if row is not None else None
                     stored_sig = str(tagger_sig_value) if tagger_sig_value is not None else None
-                    stored_tagged_at = _row_get(row, "last_tagged_at") if row is not None else None
-                    last_tagged_at = float(stored_tagged_at) if stored_tagged_at is not None else None  # type: ignore[arg-type]
+                    last_tagged_at = _to_float(_row_get(row, "last_tagged_at") if row is not None else None)
                     needs_tagging = is_new or changed or (not tag_exists) or (stored_sig != ctx.tagger_sig)
 
                     records.append(
