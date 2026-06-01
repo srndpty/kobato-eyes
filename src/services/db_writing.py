@@ -29,8 +29,15 @@ logger = logging.getLogger(__name__)
 class DBWritingService(DBWriteQueue):
     """Thread-backed queue that persists tagging results in batches."""
 
-    _STARTUP_WAIT_TIMEOUT_SECONDS = 5.0
     _SHUTDOWN_LOG_INTERVAL_SECONDS = 60.0
+
+    @staticmethod
+    def _startup_timeout() -> float:
+        """KE_DBWRITER_STARTUP_TIMEOUT 環境変数で上書き可能（デフォルト 5.0s）。"""
+        try:
+            return max(0.1, float(os.environ.get("KE_DBWRITER_STARTUP_TIMEOUT", "5.0")))
+        except ValueError:
+            return 5.0
 
     def __init__(
         self,
@@ -81,10 +88,19 @@ class DBWritingService(DBWriteQueue):
         if not self._thread.is_alive():
             self._started = True
             self._thread.start()
-            if not self._ready_evt.wait(self._STARTUP_WAIT_TIMEOUT_SECONDS):
+            timeout_sec = self._startup_timeout()
+            while not self._ready_evt.wait(timeout_sec):
+                if not self._thread.is_alive():
+                    # スレッドが例外ハンドラを通らずに死んだ場合（通常は起こらないが安全網として）
+                    exc = TimeoutError("DBWritingService: worker thread died before becoming ready")
+                    self._record_failure(exc)
+                    raise exc
+                # スレッドが生きている場合は bootstrap 中（大規模 DB のインデックス構築など）
+                # なので失敗扱いにせず警告して待ち続ける
                 self._log.warning(
-                    "DBWritingService: worker startup is still pending after %.1f seconds",
-                    self._STARTUP_WAIT_TIMEOUT_SECONDS,
+                    "DBWritingService: worker startup still pending after %.1f seconds"
+                    " (thread alive; bootstrap may be running on a large database)",
+                    timeout_sec,
                 )
             self.raise_if_failed()
 
@@ -99,13 +115,13 @@ class DBWritingService(DBWriteQueue):
         self._queue.put(item, block=block, timeout=timeout)
         self.raise_if_failed()
 
-    def qsize(self) -> int:
+    def qsize(self) -> int | None:
         try:
             return self._queue.qsize()
         except Exception:
             # Failure policy: queue size is diagnostic-only and must not fail
             # callers while shutdown/error propagation uses raise_if_failed().
-            return -1
+            return None
 
     def stop(self, *, flush: bool = True, wait_forever: bool = False) -> None:
         self._log.debug("DBWritingService: stop requested (flush=%s, wait_forever=%s)", flush, wait_forever)

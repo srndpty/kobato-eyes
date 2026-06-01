@@ -7,7 +7,7 @@ import os
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, Protocol
+from typing import Iterator, Mapping, Protocol
 
 import numpy as np
 from PIL import Image
@@ -26,7 +26,7 @@ logger = logging.getLogger(__name__)
 class LoaderIterable(Protocol):
     """Iterator interface produced by loader factories."""
 
-    def __iter__(self) -> Iterable[tuple[list[str], np.ndarray, list[tuple[int, int]]]]: ...
+    def __iter__(self) -> Iterator[tuple[list[str], np.ndarray, list[tuple[int, int]]]]: ...
 
     def close(self) -> None: ...
 
@@ -126,8 +126,9 @@ class TagStage:
         records: list[_FileRecord],
     ) -> TagStageResult:
         """Run tagging inference and prepare DB items for persistence."""
-        thresholds = ctx.thresholds
-        max_tags_map = ctx.max_tags_map
+        # Mapping 型で宣言し、resolver のフォールバックとも互換性を持たせる
+        thresholds: Mapping[TagCategory, float] | None = ctx.thresholds
+        max_tags_map: Mapping[TagCategory, int] | None = ctx.max_tags_map
         tagger_sig = ctx.tagger_sig
         settings = ctx.settings
 
@@ -257,8 +258,9 @@ class TagStage:
                 if not rgb_list:
                     continue
 
-                qsz = getattr(loader, "qsize", lambda: -1)()
-                logger.info("PIPE batch=%d wait_batch=%.2fms loader_qsize=%d", len(rgb_list), wait_batch_ms, qsz)
+                qsz = getattr(loader, "qsize", lambda: None)()
+                qsz_str = "?" if qsz is None else str(qsz)
+                logger.info("PIPE batch=%d wait_batch=%.2fms loader_qsize=%s", len(rgb_list), wait_batch_ms, qsz_str)
 
                 try:
                     if supports_prepared:

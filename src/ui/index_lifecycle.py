@@ -213,7 +213,14 @@ def plan_index_finished(
             run_search=False,
         )
 
+    write_failed = bool(stats.get("write_failed", False))
+    write_error = str(stats.get("write_error", ""))
     status = f"{prefix} complete in {elapsed:.2f}s."
+    if write_failed:
+        status += f"  ※検索インデックス更新失敗（検索結果が古い可能性あり）: {write_error}"
+    # write_failed でも run_search=True を維持する:
+    # ファイルレコード自体は書き込み済みのため、既存インデックスで検索結果を更新する方が
+    # 何も更新しないより UX として優れている（鮮度の問題はステータスメッセージで通知済み）
     return IndexFinishPlan(
         status=status,
         toast=format_index_success_toast(stats, retag_active=retag_active),

@@ -990,3 +990,92 @@ def test_flush_batch_triggers_checkpoint_when_wal_large(monkeypatch: pytest.Monk
         assert any("PRAGMA wal_checkpoint(PASSIVE)" in sql for sql in pragma_statements)
     finally:
         conn.close()
+
+
+def test_start_raises_when_worker_dies_before_ready(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """worker スレッドが ready になる前に死んだ場合に TimeoutError を raise し、失敗状態にする。
+    スレッドが生きている間は警告して待ち続けるため、スレッドが死んでいる状態をシミュレートする。
+    """
+    db_path = tmp_path / "timeout.db"
+    _prepare_db(str(db_path), "C:/images/timeout.png")
+
+    service = DBWritingService(str(db_path))
+    # スレッドを実際に起動せず、かつ「死んでいる」状態に見せる
+    monkeypatch.setattr(service._thread, "start", lambda: None)
+    monkeypatch.setattr(service._thread, "is_alive", lambda: False)
+    monkeypatch.setattr(service._ready_evt, "wait", lambda _: False)
+
+    with pytest.raises(TimeoutError, match="worker thread died before becoming ready"):
+        service.start()
+
+    # サービスが失敗状態になっており、以降の呼び出しも raise する
+    with pytest.raises(TimeoutError):
+        service.raise_if_failed()
+
+
+def test_start_warns_and_waits_when_worker_alive_but_slow(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """worker スレッドが生きているが遅い場合（大規模 DB bootstrap など）は
+    失敗扱いにせず警告を出しながら待ち続け、ready になったら正常続行する。
+    """
+    db_path = tmp_path / "slow.db"
+    _prepare_db(str(db_path), "C:/images/slow.png")
+
+    service = DBWritingService(str(db_path))
+    monkeypatch.setattr(service._thread, "start", lambda: None)
+
+    # is_alive: 最初の呼び出し（外側ガード）は False（未起動）、以降は True（bootstrap 中）
+    is_alive_calls: list[bool] = []
+
+    def is_alive_fn() -> bool:
+        is_alive_calls.append(True)
+        return len(is_alive_calls) > 1
+
+    monkeypatch.setattr(service._thread, "is_alive", is_alive_fn)
+
+    wait_count = 0
+
+    def slow_wait(_):
+        nonlocal wait_count
+        wait_count += 1
+        return wait_count >= 2  # 1 回目は False（遅延）、2 回目は True（ready）
+
+    monkeypatch.setattr(service._ready_evt, "wait", slow_wait)
+
+    # start() は raise しない（警告を出して2回目の wait で成功）
+    service.start()
+    assert wait_count == 2
+
+
+def test_start_raises_on_dead_worker_and_subsequent_put_also_raises(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """worker が死んだ後は put() も raise する。"""
+    db_path = tmp_path / "timeout2.db"
+    _prepare_db(str(db_path), "C:/images/timeout2.png")
+
+    service = DBWritingService(str(db_path))
+    monkeypatch.setattr(service._thread, "start", lambda: None)
+    monkeypatch.setattr(service._thread, "is_alive", lambda: False)
+    monkeypatch.setattr(service._ready_evt, "wait", lambda _: False)
+
+    with pytest.raises(TimeoutError):
+        service.start()
+
+    with pytest.raises(TimeoutError):
+        service.put(object())
+
+
+def test_qsize_returns_none_when_queue_raises(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """qsize() がキューの例外時に None を返す（-1 ではなく）。"""
+    db_path = tmp_path / "qsize.db"
+    _prepare_db(str(db_path), "C:/images/qsize.png")
+
+    service = DBWritingService(str(db_path))
+
+    def raise_on_qsize():
+        raise NotImplementedError("not supported on this platform")
+
+    monkeypatch.setattr(service._queue, "qsize", raise_on_qsize)
+
+    result = service.qsize()
+    assert result is None

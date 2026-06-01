@@ -9,7 +9,7 @@ from collections import OrderedDict
 from contextlib import suppress
 from pathlib import Path
 from threading import Lock
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from PIL import Image, ImageFile, ImageOps, UnidentifiedImageError
 from PIL.Image import DecompressionBombError
@@ -26,8 +26,12 @@ else:  # pragma: no cover - import depends on runtime environment
 
 from utils.paths import ensure_dirs, get_cache_dir
 
-Qt: Any = _QT_VALUE
-QPixmap: Any = _QPIXMAP_VALUE
+if TYPE_CHECKING:
+    from PyQt6.QtCore import Qt
+    from PyQt6.QtGui import QPixmap
+else:
+    Qt: Any = _QT_VALUE
+    QPixmap: Any = _QPIXMAP_VALUE
 
 DEFAULT_THUMBNAIL_SIZE = (320, 320)
 _THUMB_CACHE_LIMIT = 256

@@ -182,6 +182,7 @@ class DuplicateScanRunnable(QRunnable):
                     progress=tick,
                     apply_to_db=True,
                     unsafe_fast=True,
+                    cancel_fn=self._is_cancelled,
                 )
                 computed_by_id = {file_id: (phash, dhash) for (file_id, phash, dhash) in computed}
                 patched = 0

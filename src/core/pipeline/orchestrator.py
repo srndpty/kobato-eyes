@@ -135,20 +135,22 @@ class IndexPipeline:
                     if write_result is not None:
                         stats["write_failed"] = not write_result.success and not write_result.cancelled
                         stats["write_error"] = write_result.error
+                        if stats["write_failed"]:
+                            logger.warning("Write stage failed: %s", write_result.error)
                         if write_result.success:
                             stats["signatures"] = write_result.written
 
         stats["elapsed_sec"] = time.perf_counter() - start
         stats["cancelled"] = self.emitter.cancelled(self.ctx.is_cancelled)
         self.emitter.emit(IndexProgress(phase=IndexPhase.DONE, done=1, total=1), force=True)
-        sec = stats["elapsed_sec"]
+        sec = float(stats.get("elapsed_sec") or 0.0)  # type: ignore[arg-type]
         logger.info(
             "Indexing complete: scanned=%d, new=%d, tagged=%d, (%dm:%ds)",
             stats["scanned"],
             stats["new_or_changed"],
             stats["tagged"],
-            sec // 60,
-            sec % 60,
+            int(sec) // 60,
+            int(sec) % 60,
         )
         return stats
 
