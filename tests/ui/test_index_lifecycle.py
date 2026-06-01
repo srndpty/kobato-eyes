@@ -127,3 +127,62 @@ def test_connection_retry_action_classifies_restore_errors() -> None:
     assert connection_retry_action(sqlite3.OperationalError("database is locked"), 2) == "retry"
     assert connection_retry_action(sqlite3.OperationalError("database is busy"), 1) == "give_up"
     assert connection_retry_action(sqlite3.OperationalError("disk I/O error"), 2) == "raise"
+
+
+def test_plan_index_finished_warns_in_status_when_write_failed() -> None:
+    """write_failed=True のとき status に警告を含み、run_search は True を維持する。"""
+    plan = plan_index_finished(
+        {
+            "elapsed_sec": 2.5,
+            "cancelled": False,
+            "scanned": 10,
+            "new_or_changed": 3,
+            "tagged": 3,
+            "retagged": 0,
+            "signatures": 0,
+            "tagger_sig": "wd14:v1",
+            "write_failed": True,
+            "write_error": "FTS rebuild failed: disk I/O error",
+        },
+        refresh_active=False,
+        retag_active=False,
+        active_refresh_folder=None,
+        has_current_query=True,
+    )
+
+    assert "完了" in plan.status or "complete" in plan.status
+    assert (
+        "失敗" in plan.status
+        or "write_failed" in plan.status
+        or "FTS" in plan.status
+        or "stale" in plan.status
+        or "更新失敗" in plan.status
+    )
+    assert plan.run_search is True
+    assert plan.retag_active is False
+
+
+def test_plan_index_finished_ok_when_write_succeeded() -> None:
+    """write_failed=False のとき status に警告を含まない（回帰テスト）。"""
+    plan = plan_index_finished(
+        {
+            "elapsed_sec": 1.0,
+            "cancelled": False,
+            "scanned": 5,
+            "new_or_changed": 2,
+            "tagged": 2,
+            "retagged": 0,
+            "signatures": 2,
+            "tagger_sig": "wd14:v1",
+            "write_failed": False,
+            "write_error": None,
+        },
+        refresh_active=False,
+        retag_active=False,
+        active_refresh_folder=None,
+        has_current_query=False,
+    )
+
+    assert "更新失敗" not in plan.status
+    assert "stale" not in plan.status
+    assert plan.run_search is True

@@ -451,13 +451,13 @@ class PrefetchLoaderPrepared:
                 self._record_route("failed", time.perf_counter() - started, ok=False, path=p, byte_count=byte_count)
                 return (p, None, None, "failed")
 
-    def qsize(self) -> int:
+    def qsize(self) -> int | None:
         try:
             return self._q.qsize()
         except Exception:
             # Failure policy: qsize is diagnostic-only and must never fail the
             # tagging pipeline.
-            return -1
+            return None
 
     def _producer(self) -> None:
         try:

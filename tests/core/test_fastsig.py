@@ -87,3 +87,74 @@ def test_fast_fill_missing_signatures_can_skip_database(monkeypatch, tmp_path: P
     result = fastsig.fast_fill_missing_signatures(str(tmp_path / "app.db"), [(1, "a")], apply_to_db=False)
 
     assert result == [(1, 2, 3)]
+
+
+def test_compute_signatures_mp_respects_cancel_fn(monkeypatch) -> None:
+    """cancel_fn が True を返した時点で早期リターンし、部分結果だけが返る。"""
+
+    shutdown_called = []
+
+    class CancellableFakeExecutor:
+        def __init__(self, *, max_workers: int, mp_context) -> None:
+            pass
+
+        def __enter__(self) -> "CancellableFakeExecutor":
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        def shutdown(self, wait: bool, cancel_futures: bool) -> None:
+            shutdown_called.append((wait, cancel_futures))
+
+        def map(
+            self,
+            func: Callable[[tuple[int, str]], tuple[int, int, int] | None],
+            tasks: Iterable[tuple[int, str]],
+            chunksize: int,
+        ):
+            for task in tasks:
+                yield func(task)
+
+    monkeypatch.setattr(fastsig, "ProcessPoolExecutor", CancellableFakeExecutor)
+    monkeypatch.setattr(fastsig, "_compute_worker", lambda task: (task[0], 10, 20))
+
+    # 2 番目のアイテム処理前にキャンセルが発動するカウンター
+    call_count = 0
+
+    def cancel_after_first() -> bool:
+        nonlocal call_count
+        call_count += 1
+        return call_count >= 2  # 2回目以降は True（キャンセル）
+
+    result = fastsig.compute_signatures_mp(
+        [(1, "a"), (2, "b"), (3, "c")],
+        max_workers=1,
+        chunksize=1,
+        cancel_fn=cancel_after_first,
+    )
+
+    # 最初の1件だけ取得し、残りはキャンセルで早期リターン
+    assert result == [(1, 10, 20)]
+    assert shutdown_called == [(False, True)]
+
+
+def test_fast_fill_missing_signatures_passes_cancel_fn(monkeypatch, tmp_path: Path) -> None:
+    """fast_fill_missing_signatures が cancel_fn を compute_signatures_mp に転送する。"""
+    received_cancel_fn = []
+
+    def fake_compute(items, *, max_workers, chunksize, progress, cancel_fn=None):
+        received_cancel_fn.append(cancel_fn)
+        return []
+
+    monkeypatch.setattr(fastsig, "compute_signatures_mp", fake_compute)
+
+    sentinel = lambda: True  # noqa: E731
+    fastsig.fast_fill_missing_signatures(
+        str(tmp_path / "app.db"),
+        [(1, "a")],
+        apply_to_db=False,
+        cancel_fn=sentinel,
+    )
+
+    assert received_cancel_fn == [sentinel]

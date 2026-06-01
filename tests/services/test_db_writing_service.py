@@ -990,3 +990,53 @@ def test_flush_batch_triggers_checkpoint_when_wal_large(monkeypatch: pytest.Monk
         assert any("PRAGMA wal_checkpoint(PASSIVE)" in sql for sql in pragma_statements)
     finally:
         conn.close()
+
+
+def test_start_raises_on_startup_timeout(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """start() がタイムアウトした場合に TimeoutError を raise し、サービスを失敗状態にする。"""
+    db_path = tmp_path / "timeout.db"
+    _prepare_db(str(db_path), "C:/images/timeout.png")
+
+    service = DBWritingService(str(db_path))
+    # _ready_evt.wait が常に False を返す（タイムアウト）ようにモック
+    monkeypatch.setattr(service._ready_evt, "wait", lambda _: False)
+
+    with pytest.raises(TimeoutError, match="startup timed out"):
+        service.start()
+
+    # サービスが失敗状態になっており、以降の呼び出しも raise する
+    with pytest.raises(TimeoutError):
+        service.raise_if_failed()
+
+
+def test_start_raises_on_timeout_and_subsequent_put_also_raises(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """start() タイムアウト後は put() も raise する。"""
+    db_path = tmp_path / "timeout2.db"
+    _prepare_db(str(db_path), "C:/images/timeout2.png")
+
+    service = DBWritingService(str(db_path))
+    monkeypatch.setattr(service._ready_evt, "wait", lambda _: False)
+
+    with pytest.raises(TimeoutError):
+        service.start()
+
+    with pytest.raises(TimeoutError):
+        service.put(object())
+
+
+def test_qsize_returns_none_when_queue_raises(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """qsize() がキューの例外時に None を返す（-1 ではなく）。"""
+    db_path = tmp_path / "qsize.db"
+    _prepare_db(str(db_path), "C:/images/qsize.png")
+
+    service = DBWritingService(str(db_path))
+
+    def raise_on_qsize():
+        raise NotImplementedError("not supported on this platform")
+
+    monkeypatch.setattr(service._queue, "qsize", raise_on_qsize)
+
+    result = service.qsize()
+    assert result is None

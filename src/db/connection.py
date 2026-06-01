@@ -98,9 +98,10 @@ def _ensure_indexes(conn: sqlite3.Connection) -> None:
             conn.execute("PRAGMA cache_size=-262144")  # ~256MB
             conn.execute(sql)
             conn.commit()
-        finally:
-            dt = time.perf_counter() - t0
-            logger.info("index: %-28s end (%.2fs)", name, dt)
+            logger.info("index: %-28s end (%.2fs)", name, time.perf_counter() - t0)
+        except sqlite3.OperationalError as exc:
+            logger.warning("index: %-28s FAILED (%.2fs): %s", name, time.perf_counter() - t0, exc)
+            raise
 
     build("uq_tags_name", "CREATE UNIQUE INDEX IF NOT EXISTS uq_tags_name          ON tags(name)")
     build("idx_tags_category", "CREATE INDEX IF NOT EXISTS idx_tags_category            ON tags(category)")

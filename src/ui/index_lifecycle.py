@@ -213,7 +213,11 @@ def plan_index_finished(
             run_search=False,
         )
 
+    write_failed = bool(stats.get("write_failed", False))
+    write_error = str(stats.get("write_error", ""))
     status = f"{prefix} complete in {elapsed:.2f}s."
+    if write_failed:
+        status += f"  ※検索インデックス更新失敗（検索結果が古い可能性あり）: {write_error}"
     return IndexFinishPlan(
         status=status,
         toast=format_index_success_toast(stats, retag_active=retag_active),

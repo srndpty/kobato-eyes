@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol
+from typing import Protocol, Sequence
 
 from core.pipeline.types import IndexPhase, IndexProgress, PipelineContext, ProgressEmitter, _FileRecord
 from core.scanner import DEFAULT_EXTENSIONS, iter_images
@@ -54,10 +54,23 @@ class ScanStageDeps(Protocol):
         """Fetch file rows keyed by path, including tag-existence metadata."""
 
 
+class _RowLike(Protocol):
+    """Minimal row interface for sqlite3 rows and test doubles."""
+
+    def __getitem__(self, key: str) -> object: ...
+
+
+class _CursorLike(Protocol):
+    """Minimal cursor interface returned by DBConnection.execute."""
+
+    def fetchone(self) -> _RowLike | None: ...
+    def fetchall(self) -> list[_RowLike]: ...
+
+
 class DBConnection(Protocol):
     """Subset of the SQLite connection interface used by the scan stage."""
 
-    def execute(self, sql: str, params: tuple[object, ...] | list[object]) -> object: ...
+    def execute(self, sql: str, params: Sequence[object] = ()) -> _CursorLike: ...
 
     def commit(self) -> None: ...
 
@@ -77,7 +90,7 @@ class _DefaultScanStageDeps:
     def fetch_file(self, conn: DBConnection, path: str):
         from db.repository import get_file_by_path
 
-        return get_file_by_path(conn, path)
+        return get_file_by_path(conn, path)  # type: ignore[arg-type]
 
     def upsert_file(
         self,
@@ -92,7 +105,7 @@ class _DefaultScanStageDeps:
         from db.repository import upsert_file
 
         return upsert_file(
-            conn,
+            conn,  # type: ignore[arg-type]
             path=path,
             size=size,
             mtime=mtime,
@@ -184,8 +197,8 @@ class ScanStage:
                         row = self._deps.fetch_file(conn, path_str)
                     is_new = row is None
                     if row is not None:
-                        size_changed = int(_row_get(row, "size", 0) or 0) != stat.st_size
-                        mtime_changed = float(_row_get(row, "mtime", 0.0) or 0.0) != stat.st_mtime
+                        size_changed = int(_row_get(row, "size", 0) or 0) != stat.st_size  # type: ignore[call-overload]
+                        mtime_changed = float(_row_get(row, "mtime", 0.0) or 0.0) != stat.st_mtime  # type: ignore[arg-type]
                     else:
                         size_changed = True
                         mtime_changed = True
@@ -201,7 +214,8 @@ class ScanStage:
                         sha = str(_row_get(row, "sha256", "") or "")
                         changed = False
 
-                    indexed_at = None if changed else (_row_get(row, "indexed_at") if row else None)
+                    _raw_at = None if changed else (_row_get(row, "indexed_at") if row else None)
+                    indexed_at: float | None = float(_raw_at) if _raw_at is not None else None  # type: ignore[arg-type]
                     file_id = self._deps.upsert_file(
                         conn,
                         path=path_str,
@@ -218,7 +232,7 @@ class ScanStage:
                     tagger_sig_value = _row_get(row, "tagger_sig") if row is not None else None
                     stored_sig = str(tagger_sig_value) if tagger_sig_value is not None else None
                     stored_tagged_at = _row_get(row, "last_tagged_at") if row is not None else None
-                    last_tagged_at = float(stored_tagged_at) if stored_tagged_at is not None else None
+                    last_tagged_at = float(stored_tagged_at) if stored_tagged_at is not None else None  # type: ignore[arg-type]
                     needs_tagging = is_new or changed or (not tag_exists) or (stored_sig != ctx.tagger_sig)
 
                     records.append(

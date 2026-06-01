@@ -40,8 +40,8 @@ class DBWriteQueue(Protocol):
     def put(self, item: object, block: bool = True, timeout: float | None = None) -> None:
         """Enqueue an item for persistence."""
 
-    def qsize(self) -> int:
-        """Return the current queue size if supported."""
+    def qsize(self) -> int | None:
+        """Return the current queue size, or None if unavailable."""
 
     def stop(self, *, flush: bool = True, wait_forever: bool = False) -> None:
         """Stop the background worker, optionally flushing pending items."""

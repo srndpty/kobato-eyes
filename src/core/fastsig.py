@@ -68,6 +68,7 @@ def compute_signatures_mp(
     max_workers: Optional[int] = None,
     chunksize: int = 64,
     progress: Optional[Callable[[int, int], None]] = None,
+    cancel_fn: Optional[Callable[[], bool]] = None,
 ) -> List[Tuple[int, int, int]]:
     """(file_id, path) を並列で処理して (file_id, ph, dh) を返す。"""
     if not tasks:
@@ -82,6 +83,9 @@ def compute_signatures_mp(
     with ProcessPoolExecutor(max_workers=workers, mp_context=ctx) as ex:
         # mapは戻り順が固定されて速い。進捗を出したい場合はas_completedでもOK
         for out in ex.map(_compute_worker, tasks, chunksize=chunksize):
+            if cancel_fn and cancel_fn():
+                ex.shutdown(wait=False, cancel_futures=True)
+                return results
             done += 1
             if out is not None:
                 results.append(out)
@@ -102,9 +106,16 @@ def fast_fill_missing_signatures(
     progress: Optional[Callable[[int, int], None]] = None,
     apply_to_db: bool = True,
     unsafe_fast: bool = True,
+    cancel_fn: Optional[Callable[[], bool]] = None,
 ) -> List[Tuple[int, int, int]]:
     """未計算の署名を並列計算→まとめてDB反映（戻り値: 成功した行の( fid, ph, dh )）。"""
-    computed = compute_signatures_mp(items, max_workers=max_workers, chunksize=chunksize, progress=progress)
+    computed = compute_signatures_mp(
+        items,
+        max_workers=max_workers,
+        chunksize=chunksize,
+        progress=progress,
+        cancel_fn=cancel_fn,
+    )
     if apply_to_db and computed:
         with sqlite3.connect(db_path) as conn:
             if unsafe_fast:
