@@ -62,10 +62,6 @@ if ($Fix) {
         Write-Host ""
         Write-Host "==> no changed Python files to fix" -ForegroundColor Cyan
     } else {
-        Invoke-Step "isort" {
-            & $Python -m isort @ChangedPythonFiles
-        }
-
         Invoke-Step "ruff check --fix" {
             & $Python -m ruff check @ChangedPythonFiles --fix
         }
@@ -82,15 +78,6 @@ Invoke-Step "git diff --check" {
 
 Invoke-Step "git diff --cached --check" {
     git -c core.whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol diff --cached --check
-}
-
-if ($ChangedPythonFiles.Count -eq 0) {
-    Write-Host ""
-    Write-Host "==> no changed Python files to check with isort" -ForegroundColor Cyan
-} else {
-    Invoke-Step "isort check" {
-        & $Python -m isort @ChangedPythonFiles --check-only
-    }
 }
 
 Invoke-Step "ruff check" {

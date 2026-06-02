@@ -24,7 +24,6 @@ from PyQt6.QtWidgets import (
     QPushButton,
     QSizePolicy,
     QStackedWidget,
-    QTableView,
     QToolButton,
     QVBoxLayout,
     QWidget,
@@ -36,9 +35,13 @@ from db.connection import get_conn
 from tagger import labels_util
 from tagger.base import TagCategory
 from ui.file_actions import trash_path
-from ui.result_delegates import GridThumbDelegate
-from ui.result_delegates import HighlightDelegate as _HighlightDelegate
-from ui.result_delegates import WrappingItemDelegate as _WrappingItemDelegate
+from ui.result_delegates import (
+    GridThumbDelegate,
+    HighlightDelegate,
+    HoverAwareDelegate,
+    HoverRowTableView,
+    WrappingItemDelegate,
+)
 from ui.search_worker import SearchWorker
 from ui.tag_rendering import _SCORE_COLOR
 from ui.tag_rendering import filter_tags_by_threshold as _filter_tags_by_threshold
@@ -222,7 +225,7 @@ class TagsTab(
         ]
         self._table_model = QStandardItemModel(0, len(headers), self)
         self._table_model.setHorizontalHeaderLabels(headers)
-        self._table_view = QTableView(self)
+        self._table_view = HoverRowTableView(self)
         self._table_view.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self._table_view.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self._table_view.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
@@ -272,15 +275,16 @@ class TagsTab(
         self._positive_terms: list[str] = []
         self._relevance_thresholds: dict[int, float] = {}
         self._use_relevance = False
-        self._filename_delegate = _WrappingItemDelegate(self._table_view)
-        self._folder_delegate = _WrappingItemDelegate(self._table_view)
-        self._tags_delegate = _HighlightDelegate(lambda: self._highlight_terms, self._table_view)
+        self._filename_delegate = WrappingItemDelegate(self._table_view)
+        self._folder_delegate = WrappingItemDelegate(self._table_view)
+        self._tags_delegate = HighlightDelegate(lambda: self._highlight_terms, self._table_view)
         tags_col = self._table_model.columnCount() - 1
         if tags_col >= 0:
             if self._table_model.columnCount() > 2:
                 self._table_view.setItemDelegateForColumn(1, self._filename_delegate)
                 self._table_view.setItemDelegateForColumn(2, self._folder_delegate)
             self._table_view.setItemDelegateForColumn(tags_col, self._tags_delegate)
+        self._table_view.setItemDelegate(HoverAwareDelegate(self._table_view))
         self._grid_delegate = GridThumbDelegate(self._THUMB_SIZE, self._grid_view)
         self._grid_view.setItemDelegate(self._grid_delegate)
 

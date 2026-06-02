@@ -7,7 +7,7 @@ from html import escape
 
 import pytest
 
-from ui.tags_tab import _HighlightDelegate
+from ui.result_delegates import HighlightDelegate
 
 BACKGROUND = "#ffee77"
 FOREGROUND = "#000000"
@@ -37,7 +37,7 @@ def _has_highlight_for_term(html: str, term: str) -> bool:
 
 @pytest.mark.not_gui
 def test_highlight_exact_match_only_with_tags() -> None:
-    html = _HighlightDelegate._to_html_with_highlight(
+    html = HighlightDelegate._to_html_with_highlight(
         text="ignored",
         terms=["nurse"],
         tags=[("nurse", 0.91), ("nurse_cap", 0.80)],
@@ -55,7 +55,7 @@ def test_highlight_exact_match_only_with_tags() -> None:
 
 @pytest.mark.not_gui
 def test_highlight_is_case_insensitive() -> None:
-    html = _HighlightDelegate._to_html_with_highlight(
+    html = HighlightDelegate._to_html_with_highlight(
         text="ignored",
         terms=["NuRSe"],  # 大文字小文字は無視
         tags=[("nurse", 0.75), ("doctor", 0.50)],
@@ -70,7 +70,7 @@ def test_highlight_is_case_insensitive() -> None:
 
 @pytest.mark.not_gui
 def test_highlight_escapes_html_in_names() -> None:
-    html = _HighlightDelegate._to_html_with_highlight(
+    html = HighlightDelegate._to_html_with_highlight(
         text="ignored",
         terms=["<nurse & co>"],
         tags=[("<nurse & co>", 0.50), ("doctor", 0.50)],
@@ -86,7 +86,7 @@ def test_highlight_escapes_html_in_names() -> None:
 
 @pytest.mark.not_gui
 def test_highlight_multiple_terms() -> None:
-    html = _HighlightDelegate._to_html_with_highlight(
+    html = HighlightDelegate._to_html_with_highlight(
         text="ignored",
         terms=["nurse", "doctor"],
         tags=[("patient", 0.33), ("doctor", 0.80), ("nurse", 0.70)],
@@ -106,7 +106,7 @@ def test_highlight_multiple_terms() -> None:
 
 @pytest.mark.not_gui
 def test_highlight_no_match_results_in_plain_list() -> None:
-    html = _HighlightDelegate._to_html_with_highlight(
+    html = HighlightDelegate._to_html_with_highlight(
         text="ignored",
         terms=["surgeon"],
         tags=[("nurse", 0.40), ("doctor", 0.60)],

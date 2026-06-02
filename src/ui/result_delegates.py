@@ -5,9 +5,9 @@ from __future__ import annotations
 import html
 from collections.abc import Callable, Iterable
 
-from PyQt6.QtCore import QModelIndex, QRect, QRectF, QSize, Qt
-from PyQt6.QtGui import QPalette, QPixmap, QTextDocument, QTextOption
-from PyQt6.QtWidgets import QApplication, QStyle, QStyledItemDelegate, QStyleOptionViewItem, QWidget
+from PyQt6.QtCore import QEvent, QModelIndex, QRect, QRectF, QSize, Qt
+from PyQt6.QtGui import QMouseEvent, QPalette, QPixmap, QTextDocument, QTextOption
+from PyQt6.QtWidgets import QApplication, QStyle, QStyledItemDelegate, QStyleOptionViewItem, QTableView, QWidget
 
 from ui.tag_rendering import (
     _SCORE_COLOR,
@@ -17,6 +17,52 @@ from ui.tag_rendering import (
     pick_highlight_colors,
     render_tag_html,
 )
+
+
+class HoverRowTableView(QTableView):
+    """QTableView that tracks the hovered row for row-level hover highlighting."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._hover_row: int = -1
+        self.viewport().setMouseTracking(True)
+
+    @property
+    def hover_row(self) -> int:
+        return self._hover_row
+
+    def mouseMoveEvent(self, event: QMouseEvent) -> None:
+        index = self.indexAt(event.pos())
+        new_row = index.row() if index.isValid() else -1
+        if new_row != self._hover_row:
+            self._hover_row = new_row
+            self.viewport().update()
+        super().mouseMoveEvent(event)
+
+    def leaveEvent(self, event: QEvent) -> None:
+        if self._hover_row != -1:
+            self._hover_row = -1
+            self.viewport().update()
+        super().leaveEvent(event)
+
+
+def _apply_row_hover(opt: QStyleOptionViewItem, index: QModelIndex, hover_row: int) -> None:
+    if hover_row >= 0 and index.row() == hover_row:
+        opt.state = opt.state | QStyle.StateFlag.State_MouseOver
+    else:
+        opt.state = opt.state & ~QStyle.StateFlag.State_MouseOver
+
+
+class HoverAwareDelegate(QStyledItemDelegate):
+    """Default delegate that applies row-level hover highlighting."""
+
+    def paint(self, painter: object, option: QStyleOptionViewItem, index: QModelIndex) -> None:
+        opt = QStyleOptionViewItem(option)
+        self.initStyleOption(opt, index)
+        if isinstance(opt.widget, HoverRowTableView):
+            _apply_row_hover(opt, index, opt.widget.hover_row)
+        style = opt.widget.style() if opt.widget else QApplication.style()
+        style.drawControl(QStyle.ControlElement.CE_ItemViewItem, opt, painter, opt.widget)
 
 
 def grid_caption_lines(text: str) -> list[str]:
@@ -63,6 +109,8 @@ class WrappingItemDelegate(QStyledItemDelegate):
     def paint(self, painter, option: QStyleOptionViewItem, index: QModelIndex) -> None:
         opt = QStyleOptionViewItem(option)
         self.initStyleOption(opt, index)
+        if isinstance(opt.widget, HoverRowTableView):
+            _apply_row_hover(opt, index, opt.widget.hover_row)
         text = opt.text
         opt.text = ""
         style = opt.widget.style() if opt.widget else QApplication.style()
@@ -150,6 +198,8 @@ class HighlightDelegate(QStyledItemDelegate):
     def paint(self, painter, option: QStyleOptionViewItem, index: QModelIndex) -> None:
         opt = QStyleOptionViewItem(option)
         self.initStyleOption(opt, index)
+        if isinstance(opt.widget, HoverRowTableView):
+            _apply_row_hover(opt, index, opt.widget.hover_row)
         opt.text = ""
         style = opt.widget.style() if opt.widget else QApplication.style()
         style.drawControl(QStyle.ControlElement.CE_ItemViewItem, opt, painter, opt.widget)
@@ -265,6 +315,8 @@ class GridThumbDelegate(QStyledItemDelegate):
 __all__ = [
     "GridThumbDelegate",
     "HighlightDelegate",
+    "HoverAwareDelegate",
+    "HoverRowTableView",
     "WrappingItemDelegate",
     "grid_caption_lines",
     "should_paint_text_background",
