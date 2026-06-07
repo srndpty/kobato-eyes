@@ -14,15 +14,18 @@ from utils.image_io import safe_load_image
 log = logging.getLogger(__name__)
 
 
-def _u64(x: int) -> int:
-    return int(x) & ((1 << 64) - 1)
+def _to_signed64(x: int) -> int:
+    # SQLite の INTEGER は符号付き64bit。符号なし(>=2^63)のまま渡すと
+    # OverflowError になり upsert が無言で失敗するため、必ず符号付きに丸める。
+    v = int(x) & ((1 << 64) - 1)
+    return v - (1 << 64) if v >= (1 << 63) else v
 
 
 def compute_signatures_from_image(im: Image.Image) -> tuple[int, int]:
     # 例外は呼び出し側で握る
     p = phash(im)
     d = dhash(im)
-    return (_u64(p), _u64(d))
+    return (_to_signed64(p), _to_signed64(d))
 
 
 def ensure_signatures(
@@ -55,5 +58,5 @@ def ensure_signatures(
         upsert_signatures(conn, file_id=file_id, phash_u64=p, dhash_u64=d)
         return True
     except Exception as e:
-        log.debug("ensure_signatures failed for %s: %s", path or f"file_id={file_id}", e)
+        log.warning("ensure_signatures failed for %s: %s", path or f"file_id={file_id}", e)
         return False
