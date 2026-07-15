@@ -184,12 +184,14 @@
   |---|---:|
   | unit のみ、従来 omit | 80.16% |
   | unit + gui/smoke combine、従来 omit | 82.95% |
-  | unit + gui/smoke combine、omit 4 件解除 | 83.63% |
+  | unit + gui/smoke combine、omit 4 件解除 | 83.62% |
 - 実装:
   - `src/ui/dup_widgets.py`、`src/ui/tags_tab.py`、`src/ui/dup_tree_controller.py`、`src/ui/dup_actions.py` を coverage omit から外した。
-  - `fail_under` を 80 から 82 に引き上げた。実測 83.63% に対して約 1.6pp の余裕を残す。
-  - `scripts/check.ps1` と CI unit job を `coverage run` + `coverage run --append -m pytest -m "gui or smoke"` の 2 段計測に揃えた。
-  - CI の Step Summary に markdown coverage report を出し、`coverage.xml` を artifact として保存する。
+  - coverage の表示精度を `precision = 2` にし、実測・CI・ローカル表示の粒度を揃えた。
+  - `fail_under` を 80 から 82 に引き上げた。実測 83.62% に対して約 1.6pp の余裕を残す。
+  - `scripts/check.ps1` と CI unit job を `not (gui or smoke or integration or db_stress or gpu)` + `gui or smoke` の排他的な 2 段計測に揃えた。
+  - 1 段目は `KOE_HEADLESS=1` を明示し、2 段目だけ `KOE_HEADLESS` を解除する。ローカルでは実行前の `KOE_HEADLESS` を退避・復元する。
+  - CI の Step Summary に markdown coverage report を出し、`coverage.xml` を artifact として保存する。summary / xml 生成は `--fail-under=0` とし、閾値判定は専用の `coverage report` step に集約する。
 - 今後の判断:
   - `fail_under` 85 到達には、`settings_tab`（79%）/ `tag_stats`（76%）/ `dup_thumbnail_controller`（76%）/ `dup_tab`（64%）へ、各 1 境界ずつテストを追加してから段階的に引き上げる。
   - `pixai_onnx`（48%）/ `wd14_onnx`（50%）は、モック ONNX session のテスト拡充とセットで将来 un-omit する。
@@ -197,6 +199,7 @@
 - 注意:
   - GUI テストは既に必須ジョブだが、今後は coverage gate にも影響する。
   - 余裕は約 1.6pp のため、UI 大物ファイルの行数増減で TOTAL が動きやすい。
+  - `coverage-xml` artifact は成功時の統合 coverage を主目的とする。失敗時は GitHub Actions の fail-fast により、実行済み範囲のみ、または生成なしになる場合がある。
 - 検証対象:
   - `.\scripts\check.ps1`
   - CI unit job の Step Summary と `coverage-xml` artifact

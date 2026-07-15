@@ -90,10 +90,10 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -c requirements-dev.lock -e ".[dev,tagging-cpu]"
 
-      - name: Pytest with coverage (unit)
+      - name: Pytest with coverage (non-GUI)
         env:
           KOE_HEADLESS: "1"
-        run: python -m coverage run -m pytest -p no:cov
+        run: python -m coverage run -m pytest -m "not (gui or smoke or integration or db_stress or gpu)" -p no:cov
 
       - name: Pytest with coverage (gui/smoke append)
         run: python -m coverage run --append -m pytest -m "gui or smoke" -p no:cov
@@ -102,14 +102,14 @@ jobs:
         if: always()
         run: |
           "## Coverage" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
-          python -m coverage report --format=markdown | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+          python -m coverage report --format=markdown --fail-under=0 | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
 
       - name: Coverage report (fail_under gate)
         run: python -m coverage report
 
       - name: Coverage xml
         if: always()
-        run: python -m coverage xml -o coverage.xml
+        run: python -m coverage xml --fail-under=0 -o coverage.xml
 
       - name: Upload coverage artifact
         if: always()
@@ -117,6 +117,7 @@ jobs:
         with:
           name: coverage-xml
           path: coverage.xml
+          if-no-files-found: error
 
   integration:
     name: Integration tests

@@ -94,6 +94,7 @@ source = ["src"]
 [tool.coverage.report]
 show_missing = true
 skip_covered = true
+precision = 2
 fail_under = 82
 omit = [
     "src/tagger/pixai_onnx.py",
