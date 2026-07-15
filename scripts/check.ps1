@@ -138,7 +138,9 @@ if ($NoCoverage) {
 
         Remove-Item Env:KOE_HEADLESS -ErrorAction SilentlyContinue
         Invoke-Step "coverage run pytest gui or smoke" {
-            & $Python -m coverage run --append -m pytest -m "gui or smoke" -q -p no:cov
+            & $Python -m coverage run --append -m pytest `
+                -m "(gui or smoke) and not integration and not db_stress and not gpu" `
+                -q -p no:cov
         }
     } finally {
         if ($HeadlessWasSet) {

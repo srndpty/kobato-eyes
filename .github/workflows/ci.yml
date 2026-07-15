@@ -96,7 +96,7 @@ jobs:
         run: python -m coverage run -m pytest -m "not (gui or smoke or integration or db_stress or gpu)" -p no:cov
 
       - name: Pytest with coverage (gui/smoke append)
-        run: python -m coverage run --append -m pytest -m "gui or smoke" -p no:cov
+        run: python -m coverage run --append -m pytest -m "(gui or smoke) and not integration and not db_stress and not gpu" -p no:cov
 
       - name: Coverage summary
         if: always()

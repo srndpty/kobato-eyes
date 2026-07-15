@@ -184,12 +184,12 @@
   |---|---:|
   | unit のみ、従来 omit | 80.16% |
   | unit + gui/smoke combine、従来 omit | 82.95% |
-  | unit + gui/smoke combine、omit 4 件解除 | 83.62% |
+  | unit + gui/smoke combine、omit 4 件解除 | 83.61% |
 - 実装:
   - `src/ui/dup_widgets.py`、`src/ui/tags_tab.py`、`src/ui/dup_tree_controller.py`、`src/ui/dup_actions.py` を coverage omit から外した。
   - coverage の表示精度を `precision = 2` にし、実測・CI・ローカル表示の粒度を揃えた。
-  - `fail_under` を 80 から 82 に引き上げた。実測 83.62% に対して約 1.6pp の余裕を残す。
-  - `scripts/check.ps1` と CI unit job を `not (gui or smoke or integration or db_stress or gpu)` + `gui or smoke` の排他的な 2 段計測に揃えた。
+  - `fail_under` を 80 から 82 に引き上げた。実測 83.61% に対して約 1.6pp の余裕を残す。
+  - `scripts/check.ps1` と CI unit job を `not (gui or smoke or integration or db_stress or gpu)` + `(gui or smoke) and not integration and not db_stress and not gpu` の排他的な 2 段計測に揃えた。
   - 1 段目は `KOE_HEADLESS=1` を明示し、2 段目だけ `KOE_HEADLESS` を解除する。ローカルでは実行前の `KOE_HEADLESS` を退避・復元する。
   - CI の Step Summary に markdown coverage report を出し、`coverage.xml` を artifact として保存する。summary / xml 生成は `--fail-under=0` とし、閾値判定は専用の `coverage report` step に集約する。
 - 今後の判断:
