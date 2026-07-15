@@ -67,7 +67,6 @@ jobs:
     env:
       PYTHONPATH: src
       QT_QPA_PLATFORM: offscreen
-      KOE_HEADLESS: "1"
       PIP_DISABLE_PIP_VERSION_CHECK: "1"
 
     steps:
@@ -91,10 +90,34 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -c requirements-dev.lock -e ".[dev,tagging-cpu]"
 
-      - name: Pytest with coverage
+      - name: Pytest with coverage (non-GUI)
+        env:
+          KOE_HEADLESS: "1"
+        run: python -m coverage run -m pytest -m "not (gui or smoke or integration or db_stress or gpu)" -p no:cov
+
+      - name: Pytest with coverage (gui/smoke append)
+        run: python -m coverage run --append -m pytest -m "(gui or smoke) and not integration and not db_stress and not gpu" -p no:cov
+
+      - name: Coverage summary
+        if: always()
         run: |
-          python -m coverage run -m pytest -p no:cov
-          python -m coverage report
+          "## Coverage" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+          python -m coverage report --format=markdown --fail-under=0 | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+
+      - name: Coverage report (fail_under gate)
+        run: python -m coverage report
+
+      - name: Coverage xml
+        if: always()
+        run: python -m coverage xml --fail-under=0 -o coverage.xml
+
+      - name: Upload coverage artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-xml
+          path: coverage.xml
+          if-no-files-found: error
 
   integration:
     name: Integration tests

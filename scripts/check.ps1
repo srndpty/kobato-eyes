@@ -25,7 +25,6 @@ if (Test-Path -LiteralPath $VenvPython) {
 }
 
 $env:PYTHONPATH = "src"
-$env:KOE_HEADLESS = "1"
 
 $ChangedPythonFiles = @(
     @(
@@ -95,8 +94,24 @@ if (-not $SkipTypeCheck) {
 }
 
 if ($NoCoverage) {
-    Invoke-Step "pytest" {
-        & $Python -m pytest -q
+    $HeadlessWasSet = Test-Path Env:KOE_HEADLESS
+    if ($HeadlessWasSet) {
+        $HeadlessValue = $env:KOE_HEADLESS
+    } else {
+        $HeadlessValue = $null
+    }
+
+    try {
+        $env:KOE_HEADLESS = "1"
+        Invoke-Step "pytest" {
+            & $Python -m pytest -q
+        }
+    } finally {
+        if ($HeadlessWasSet) {
+            $env:KOE_HEADLESS = $HeadlessValue
+        } else {
+            Remove-Item Env:KOE_HEADLESS -ErrorAction SilentlyContinue
+        }
     }
 } else {
     $CoverageDir = Split-Path $CoverageFile -Parent
@@ -106,8 +121,33 @@ if ($NoCoverage) {
 
     $env:COVERAGE_FILE = $CoverageFile
 
-    Invoke-Step "coverage run pytest" {
-        & $Python -m coverage run -m pytest -q
+    $HeadlessWasSet = Test-Path Env:KOE_HEADLESS
+    if ($HeadlessWasSet) {
+        $HeadlessValue = $env:KOE_HEADLESS
+    } else {
+        $HeadlessValue = $null
+    }
+
+    try {
+        $env:KOE_HEADLESS = "1"
+        Invoke-Step "coverage run pytest non-GUI" {
+            & $Python -m coverage run -m pytest `
+                -m "not (gui or smoke or integration or db_stress or gpu)" `
+                -q -p no:cov
+        }
+
+        Remove-Item Env:KOE_HEADLESS -ErrorAction SilentlyContinue
+        Invoke-Step "coverage run pytest gui or smoke" {
+            & $Python -m coverage run --append -m pytest `
+                -m "(gui or smoke) and not integration and not db_stress and not gpu" `
+                -q -p no:cov
+        }
+    } finally {
+        if ($HeadlessWasSet) {
+            $env:KOE_HEADLESS = $HeadlessValue
+        } else {
+            Remove-Item Env:KOE_HEADLESS -ErrorAction SilentlyContinue
+        }
     }
 
     Invoke-Step "coverage report" {
