@@ -35,7 +35,8 @@ class _ObservedDBWritingService(DBWritingService):
         conn = super()._open_connection()
 
         def observe_statement(statement: str) -> None:
-            if statement.strip().upper() == "BEGIN IMMEDIATE":
+            normalized = statement.strip().rstrip(";").upper()
+            if normalized == "BEGIN IMMEDIATE":
                 self._transaction_attempted.set()
 
         conn.set_trace_callback(observe_statement)
@@ -64,6 +65,7 @@ def test_stop_flush_waits_for_lock_then_persists_all_rows(tmp_path: Path) -> Non
 
     lock_conn = sqlite3.connect(db_path, timeout=1.0)
     lock_conn.execute("BEGIN IMMEDIATE")
+    transaction_attempted.clear()
     for file_id in file_ids:
         service.put(DBItem(file_id, [("artist:kobato", 0.9, 1)], 64, 48, "sig:v1", 1234.5))
 
@@ -83,20 +85,32 @@ def test_stop_flush_waits_for_lock_then_persists_all_rows(tmp_path: Path) -> Non
     # The DB writer is also a daemon. Keeping this coordinator daemonized ensures
     # a writer deadlock fails the assertion instead of holding pytest open.
     stop_thread = threading.Thread(target=stop_service, name="DBWriterStopTest", daemon=True)
-    stop_thread.start()
+    stop_thread_started = False
+    stop_started_in_time = False
+    transaction_attempted_in_time = False
+    stop_was_blocked = False
+    stop_finished_in_time = False
     try:
-        assert stop_started.wait(timeout=2.0)
-        assert transaction_attempted.wait(timeout=2.0)
-        assert not stop_finished.is_set()
+        stop_thread.start()
+        stop_thread_started = True
+        stop_started_in_time = stop_started.wait(timeout=2.0)
+        transaction_attempted_in_time = transaction_attempted.wait(timeout=2.0)
+        stop_was_blocked = not stop_finished.is_set()
     finally:
         lock_conn.rollback()
         lock_conn.close()
+        if stop_thread_started:
+            stop_finished_in_time = stop_finished.wait(timeout=10.0)
+            stop_thread.join(timeout=1.0)
 
-    assert stop_finished.wait(timeout=10.0)
-    stop_thread.join(timeout=1.0)
+    assert stop_started_in_time
+    assert transaction_attempted_in_time
+    assert stop_was_blocked
+    assert stop_finished_in_time
     assert not stop_thread.is_alive()
     if stop_errors:
         raise stop_errors[0]
+    assert not service.is_running
 
     conn = get_conn(db_path, timeout=2.0)
     try:
