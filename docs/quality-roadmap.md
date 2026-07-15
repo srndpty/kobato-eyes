@@ -176,6 +176,31 @@
   - `.\scripts\check-gui-smoke.ps1`
   - `.\scripts\check-package-smoke.ps1`
 
+## フェーズ 13: GUI 込みカバレッジ計測と omit 縮小（実装済み）
+
+- 目的: unit のみのカバレッジ計測で UI テスト実績が見えない状態を改め、CI とローカル標準チェックの数値を実態に合わせる。
+- 実測:
+  | 計測条件 | カバレッジ |
+  |---|---:|
+  | unit のみ、従来 omit | 80.16% |
+  | unit + gui/smoke combine、従来 omit | 82.95% |
+  | unit + gui/smoke combine、omit 4 件解除 | 83.63% |
+- 実装:
+  - `src/ui/dup_widgets.py`、`src/ui/tags_tab.py`、`src/ui/dup_tree_controller.py`、`src/ui/dup_actions.py` を coverage omit から外した。
+  - `fail_under` を 80 から 82 に引き上げた。実測 83.63% に対して約 1.6pp の余裕を残す。
+  - `scripts/check.ps1` と CI unit job を `coverage run` + `coverage run --append -m pytest -m "gui or smoke"` の 2 段計測に揃えた。
+  - CI の Step Summary に markdown coverage report を出し、`coverage.xml` を artifact として保存する。
+- 今後の判断:
+  - `fail_under` 85 到達には、`settings_tab`（79%）/ `tag_stats`（76%）/ `dup_thumbnail_controller`（76%）/ `dup_tab`（64%）へ、各 1 境界ずつテストを追加してから段階的に引き上げる。
+  - `pixai_onnx`（48%）/ `wd14_onnx`（50%）は、モック ONNX session のテスト拡充とセットで将来 un-omit する。
+  - mypy `files` と coverage `omit` は目的が異なるため、同一リストへの統一はしない。
+- 注意:
+  - GUI テストは既に必須ジョブだが、今後は coverage gate にも影響する。
+  - 余裕は約 1.6pp のため、UI 大物ファイルの行数増減で TOTAL が動きやすい。
+- 検証対象:
+  - `.\scripts\check.ps1`
+  - CI unit job の Step Summary と `coverage-xml` artifact
+
 ## 運用ルール
 
 - Windows + Python 3.10 を主対象にする。

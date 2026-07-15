@@ -107,7 +107,27 @@ if ($NoCoverage) {
     $env:COVERAGE_FILE = $CoverageFile
 
     Invoke-Step "coverage run pytest" {
-        & $Python -m coverage run -m pytest -q
+        & $Python -m coverage run -m pytest -q -p no:cov
+    }
+
+    $HeadlessWasSet = Test-Path Env:KOE_HEADLESS
+    if ($HeadlessWasSet) {
+        $HeadlessValue = $env:KOE_HEADLESS
+    } else {
+        $HeadlessValue = $null
+    }
+
+    try {
+        Remove-Item Env:KOE_HEADLESS -ErrorAction SilentlyContinue
+        Invoke-Step "coverage run pytest gui or smoke" {
+            & $Python -m coverage run --append -m pytest -m "gui or smoke" -q -p no:cov
+        }
+    } finally {
+        if ($HeadlessWasSet) {
+            $env:KOE_HEADLESS = $HeadlessValue
+        } else {
+            Remove-Item Env:KOE_HEADLESS -ErrorAction SilentlyContinue
+        }
     }
 
     Invoke-Step "coverage report" {
