@@ -26,12 +26,21 @@ def _to_grayscale(image: Image.Image, size: tuple[int, int]) -> np.ndarray:
     return np.asarray(grayscale, dtype=np.float32)
 
 
-def _to_signed(value: int) -> int:
-    return value - (1 << 64) if value >= (1 << 63) else value
+def to_signed64(value: int) -> int:
+    """Wrap ``value`` to its low 64 bits and return the signed representation.
+
+    SQLite INTEGER values are signed 64-bit numbers. Hash implementations often
+    produce unsigned values, so this conversion intentionally uses modulo 2**64
+    semantics. It preserves the hash bit pattern and avoids ``OverflowError``
+    when persisting values whose most-significant bit is set.
+    """
+
+    normalized = int(value) & ((1 << 64) - 1)
+    return normalized - (1 << 64) if normalized >= (1 << 63) else normalized
 
 
 def phash(image: Image.Image) -> int:
-    """Compute a perceptual hash (pHash) using a DCT over the image."""
+    """Compute a pHash and return its signed 64-bit representation."""
     if cv2 is None:  # pragma: no cover - exercised when OpenCV is unavailable
         raise RuntimeError("OpenCV (cv2) is required to compute perceptual hashes")
     pixels = _to_grayscale(image, (32, 32))
@@ -43,18 +52,18 @@ def phash(image: Image.Image) -> int:
     value = 0
     for bit in bits:
         value = (value << 1) | int(bit)
-    return _to_signed(int(value & 0xFFFFFFFFFFFFFFFF))
+    return to_signed64(value)
 
 
 def dhash(image: Image.Image) -> int:
-    """Compute a difference hash (dHash) comparing adjacent pixels."""
+    """Compute a dHash and return its signed 64-bit representation."""
     pixels = _to_grayscale(image, (9, 8))
     diff = pixels[:, 1:] > pixels[:, :-1]
     flat = diff.flatten()
     value = 0
     for bit in flat:
         value = (value << 1) | int(bit)
-    return _to_signed(int(value & 0xFFFFFFFFFFFFFFFF))
+    return to_signed64(value)
 
 
 def hamming64(a: int, b: int) -> int:
@@ -63,4 +72,4 @@ def hamming64(a: int, b: int) -> int:
     return int(((int(a) ^ int(b)) & mask).bit_count())
 
 
-__all__ = ["phash", "dhash", "hamming64"]
+__all__ = ["phash", "dhash", "hamming64", "to_signed64"]

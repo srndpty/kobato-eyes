@@ -48,6 +48,8 @@
 
 - `WD14Tagger`: Torch DLL discovery, ONNX provider introspection, session provider detail logging, OpenCV thread tuning, and profiling finalisation are diagnostics/tuning boundaries. Failures are logged or ignored according to local impact and do not replace the authoritative model/session/inference errors.
 
-## Next candidates
+## Completed follow-up
 
-- Add broader integration coverage for DB writer shutdown under real SQLite lock contention.
+- DB writer shutdown under real SQLite lock contention is covered by a DB stress test. The test holds a
+  `BEGIN IMMEDIATE` lock while `stop(flush=True)` waits, then verifies that releasing the lock allows all
+  queued rows to be persisted and the writer thread to terminate.

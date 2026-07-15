@@ -11,14 +11,7 @@ from typing import Callable, Iterable, List, Optional, Tuple
 
 from PIL import Image
 
-from sig.phash import dhash, phash  # ← phashはcv2必須
-
-U64MASK = (1 << 64) - 1
-
-
-def _to_signed64(x: int) -> int:
-    v = int(x) & U64MASK
-    return v - (1 << 64) if v >= (1 << 63) else v
+from sig.phash import dhash, phash, to_signed64  # ← phashはcv2必須
 
 
 def _compute_worker(task: Tuple[int, str]) -> Tuple[int, int, int] | None:
@@ -29,9 +22,9 @@ def _compute_worker(task: Tuple[int, str]) -> Tuple[int, int, int] | None:
         if not path.exists() or not path.is_file():
             return None
         with Image.open(path) as im:
-            # phash/dhash の結果を“必ず”符号付き64bitに丸める
-            ph = _to_signed64(phash(im))
-            dh = _to_signed64(dhash(im))
+            # phash/dhash の公開契約は符号付き64bit。
+            ph = phash(im)
+            dh = dhash(im)
         return (int(fid), ph, dh)
     except Exception:
         return None  # 失敗は捨てる（速度最優先）
@@ -46,7 +39,7 @@ def _fast_pragmas(conn: sqlite3.Connection) -> None:
 
 
 def bulk_upsert_signatures(conn: sqlite3.Connection, rows: Iterable[Tuple[int, int, int]]) -> int:
-    """(file_id, phash, dhash) を executemany でまとめて upsert。"""
+    """外部入力を符号付き64bitへ防御的に変換し、署名を一括 upsert。"""
     sql = """
         INSERT INTO signatures (file_id, phash_u64, dhash_u64)
         VALUES (?, ?, ?)
@@ -54,7 +47,7 @@ def bulk_upsert_signatures(conn: sqlite3.Connection, rows: Iterable[Tuple[int, i
             phash_u64 = excluded.phash_u64,
             dhash_u64 = excluded.dhash_u64
     """
-    rows = [(int(fid), _to_signed64(ph), _to_signed64(dh)) for (fid, ph, dh) in rows]
+    rows = [(int(fid), to_signed64(ph), to_signed64(dh)) for (fid, ph, dh) in rows]
     if not rows:
         return 0
     with conn:

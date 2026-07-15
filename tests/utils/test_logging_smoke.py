@@ -16,7 +16,7 @@ from core.config import AppPaths
 from ui.app import setup_logging
 from utils import paths
 
-pytestmark = pytest.mark.gui
+pytestmark = [pytest.mark.gui, pytest.mark.smoke]
 
 
 def _clear_logging_handlers() -> None:

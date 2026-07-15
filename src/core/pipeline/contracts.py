@@ -31,6 +31,10 @@ class DBStop:
 class DBWriteQueue(Protocol):
     """Interface implemented by asynchronous database writers."""
 
+    @property
+    def is_running(self) -> bool:
+        """Return whether the background writer is currently alive."""
+
     def start(self) -> None:
         """Start the background worker if necessary."""
 

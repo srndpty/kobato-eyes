@@ -19,7 +19,7 @@ from core.config import PipelineSettings
 from db.schema import apply_schema
 from ui.tags_tab import TagsTab
 
-pytestmark = pytest.mark.gui
+pytestmark = [pytest.mark.gui, pytest.mark.smoke]
 
 
 @pytest.fixture(scope="module")

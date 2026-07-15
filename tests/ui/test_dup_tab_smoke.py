@@ -15,7 +15,7 @@ from dup.scanner import DuplicateCluster, DuplicateClusterEntry, DuplicateFile
 from ui.dup_tab import DupTab
 from ui.viewmodels import DupViewModel
 
-pytestmark = pytest.mark.gui
+pytestmark = [pytest.mark.gui, pytest.mark.smoke]
 
 
 class _Connection:

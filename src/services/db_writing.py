@@ -81,6 +81,12 @@ class DBWritingService(DBWriteQueue):
     # ------------------------------------------------------------------
     # Public API (DBWriteQueue)
     # ------------------------------------------------------------------
+    @property
+    def is_running(self) -> bool:
+        """Return whether the background writer thread is currently alive."""
+
+        return self._thread.is_alive()
+
     def start(self) -> None:
         self.raise_if_failed()
         if self._started:

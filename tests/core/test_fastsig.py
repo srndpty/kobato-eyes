@@ -11,14 +11,6 @@ from PIL import Image
 import core.fastsig as fastsig
 
 
-def test_to_signed64_wraps_unsigned_values() -> None:
-    assert fastsig._to_signed64(0) == 0
-    assert fastsig._to_signed64((1 << 63) - 1) == (1 << 63) - 1
-    assert fastsig._to_signed64(1 << 63) == -(1 << 63)
-    assert fastsig._to_signed64((1 << 64) - 1) == -1
-    assert fastsig._to_signed64((1 << 64) + 7) == 7
-
-
 def test_bulk_upsert_signatures_inserts_and_updates_signed_values() -> None:
     conn = sqlite3.connect(":memory:")
     conn.execute("CREATE TABLE signatures (file_id INTEGER PRIMARY KEY, phash_u64 INTEGER, dhash_u64 INTEGER)")
@@ -36,7 +28,7 @@ def test_bulk_upsert_signatures_inserts_and_updates_signed_values() -> None:
 def test_compute_worker_skips_missing_and_returns_hashes(tmp_path: Path, monkeypatch) -> None:
     image_path = tmp_path / "image.png"
     Image.new("RGB", (8, 8), color=(10, 20, 30)).save(image_path)
-    monkeypatch.setattr(fastsig, "phash", lambda image: (1 << 64) - 2)
+    monkeypatch.setattr(fastsig, "phash", lambda image: -2)
     monkeypatch.setattr(fastsig, "dhash", lambda image: 123)
 
     assert fastsig._compute_worker((5, str(image_path))) == (5, -2, 123)

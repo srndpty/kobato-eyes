@@ -14,18 +14,9 @@ from utils.image_io import safe_load_image
 log = logging.getLogger(__name__)
 
 
-def _to_signed64(x: int) -> int:
-    # SQLite の INTEGER は符号付き64bit。符号なし(>=2^63)のまま渡すと
-    # OverflowError になり upsert が無言で失敗するため、必ず符号付きに丸める。
-    v = int(x) & ((1 << 64) - 1)
-    return v - (1 << 64) if v >= (1 << 63) else v
-
-
 def compute_signatures_from_image(im: Image.Image) -> tuple[int, int]:
     # 例外は呼び出し側で握る
-    p = phash(im)
-    d = dhash(im)
-    return (_to_signed64(p), _to_signed64(d))
+    return (phash(im), dhash(im))
 
 
 def ensure_signatures(
