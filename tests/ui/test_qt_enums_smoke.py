@@ -8,7 +8,7 @@ pytest.importorskip("PyQt6.QtCore", reason="PyQt6 core required", exc_type=Impor
 
 from PyQt6.QtCore import Qt
 
-pytestmark = pytest.mark.gui
+pytestmark = [pytest.mark.gui, pytest.mark.smoke]
 
 
 def test_qt_alignment_flag_access() -> None:

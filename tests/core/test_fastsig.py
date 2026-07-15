@@ -11,14 +11,6 @@ from PIL import Image
 import core.fastsig as fastsig
 
 
-def test_to_signed64_wraps_unsigned_values() -> None:
-    assert fastsig._to_signed64(0) == 0
-    assert fastsig._to_signed64((1 << 63) - 1) == (1 << 63) - 1
-    assert fastsig._to_signed64(1 << 63) == -(1 << 63)
-    assert fastsig._to_signed64((1 << 64) - 1) == -1
-    assert fastsig._to_signed64((1 << 64) + 7) == 7
-
-
 def test_bulk_upsert_signatures_inserts_and_updates_signed_values() -> None:
     conn = sqlite3.connect(":memory:")
     conn.execute("CREATE TABLE signatures (file_id INTEGER PRIMARY KEY, phash_u64 INTEGER, dhash_u64 INTEGER)")

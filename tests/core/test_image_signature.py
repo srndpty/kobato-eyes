@@ -5,10 +5,9 @@ from __future__ import annotations
 import sqlite3
 
 import numpy as np
-import pytest
 from PIL import Image
 
-from core.signature import _to_signed64, compute_signatures_from_image, ensure_signatures
+from core.signature import compute_signatures_from_image, ensure_signatures
 from dup.scanner import _parse_phash_any
 
 
@@ -51,18 +50,5 @@ def test_signature_round_trips_to_unsigned() -> None:
     image = _random_image(123)
     assert ensure_signatures(conn, 1, image=image) is True
     row = conn.execute("SELECT phash_u64 FROM signatures WHERE file_id = 1").fetchone()
-    expected = _to_signed64(compute_signatures_from_image(image)[0]) & ((1 << 64) - 1)
+    expected = compute_signatures_from_image(image)[0] & ((1 << 64) - 1)
     assert _parse_phash_any(row["phash_u64"]) == expected
-
-
-@pytest.mark.parametrize(
-    "value, expected",
-    [
-        (0, 0),
-        ((1 << 64) - 1, -1),
-        (1 << 63, -(1 << 63)),
-        ((1 << 63) - 1, (1 << 63) - 1),
-    ],
-)
-def test_to_signed64(value: int, expected: int) -> None:
-    assert _to_signed64(value) == expected

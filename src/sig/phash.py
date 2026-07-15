@@ -26,8 +26,16 @@ def _to_grayscale(image: Image.Image, size: tuple[int, int]) -> np.ndarray:
     return np.asarray(grayscale, dtype=np.float32)
 
 
-def _to_signed(value: int) -> int:
-    return value - (1 << 64) if value >= (1 << 63) else value
+def to_signed64(value: int) -> int:
+    """Return ``value`` normalized to SQLite's signed 64-bit INTEGER range.
+
+    SQLite INTEGER values are signed 64-bit numbers. Hash implementations often
+    produce unsigned values, so mask first to preserve the low 64 bits and avoid
+    ``OverflowError`` when persisting values whose most-significant bit is set.
+    """
+
+    normalized = int(value) & ((1 << 64) - 1)
+    return normalized - (1 << 64) if normalized >= (1 << 63) else normalized
 
 
 def phash(image: Image.Image) -> int:
@@ -43,7 +51,7 @@ def phash(image: Image.Image) -> int:
     value = 0
     for bit in bits:
         value = (value << 1) | int(bit)
-    return _to_signed(int(value & 0xFFFFFFFFFFFFFFFF))
+    return to_signed64(value)
 
 
 def dhash(image: Image.Image) -> int:
@@ -54,7 +62,7 @@ def dhash(image: Image.Image) -> int:
     value = 0
     for bit in flat:
         value = (value << 1) | int(bit)
-    return _to_signed(int(value & 0xFFFFFFFFFFFFFFFF))
+    return to_signed64(value)
 
 
 def hamming64(a: int, b: int) -> int:
@@ -63,4 +71,4 @@ def hamming64(a: int, b: int) -> int:
     return int(((int(a) ^ int(b)) & mask).bit_count())
 
 
-__all__ = ["phash", "dhash", "hamming64"]
+__all__ = ["phash", "dhash", "hamming64", "to_signed64"]

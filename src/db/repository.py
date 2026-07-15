@@ -585,8 +585,6 @@ def mark_files_absent(conn: sqlite3.Connection, file_ids: Sequence[int]) -> int:
             f"WHERE id IN ({', '.join('?' for _ in ids)})",
             ids,
         )
-        # ここを置き換え
-        # conn.execute(f"DELETE FROM fts_files WHERE rowid IN ({placeholders})", ids)
         fts_delete_rows(conn, ids)
         return int(cur.rowcount or 0)
 
