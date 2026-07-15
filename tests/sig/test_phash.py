@@ -44,6 +44,24 @@ def test_image_hash_is_signed_64bit_and_deterministic(hash_function: Callable[[I
     assert -(1 << 63) <= first <= (1 << 63) - 1
 
 
+def test_dhash_matches_known_bit_order() -> None:
+    """A constructed image maps eight known comparison bytes in row order."""
+
+    expected_bytes = [0x80, 0x40, 0x20, 0x10, 0x08, 0x04, 0x02, 0x01]
+    rows: list[list[int]] = []
+    for expected_byte in expected_bytes:
+        current = 128
+        row = [current]
+        for shift in range(7, -1, -1):
+            current += 1 if expected_byte & (1 << shift) else -1
+            row.append(current)
+        rows.append(row)
+
+    image = Image.fromarray(np.asarray(rows, dtype=np.uint8))
+
+    assert dhash(image) == 0x8040201008040201 - (1 << 64)
+
+
 def test_hamming64_distance_boundaries() -> None:
     """Equal values have zero distance and inverted 64-bit values differ fully."""
 

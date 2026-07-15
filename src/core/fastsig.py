@@ -22,9 +22,9 @@ def _compute_worker(task: Tuple[int, str]) -> Tuple[int, int, int] | None:
         if not path.exists() or not path.is_file():
             return None
         with Image.open(path) as im:
-            # phash/dhash の結果を“必ず”符号付き64bitに丸める
-            ph = to_signed64(phash(im))
-            dh = to_signed64(dhash(im))
+            # phash/dhash の公開契約は符号付き64bit。
+            ph = phash(im)
+            dh = dhash(im)
         return (int(fid), ph, dh)
     except Exception:
         return None  # 失敗は捨てる（速度最優先）
@@ -39,7 +39,7 @@ def _fast_pragmas(conn: sqlite3.Connection) -> None:
 
 
 def bulk_upsert_signatures(conn: sqlite3.Connection, rows: Iterable[Tuple[int, int, int]]) -> int:
-    """(file_id, phash, dhash) を executemany でまとめて upsert。"""
+    """外部入力を符号付き64bitへ防御的に変換し、署名を一括 upsert。"""
     sql = """
         INSERT INTO signatures (file_id, phash_u64, dhash_u64)
         VALUES (?, ?, ?)

@@ -28,7 +28,7 @@ def test_bulk_upsert_signatures_inserts_and_updates_signed_values() -> None:
 def test_compute_worker_skips_missing_and_returns_hashes(tmp_path: Path, monkeypatch) -> None:
     image_path = tmp_path / "image.png"
     Image.new("RGB", (8, 8), color=(10, 20, 30)).save(image_path)
-    monkeypatch.setattr(fastsig, "phash", lambda image: (1 << 64) - 2)
+    monkeypatch.setattr(fastsig, "phash", lambda image: -2)
     monkeypatch.setattr(fastsig, "dhash", lambda image: 123)
 
     assert fastsig._compute_worker((5, str(image_path))) == (5, -2, 123)

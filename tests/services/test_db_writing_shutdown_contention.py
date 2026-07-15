@@ -17,6 +17,31 @@ from services.db_writing import DBWritingService
 pytestmark = pytest.mark.db_stress
 
 
+class _ObservedDBWritingService(DBWritingService):
+    """DB writer that signals when SQLite executes ``BEGIN IMMEDIATE``."""
+
+    def __init__(
+        self,
+        db_path: str,
+        transaction_attempted: threading.Event,
+        *,
+        flush_chunk: int,
+        fts_topk: int,
+    ) -> None:
+        super().__init__(db_path, flush_chunk=flush_chunk, fts_topk=fts_topk)
+        self._transaction_attempted = transaction_attempted
+
+    def _open_connection(self) -> sqlite3.Connection:
+        conn = super()._open_connection()
+
+        def observe_statement(statement: str) -> None:
+            if statement.strip().upper() == "BEGIN IMMEDIATE":
+                self._transaction_attempted.set()
+
+        conn.set_trace_callback(observe_statement)
+        return conn
+
+
 def _prepare_db(db_path: Path, file_count: int) -> list[int]:
     """Create a real database and return identifiers for queued test files."""
 
@@ -33,7 +58,8 @@ def test_stop_flush_waits_for_lock_then_persists_all_rows(tmp_path: Path) -> Non
 
     db_path = tmp_path / "shutdown-contention.db"
     file_ids = _prepare_db(db_path, file_count=3)
-    service = DBWritingService(str(db_path), flush_chunk=16, fts_topk=0)
+    transaction_attempted = threading.Event()
+    service = _ObservedDBWritingService(str(db_path), transaction_attempted, flush_chunk=16, fts_topk=0)
     service.start()
 
     lock_conn = sqlite3.connect(db_path, timeout=1.0)
@@ -43,22 +69,25 @@ def test_stop_flush_waits_for_lock_then_persists_all_rows(tmp_path: Path) -> Non
 
     stop_started = threading.Event()
     stop_finished = threading.Event()
-    stop_errors: list[BaseException] = []
+    stop_errors: list[Exception] = []
 
     def stop_service() -> None:
         stop_started.set()
         try:
             service.stop(flush=True, wait_forever=True)
-        except BaseException as exc:  # pragma: no cover - assertion reports worker failures
+        except Exception as exc:  # pragma: no cover - assertion re-raises worker failures
             stop_errors.append(exc)
         finally:
             stop_finished.set()
 
-    stop_thread = threading.Thread(target=stop_service, name="DBWriterStopTest")
+    # The DB writer is also a daemon. Keeping this coordinator daemonized ensures
+    # a writer deadlock fails the assertion instead of holding pytest open.
+    stop_thread = threading.Thread(target=stop_service, name="DBWriterStopTest", daemon=True)
     stop_thread.start()
     try:
         assert stop_started.wait(timeout=2.0)
-        assert not stop_finished.wait(timeout=0.5)
+        assert transaction_attempted.wait(timeout=2.0)
+        assert not stop_finished.is_set()
     finally:
         lock_conn.rollback()
         lock_conn.close()
@@ -66,21 +95,29 @@ def test_stop_flush_waits_for_lock_then_persists_all_rows(tmp_path: Path) -> Non
     assert stop_finished.wait(timeout=10.0)
     stop_thread.join(timeout=1.0)
     assert not stop_thread.is_alive()
-    assert not service._thread.is_alive()
-    assert stop_errors == []
+    if stop_errors:
+        raise stop_errors[0]
 
     conn = get_conn(db_path, timeout=2.0)
     try:
+        placeholders = ", ".join("?" for _ in file_ids)
         stored = conn.execute(
-            """
-            SELECT f.id, f.width, f.height, f.tagger_sig, COUNT(ft.tag_id) AS tag_count
+            f"""
+            SELECT f.id,
+                   f.width,
+                   f.height,
+                   f.tagger_sig,
+                   f.last_tagged_at,
+                   t.name AS tag_name,
+                   t.category,
+                   ft.score
             FROM files AS f
-            LEFT JOIN file_tags AS ft ON ft.file_id = f.id
-            WHERE f.id IN (?, ?, ?)
-            GROUP BY f.id
+            JOIN file_tags AS ft ON ft.file_id = f.id
+            JOIN tags AS t ON t.id = ft.tag_id
+            WHERE f.id IN ({placeholders})
             ORDER BY f.id
             """,
-            file_ids,
+            tuple(file_ids),
         ).fetchall()
     finally:
         conn.close()
@@ -88,4 +125,7 @@ def test_stop_flush_waits_for_lock_then_persists_all_rows(tmp_path: Path) -> Non
     assert [int(row["id"]) for row in stored] == file_ids
     assert all(row["width"] == 64 and row["height"] == 48 for row in stored)
     assert all(row["tagger_sig"] == "sig:v1" for row in stored)
-    assert all(row["tag_count"] == 1 for row in stored)
+    assert all(row["last_tagged_at"] == pytest.approx(1234.5) for row in stored)
+    assert all(row["tag_name"] == "artist:kobato" for row in stored)
+    assert all(row["category"] == 1 for row in stored)
+    assert all(row["score"] == pytest.approx(0.9) for row in stored)

@@ -27,11 +27,12 @@ def _to_grayscale(image: Image.Image, size: tuple[int, int]) -> np.ndarray:
 
 
 def to_signed64(value: int) -> int:
-    """Return ``value`` normalized to SQLite's signed 64-bit INTEGER range.
+    """Wrap ``value`` to its low 64 bits and return the signed representation.
 
     SQLite INTEGER values are signed 64-bit numbers. Hash implementations often
-    produce unsigned values, so mask first to preserve the low 64 bits and avoid
-    ``OverflowError`` when persisting values whose most-significant bit is set.
+    produce unsigned values, so this conversion intentionally uses modulo 2**64
+    semantics. It preserves the hash bit pattern and avoids ``OverflowError``
+    when persisting values whose most-significant bit is set.
     """
 
     normalized = int(value) & ((1 << 64) - 1)
@@ -39,7 +40,7 @@ def to_signed64(value: int) -> int:
 
 
 def phash(image: Image.Image) -> int:
-    """Compute a perceptual hash (pHash) using a DCT over the image."""
+    """Compute a pHash and return its signed 64-bit representation."""
     if cv2 is None:  # pragma: no cover - exercised when OpenCV is unavailable
         raise RuntimeError("OpenCV (cv2) is required to compute perceptual hashes")
     pixels = _to_grayscale(image, (32, 32))
@@ -55,7 +56,7 @@ def phash(image: Image.Image) -> int:
 
 
 def dhash(image: Image.Image) -> int:
-    """Compute a difference hash (dHash) comparing adjacent pixels."""
+    """Compute a dHash and return its signed 64-bit representation."""
     pixels = _to_grayscale(image, (9, 8))
     diff = pixels[:, 1:] > pixels[:, :-1]
     flat = diff.flatten()

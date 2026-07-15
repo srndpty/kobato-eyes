@@ -8,7 +8,7 @@ from typing import Optional
 from PIL import Image
 
 from db.repository import upsert_signatures
-from sig.phash import dhash, phash, to_signed64
+from sig.phash import dhash, phash
 from utils.image_io import safe_load_image
 
 log = logging.getLogger(__name__)
@@ -16,9 +16,7 @@ log = logging.getLogger(__name__)
 
 def compute_signatures_from_image(im: Image.Image) -> tuple[int, int]:
     # 例外は呼び出し側で握る
-    p = phash(im)
-    d = dhash(im)
-    return (to_signed64(p), to_signed64(d))
+    return (phash(im), dhash(im))
 
 
 def ensure_signatures(
