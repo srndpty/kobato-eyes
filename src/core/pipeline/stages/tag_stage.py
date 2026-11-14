@@ -102,16 +102,18 @@ def _verify_loaded_model(tagger: object, ctx: PipelineContext) -> None:
     tagger はロード前後の内容一致を保証済みなので、ここでは「ロード内容 == 現在の設定ファイル」と
     「現在の署名 == ctx の署名」を確認し、署名と実ロード内容を連結する.
     """
-    identity = getattr(tagger, "content_identity", None)
-    if identity is None or ctx.settings.tagger.name.lower() != "pixai-v1-onnx":
+    if getattr(tagger, "content_identity", None) is None or ctx.settings.tagger.name.lower() != "pixai-v1-onnx":
         return
-    from tagger.pixai_v1_identity import settings_content_identity
+    from tagger.pixai_v1_identity import verify_loaded_identity
 
-    from ..signature import current_tagger_sig
+    from ..signature import current_tagger_sig_with_identity
 
-    current_sig = current_tagger_sig(ctx.settings, thresholds=ctx.thresholds, max_tags=ctx.max_tags_map)
-    if identity != settings_content_identity(ctx.settings.tagger) or current_sig != ctx.tagger_sig:
+    current_sig, identity = current_tagger_sig_with_identity(
+        ctx.settings, thresholds=ctx.thresholds, max_tags=ctx.max_tags_map
+    )
+    if current_sig != ctx.tagger_sig:
         raise RuntimeError("PixAI v1 model files changed after the tagger signature was computed; aborting tagging")
+    verify_loaded_identity(tagger, identity, signed=True)
 
 
 class TagStage:

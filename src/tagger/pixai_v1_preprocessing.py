@@ -17,17 +17,16 @@ class SourceImageTooLargeError(ValueError):
     """Raised before decoding when the source would exceed the v1 memory budget."""
 
 
-def load_source_rgb(path: str | Path, *, max_pixels: int = MAX_SOURCE_PIXELS) -> tuple[np.ndarray, tuple[int, int]]:
+def load_source_rgb(path: str | Path, *, max_pixels: int | None = None) -> tuple[np.ndarray, tuple[int, int]]:
     """
     v1 推論入力の唯一の読み込み経路. バッチ/単一画像の両経路で同一テンソルを保証するため、
     EXIF 回転や事前縮小は行わない（公式 processor も Image.open の生画素を使う）.
     """
+    limit = MAX_SOURCE_PIXELS if max_pixels is None else max_pixels
     with Image.open(path) as image:
         width, height = image.size
-        if width * height > max_pixels:
-            raise SourceImageTooLargeError(
-                f"PixAI v1 source image too large: {width}x{height} exceeds {max_pixels} pixels"
-            )
+        if width * height > limit:
+            raise SourceImageTooLargeError(f"PixAI v1 source image too large: {width}x{height} exceeds {limit} pixels")
         return composite_rgb(image), (int(width), int(height))
 
 

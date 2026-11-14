@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Mapping
 from functools import lru_cache
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -74,16 +75,39 @@ def settings_content_identity(settings: TaggerSettings) -> dict[str, str]:
     return v1_content_identity(model, signature_labels_path(settings))
 
 
-def v1_signature(settings: TaggerSettings, *, thresholds: ThresholdMap | None, max_tags: MaxTagsMap | None) -> str:
-    """Include ONNX, external weights, label order, preprocessing and effective options."""
+def v1_signature(
+    settings: TaggerSettings,
+    *,
+    thresholds: ThresholdMap | None,
+    max_tags: MaxTagsMap | None,
+    identity: Mapping[str, str] | None = None,
+) -> str:
+    """
+    Include ONNX, external weights, label order, preprocessing and effective options.
+    identity を渡すと同じ内容スナップショットから署名を作る（署名と照合用 identity の食い違いを防ぐ）.
+    """
     from tagger.base import TagCategory
 
     threshold_values = settings.thresholds if thresholds is None else {c.name.lower(): v for c, v in thresholds.items()}
     threshold_values = dict(DEFAULT_THRESHOLDS) | dict(threshold_values)
     payload = dict(
-        settings_content_identity(settings),
+        dict(identity) if identity is not None else settings_content_identity(settings),
         preprocess=PREPROCESS_VERSION,
         thresholds={str(k): float(v) for k, v in threshold_values.items()},
         max_tags={TagCategory(k).name.lower(): int(v) for k, v in (max_tags or {}).items()},
     )
     return "pixai-v1-onnx:" + hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
+
+
+def verify_loaded_identity(tagger: object, expected: Mapping[str, str] | None, *, signed: bool) -> None:
+    """
+    署名付きで DB に書く前の共通契約. tagger がロードした内容と、署名の計算に使った内容が一致しなければ中止する.
+    content_identity を持たない tagger（v1 以外・テスト用）は対象外. 署名なしの書き込みは食い違いが生じないため許可.
+    """
+    loaded = getattr(tagger, "content_identity", None)
+    if loaded is None or not signed:
+        return
+    if expected is None or dict(loaded) != dict(expected):
+        raise RuntimeError(
+            "PixAI v1 loaded model differs from the files used for the tagger signature; reload the tagger"
+        )

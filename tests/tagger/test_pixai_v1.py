@@ -442,3 +442,135 @@ def test_tag_stage_aborts_when_model_changed_after_signature(monkeypatch, labels
     with pytest.raises(RuntimeError, match="changed after the tagger signature"):
         tag_stage.TagStage().run(ctx, emitter, [record])  # type: ignore[arg-type, list-item]
     assert closed == [1]
+
+
+def test_preprocess_version_tracks_uint8_resize_order() -> None:
+    """The uint8-first resize changes float rounding, so it must not share the v1 identity."""
+    from tagger.pixai_v1_labels import PREPROCESS_VERSION
+
+    assert PREPROCESS_VERSION != "pixai-v1-float-bilinear-antialias-pad-1008-v1"
+
+
+def test_tag_job_enforces_pixel_limit_before_any_decode(tmp_path: Path, monkeypatch) -> None:
+    """The single-image path must not decode via safe_load_image before the v1 limit applies."""
+    from core import signature as core_signature
+    from core import tag_job
+    from db.connection import get_conn
+    from tagger import pixai_v1_preprocessing
+
+    path = tmp_path / "over.png"
+    Image.new("RGB", (300, 200)).save(path)
+    calls: list[str] = []
+
+    def forbidden(*_args, **_kwargs):
+        calls.append("safe_load_image")
+        raise AssertionError("safe_load_image must not run for a refused v1 source")
+
+    monkeypatch.setattr(tag_job, "safe_load_image", forbidden)
+    monkeypatch.setattr(core_signature, "safe_load_image", forbidden)
+    monkeypatch.setattr(pixai_v1_preprocessing, "MAX_SOURCE_PIXELS", 59_999)
+    conn = get_conn(tmp_path / "db.sqlite")
+    try:
+        assert tag_job.run_tag_job(_CaptureTagger(), path, conn) is None  # type: ignore[arg-type]
+        assert conn.execute("SELECT COUNT(*) FROM files").fetchone()[0] == 0
+    finally:
+        conn.close()
+    assert calls == []
+
+
+def test_tag_job_stores_original_size_for_v1(tmp_path: Path) -> None:
+    """v1 records the source dimensions, not safe_load_image's 4096px-reduced ones."""
+    from core.tag_job import run_tag_job
+    from db.connection import get_conn
+
+    path = tmp_path / "tall.png"
+    Image.new("RGB", (40, 5000)).save(path)
+    conn = get_conn(tmp_path / "db.sqlite")
+    try:
+        assert run_tag_job(_CaptureTagger(), path, conn) is not None  # type: ignore[arg-type]
+        assert tuple(conn.execute("SELECT width, height FROM files").fetchone()) == (40, 5000)
+        assert conn.execute("SELECT COUNT(*) FROM signatures").fetchone()[0] == 1
+    finally:
+        conn.close()
+
+
+def _source_loader(cache_dir: Path):
+    from core.pipeline.loaders import PrefetchLoaderPrepared
+
+    return PrefetchLoaderPrepared(
+        [], tagger=_CaptureTagger(), batch_size=1, prefetch_batches=1, io_workers=1, input_cache_dir=cache_dir
+    )
+
+
+def test_source_cache_cannot_bypass_pixel_limit(tmp_path: Path, monkeypatch) -> None:
+    """A cache written under a larger limit is discarded and the source is refused."""
+    from tagger import pixai_v1_preprocessing
+
+    path = tmp_path / "cached.png"
+    Image.new("RGB", (300, 200), (10, 20, 30)).save(path)
+    loader = _source_loader(tmp_path / "cache")
+    try:
+        assert loader._load_one(str(path))[3] == "pil_fallback"
+        assert loader._load_one(str(path))[3] == "input_cache"
+        monkeypatch.setattr(pixai_v1_preprocessing, "MAX_SOURCE_PIXELS", 59_999)
+        _, rgb, size, route = loader._load_one(str(path))
+        assert (rgb, size, route) == (None, None, "failed")
+        assert not list((tmp_path / "cache").rglob("*.npz"))
+    finally:
+        loader.close()
+
+
+def test_source_cache_rejects_shape_size_mismatch(tmp_path: Path) -> None:
+    """A cached array that does not match its recorded source size is not trusted."""
+    path = tmp_path / "cached.png"
+    Image.new("RGB", (300, 200)).save(path)
+    loader = _source_loader(tmp_path / "cache")
+    try:
+        loader._load_one(str(path))
+        (cache_path,) = list((tmp_path / "cache").rglob("*.npz"))
+        loader._write_input_cache(cache_path, np.zeros((10, 10, 3), np.uint8), (300, 200))
+        assert loader._load_input_cache(cache_path) is None
+        assert not cache_path.exists()
+    finally:
+        loader.close()
+
+
+class _IdentityTagger(_CaptureTagger):
+    """A v1-like tagger holding the identity of the files it loaded."""
+
+    def __init__(self, identity: dict[str, str]) -> None:
+        super().__init__()
+        self.content_identity = identity
+
+
+def test_watcher_refuses_results_from_stale_loaded_model(tmp_path: Path, labels_file: Path) -> None:
+    """After update_settings re-signs a replaced model, the held old tagger must not write under the new sig."""
+    from core.jobs import JobManager
+    from core.pipeline.watcher import ProcessingPipeline
+    from core.tag_job import run_tag_job
+    from db.connection import get_conn
+    from tagger.pixai_v1_identity import settings_content_identity
+
+    model = labels_file.with_name("model.onnx")
+    model.write_bytes(b"graph-a")
+    settings = PipelineSettings(tagger=TaggerSettings(name="pixai-v1-onnx", model_path=str(model)))
+    tagger = _IdentityTagger(settings_content_identity(settings.tagger))
+    manager = JobManager(max_workers=1)
+    pipeline = ProcessingPipeline(db_path=tmp_path / "db.sqlite", tagger=tagger, job_manager=manager, settings=settings)
+    image = tmp_path / "a.png"
+    Image.new("RGB", (32, 32)).save(image)
+    conn = get_conn(tmp_path / "db.sqlite")
+    try:
+        assert pipeline._tag_config.content_identity == tagger.content_identity
+        assert run_tag_job(tagger, image, conn, config=pipeline._tag_config) is not None  # type: ignore[arg-type]
+
+        model.write_bytes(b"graph-b-longer")
+        pipeline.update_settings(settings)
+        assert pipeline._tag_config.tagger_sig != conn.execute("SELECT tagger_sig FROM files").fetchone()[0]
+        with pytest.raises(RuntimeError, match="reload the tagger"):
+            run_tag_job(tagger, image, conn, config=pipeline._tag_config)  # type: ignore[arg-type]
+        stored = conn.execute("SELECT tagger_sig FROM files").fetchone()[0]
+        assert stored != pipeline._tag_config.tagger_sig
+    finally:
+        conn.close()
+        pipeline.shutdown()

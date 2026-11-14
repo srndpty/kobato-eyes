@@ -220,3 +220,34 @@ def test_v1_invalid_explicit_labels_fail_even_when_nothing_needs_retagging(tmp_p
     settings.tagger.labels_json = str(tmp_path / "custom.json")
     with pytest.raises(ValueError, match="labels not found"):
         run_index_once(db, settings=settings, tagger_override=tagger)
+
+
+def test_v1_preprocess_version_change_retags_images_signed_by_previous_version(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Images tagged by the float-first v1 preprocessing must be retagged by the uint8-first v2."""
+    from tagger import pixai_v1_identity
+
+    image = tmp_path / "images" / "sample.png"
+    _create_test_image(image)
+    model = tmp_path / "model.onnx"
+    model.write_bytes(b"v1-fixture")
+    settings = PipelineSettings(
+        roots=[str(image.parent)], excluded=[], tagger=TaggerSettings(name="pixai-v1-onnx", model_path=str(model))
+    )
+    db = tmp_path / "library.db"
+    tagger = _StubTagger("tag")
+    with monkeypatch.context() as patched:
+        patched.setattr(pixai_v1_identity, "PREPROCESS_VERSION", "pixai-v1-float-bilinear-antialias-pad-1008-v1")
+        old_sig = current_tagger_sig(settings)
+        assert int(run_index_once(db, settings=settings, tagger_override=tagger).get("tagged", 0)) == 1
+
+    new_sig = current_tagger_sig(settings)
+    assert new_sig != old_sig
+    stats = run_index_once(db, settings=settings, tagger_override=tagger)
+    assert int(stats.get("retagged", 0)) == 1
+    conn = get_conn(db)
+    try:
+        assert conn.execute("SELECT tagger_sig FROM files").fetchone()[0] == new_sig
+    finally:
+        conn.close()

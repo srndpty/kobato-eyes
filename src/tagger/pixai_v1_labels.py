@@ -11,7 +11,9 @@ from tagger.labels_util import TagMeta
 LABEL_COUNT = 30877
 DEFAULT_THRESHOLDS = dict(general=0.17, character=0.27, copyright=0.24, style=0.15, meta=0.17, rating=0.41)
 CATEGORY_COUNTS = dict(general=15043, character=8308, copyright=2460, style=4917, meta=145, rating=4)
-PREPROCESS_VERSION = "pixai-v1-float-bilinear-antialias-pad-1008-v1"
+# 前処理の演算順や丸めを変えたら必ず更新する（tagger_sig と原寸入力キャッシュの両方が無効化される）.
+# v1: float 変換後にリサイズ. v2: uint8 のままリサイズ後に /255（最大 ~4e-7 の差）.
+PREPROCESS_VERSION = "pixai-v1-uint8-bilinear-antialias-pad-1008-v2"
 
 
 def resolve_labels_json(model_path: str | Path, labels_json: str | Path | None = None) -> Path:

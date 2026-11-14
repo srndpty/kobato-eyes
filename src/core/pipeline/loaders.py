@@ -339,19 +339,27 @@ class PrefetchLoaderPrepared:
 
         try:
             with np.load(cache_path, allow_pickle=False) as cached:
-                rgb = cached["rgb"]
                 size_arr = cached["size"]
                 version_arr = cached["version"]
-            version = str(version_arr.item() if hasattr(version_arr, "item") else version_arr)
-            if version != self._cache_version:
-                raise ValueError("stale cache version")
+                version = str(version_arr.item() if hasattr(version_arr, "item") else version_arr)
+                if version != self._cache_version:
+                    raise ValueError("stale cache version")
+                if size_arr.shape[0] != 2:
+                    raise ValueError("invalid cached size")
+                size = (int(size_arr[0]), int(size_arr[1]))
+                if self._preserve_source:
+                    from tagger.pixai_v1_preprocessing import MAX_SOURCE_PIXELS
+
+                    # 原寸キャッシュは load_source_rgb の画素上限を迂回できるため、RGB を読む前に同じ上限を課す.
+                    if size[0] * size[1] > MAX_SOURCE_PIXELS:
+                        raise ValueError("cached source exceeds the pixel limit")
+                rgb = cached["rgb"]
             if rgb.dtype != np.uint8 or rgb.ndim != 3 or rgb.shape[2] != 3:
                 raise ValueError("invalid cached RGB array")
             if not self._preserve_source and max(rgb.shape[:2]) > _TARGET:
                 raise ValueError("cached RGB array exceeds target side")
-            if size_arr.shape[0] != 2:
-                raise ValueError("invalid cached size")
-            size = (int(size_arr[0]), int(size_arr[1]))
+            if self._preserve_source and rgb.shape[:2] != (size[1], size[0]):
+                raise ValueError("cached source RGB does not match its recorded size")
             return rgb, size
         except Exception as exc:
             logger.debug("Discarding invalid tagger input cache %s: %s", cache_path, exc)

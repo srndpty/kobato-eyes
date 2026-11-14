@@ -15,7 +15,7 @@ from tagger.base import ITagger
 from utils.env import is_headless
 from utils.paths import ensure_dirs
 
-from .signature import _build_max_tags_map, _build_threshold_map, current_tagger_sig
+from .signature import _build_max_tags_map, _build_threshold_map, current_tagger_sig_with_identity
 
 if is_headless():
 
@@ -161,7 +161,8 @@ class ProcessingPipeline(QObject):
     def _refresh_tag_config(self) -> None:
         thresholds = _build_threshold_map(self._settings.tagger.thresholds)
         max_tags_map = _build_max_tags_map(getattr(self._settings.tagger, "max_tags", None))
-        self._tagger_sig = current_tagger_sig(
+        # 署名と同じスナップショットの identity を渡し、run_tag_job で保持中 tagger との一致を検証させる.
+        self._tagger_sig, content_identity = current_tagger_sig_with_identity(
             self._settings,
             thresholds=thresholds,
             max_tags=max_tags_map,
@@ -170,6 +171,7 @@ class ProcessingPipeline(QObject):
             thresholds=thresholds or None,
             max_tags=max_tags_map or None,
             tagger_sig=self._tagger_sig,
+            content_identity=content_identity,
         )
 
     def update_settings(self, settings: PipelineSettings) -> None:
