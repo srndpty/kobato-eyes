@@ -153,3 +153,51 @@ def test_retagged_count_uses_processed_existing_file_ids(tmp_path: Path) -> None
 
     assert stats["tagged"] == 1
     assert stats["retagged"] == 0
+
+
+def test_v1_categories_saved_and_searchable(tmp_path: Path) -> None:
+    """All six categories reach DB/FTS and category:style finds the indexed image."""
+    from core.query import translate_query
+
+    class SixCategoryTagger(_StubTagger):
+        preserve_source_rgb = True
+        preprocess_version = "integration-v1"
+
+        def infer_batch_prepared(self, batch, *, thresholds=None, max_tags=None):
+            categories = [
+                TagCategory.GENERAL,
+                TagCategory.CHARACTER,
+                TagCategory.COPYRIGHT,
+                TagCategory.STYLE,
+                TagCategory.META,
+                TagCategory.RATING,
+            ]
+            return [TagResult([TagPrediction(f"{c.name.lower()}_tag", 0.9, c) for c in categories]) for _ in batch]
+
+    image = tmp_path / "images" / "sample.png"
+    _create_test_image(image)
+    model = tmp_path / "model.onnx"
+    model.write_bytes(b"v1-fixture")
+    settings = PipelineSettings(
+        roots=[str(image.parent)], excluded=[], tagger=TaggerSettings(name="pixai-v1-onnx", model_path=str(model))
+    )
+    db = tmp_path / "library.db"
+    stats = run_index_once(db, settings=settings, tagger_override=SixCategoryTagger("unused"))
+    assert int(stats.get("tagged", 0)) == 1
+    conn = get_conn(db)
+    try:
+        assert len(_fetch_tags(conn)) == 6
+        fragment = translate_query("category:style style_tag")
+        assert conn.execute(f"SELECT f.id FROM files f WHERE {fragment.where}", fragment.params).fetchone()
+        assert conn.execute("SELECT rowid FROM fts_files WHERE fts_files MATCH 'style_tag'").fetchone()
+        before = conn.execute("SELECT tagger_sig FROM files").fetchone()[0]
+    finally:
+        conn.close()
+    model.write_bytes(b"v1-updated")
+    stats = run_index_once(db, settings=settings, tagger_override=SixCategoryTagger("unused"))
+    assert int(stats.get("retagged", 0)) == 1
+    conn = get_conn(db)
+    try:
+        assert conn.execute("SELECT tagger_sig FROM files").fetchone()[0] != before
+    finally:
+        conn.close()

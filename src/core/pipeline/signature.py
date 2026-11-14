@@ -44,6 +44,10 @@ def current_tagger_sig(
     max_tags: Mapping[TagCategory, int] | None = None,
 ) -> str:
     """アクティブなタガー構成の署名（しきい値/最大数/モデル/CSV）を安定化した文字列で返す。"""
+    if settings.tagger.name.lower() == "pixai-v1-onnx":
+        from tagger.pixai_v1_identity import v1_signature
+
+        return v1_signature(settings.tagger, thresholds=thresholds, max_tags=max_tags)
     threshold_map = thresholds or _build_threshold_map(settings.tagger.thresholds)
     max_tags_map = max_tags or _build_max_tags_map(getattr(settings.tagger, "max_tags", None))
 

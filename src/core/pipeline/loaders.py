@@ -199,6 +199,12 @@ class PrefetchLoaderPrepared:
             current_workers = safe_int(env_workers, current_workers, min_value=1)
         self._io_workers = current_workers
         self._tagger = tagger
+        self._preserve_source = bool(getattr(tagger, "preserve_source_rgb", False))
+        self._cache_version = (
+            str(getattr(tagger, "preprocess_version", "source-rgb-v1"))
+            if self._preserve_source
+            else _INPUT_CACHE_VERSION
+        )
         self._producer_error: BaseException | None = None
         self._metrics = LoaderMetrics()
         self._metrics_lock = threading.Lock()
@@ -321,7 +327,7 @@ class PrefetchLoaderPrepared:
                 str(int(stat_result.st_size)),
                 str(int(stat_result.st_mtime_ns)),
                 str(_TARGET),
-                _INPUT_CACHE_VERSION,
+                self._cache_version,
             )
         )
         digest = hashlib.sha256(key_material.encode("utf-8", errors="surrogatepass")).hexdigest()
@@ -336,11 +342,11 @@ class PrefetchLoaderPrepared:
                 size_arr = cached["size"]
                 version_arr = cached["version"]
             version = str(version_arr.item() if hasattr(version_arr, "item") else version_arr)
-            if version != _INPUT_CACHE_VERSION:
+            if version != self._cache_version:
                 raise ValueError("stale cache version")
             if rgb.dtype != np.uint8 or rgb.ndim != 3 or rgb.shape[2] != 3:
                 raise ValueError("invalid cached RGB array")
-            if max(rgb.shape[:2]) > _TARGET:
+            if not self._preserve_source and max(rgb.shape[:2]) > _TARGET:
                 raise ValueError("cached RGB array exceeds target side")
             if size_arr.shape[0] != 2:
                 raise ValueError("invalid cached size")
@@ -367,7 +373,7 @@ class PrefetchLoaderPrepared:
                     handle,
                     rgb=np.asarray(rgb, dtype=np.uint8),
                     size=np.asarray(size, dtype=np.int32),
-                    version=np.asarray(_INPUT_CACHE_VERSION),
+                    version=np.asarray(self._cache_version),
                 )
             os.replace(tmp_path, cache_path)
             self._record_input_cache("write")
@@ -409,6 +415,18 @@ class PrefetchLoaderPrepared:
             elif cache_path is not None:
                 self._record_input_cache("miss")
 
+            if self._preserve_source:
+                from tagger.pixai_v1_preprocessing import composite_rgb
+
+                with Image.open(p) as image:
+                    size = image.size
+                    rgb = composite_rgb(image)
+                if cache_path is not None:
+                    self._write_input_cache(cache_path, rgb, size)
+                self._record_route(
+                    "pil_fallback", time.perf_counter() - started, ok=True, path=p, byte_count=byte_count
+                )
+                return p, rgb, size, "pil_fallback"
             data = np.fromfile(p, dtype=np.uint8)  # Windows で速い
             byte_count = int(data.nbytes)
             im = cv2.imdecode(data, cv2.IMREAD_UNCHANGED)
@@ -439,7 +457,8 @@ class PrefetchLoaderPrepared:
                     bg = Image.new("RGBA", rgba.size, "WHITE")
                     bg.paste(rgba, mask=rgba.split()[-1])
                     rgb_image = bg.convert("RGB")
-                    rgb_image.thumbnail((_TARGET, _TARGET), Image.Resampling.LANCZOS)
+                    if not self._preserve_source:
+                        rgb_image.thumbnail((_TARGET, _TARGET), Image.Resampling.LANCZOS)
                     # bgr = np.asarray(rgb)[:, :, ::-1]  # RGB->BGR
                     rgb_arr = np.asarray(rgb_image)  # ここはそのままRGB
                     if cache_path is not None:

@@ -102,13 +102,17 @@ class SettingsViewModel(QObject):
         """Construct a :class:`PipelineSettings` instance from UI inputs."""
 
         previous = previous_settings or self._current_settings
+        thresholds = dict(previous_tagger.thresholds)
+        if (tagger_name.lower() == "pixai-v1-onnx") != (previous_tagger.name.lower() == "pixai-v1-onnx"):
+            thresholds = {}  # The selected backend supplies its own defaults.
         tagger_settings = TaggerSettings(
             name=tagger_name,
             model_path=model_path,
             tags_csv=previous_tagger.tags_csv if tagger_name.lower() == "wd14-onnx" else None,
+            labels_json=previous_tagger.labels_json if tagger_name.lower() == "pixai-v1-onnx" else None,
             provider=previous_tagger.provider,
             device=_normalise_tagger_device(device),
-            thresholds=dict(previous_tagger.thresholds),
+            thresholds=thresholds,
         )
         settings = PipelineSettings(
             roots=[str(path) for path in roots],
@@ -154,6 +158,7 @@ class SettingsViewModel(QObject):
         tagger_name: str,
         model_path: str | None,
         tags_csv: str | None = None,
+        labels_json: str | None = None,
     ) -> ModelInspection:
         """Inspect the configured tagger model and labels CSV."""
 
@@ -161,6 +166,7 @@ class SettingsViewModel(QObject):
             tagger_name=tagger_name,
             model_path=model_path,
             tags_csv=tags_csv,
+            labels_json=labels_json,
             provider_loader=self._provider_loader,
         )
 

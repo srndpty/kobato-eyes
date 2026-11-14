@@ -19,6 +19,7 @@ class TagCategory(IntEnum):
     COPYRIGHT = 3
     CHARACTER = 4
     META = 5
+    STYLE = 6
 
 
 @dataclass(frozen=True)

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Iterable
 
 import pytest
@@ -112,3 +113,64 @@ def test_settings_tab_auto_applies_pending_changes_on_hide(qapp: QApplication) -
     finally:
         widget.deleteLater()
         qapp.processEvents()
+
+
+def test_v1_settings_roundtrip_and_thresholds(qapp: QApplication) -> None:
+    """Model selection applies v1 defaults and retains edited JSON/threshold settings."""
+    widget = SettingsTab(view_model=SettingsViewModel(provider_loader=lambda: []))
+    widget._inspection_jobs = _InspectionJobs()
+    try:
+        widget._tagger_combo.setCurrentText("pixai-v1-onnx")
+        widget._tagger_model_edit.setText("C:/models/pixai/model.onnx")
+        widget._labels_json_edit.setText("C:/models/pixai/tags.json")
+        assert widget._batch_size_spin.value() == 1
+        assert widget._prefetch_depth_spin.value() == 1
+        assert widget._v1_threshold_spins["general"].value() == 0.17
+        widget._v1_threshold_spins["style"].setValue(0.42)
+        settings = widget._collect_settings()
+        assert Path(settings.tagger.labels_json) == Path("C:/models/pixai/tags.json")
+        assert settings.tagger.thresholds["style"] == 0.42
+        assert Path(settings.tagger.model_path) == Path("C:/models/pixai/model.onnx")
+        widget.load_settings(settings)
+        assert widget._collect_settings() == settings
+    finally:
+        widget._inspection_timer.stop()
+        widget.close()
+
+
+def test_v1_completion_load_discards_stale_results(qapp: QApplication, monkeypatch) -> None:
+    """A late label load must not overwrite completions after switching models."""
+    from core.config import TaggerSettings
+    from tagger import pixai_v1_labels
+    from tagger.base import TagCategory
+    from tagger.labels_util import TagMeta
+    from ui.tags_autocomplete import TagListModel, TagsAutocompleteMixin
+
+    class Dummy(TagsAutocompleteMixin):
+        def __init__(self):
+            self._file_jobs = _InspectionJobs()
+            self._all_tags = []
+            self._conn = None
+            self._tag_model = TagListModel()
+            self._completion_candidates = []
+
+        def _update_thresholds(self, settings):
+            pass
+
+        def _refresh_completions(self):
+            pass
+
+    monkeypatch.setattr(pixai_v1_labels, "resolve_labels_json", lambda *_: "unused")
+    monkeypatch.setattr(pixai_v1_labels, "load_labels_json", lambda _: [TagMeta("watercolor", 6)])
+    dummy = Dummy()
+    settings = PipelineSettings(tagger=TaggerSettings(name="pixai-v1-onnx", model_path="model.onnx"))
+    dummy.reload_autocomplete(settings)
+    first = dummy._file_jobs.handles[-1]
+    result = dummy._file_jobs.jobs[-1].execute(lambda *_: None)
+    first.signals.completed.emit(result)
+    assert dummy._all_tags[0].category == TagCategory.STYLE
+    dummy.reload_autocomplete(settings)
+    stale = dummy._file_jobs.handles[-1]
+    dummy.reload_autocomplete(PipelineSettings())
+    stale.signals.completed.emit(result)
+    assert not any(tag.name == "watercolor" for tag in dummy._all_tags)

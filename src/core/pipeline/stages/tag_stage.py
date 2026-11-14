@@ -321,6 +321,10 @@ class TagStage:
                 loader.close()
             except Exception:
                 pass
+            if ctx.tagger_override is None:
+                close_tagger = getattr(tagger, "close", None)
+                if callable(close_tagger):
+                    close_tagger()
 
         logger.info("Tagging complete: %d image(s) processed", processed_tags)
         emitter.emit(

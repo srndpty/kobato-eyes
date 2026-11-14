@@ -263,9 +263,17 @@ class TagsAutocompleteMixin:
             self._hide_completion_popup()
 
     def reload_autocomplete(self, settings: PipelineSettings) -> None:
+        self._label_generation = getattr(self, "_label_generation", 0) + 1
+        pending = getattr(self, "_label_job", None)
+        if pending is not None:
+            pending.cancel()
         self._update_thresholds(settings)
         csv_tags: list[labels_util.TagMeta] = []
-        csv_path = labels_util.discover_labels_csv(settings.tagger.model_path, settings.tagger.tags_csv)
+        csv_path = (
+            None
+            if getattr(settings.tagger, "name", "").lower() == "pixai-v1-onnx"
+            else labels_util.discover_labels_csv(settings.tagger.model_path, settings.tagger.tags_csv)
+        )
         if csv_path:
             try:
                 csv_tags = labels_util.load_selected_tags(csv_path)
@@ -319,3 +327,41 @@ class TagsAutocompleteMixin:
         self._all_tags = labels_util.sort_by_popularity(dedup.values())
         self._update_completion_candidates()
         self._refresh_completions()
+
+        if getattr(settings.tagger, "name", "").lower() == "pixai-v1-onnx" and settings.tagger.model_path:
+            self._load_v1_completion_labels(settings)
+
+    def _load_v1_completion_labels(self, settings: PipelineSettings) -> None:
+        """Load v1 JSON on a worker and discard results from older model selections."""
+        from core.jobs import CallableJob, JobPriority
+        from tagger.pixai_v1_labels import load_labels_json, resolve_labels_json
+
+        generation = self._label_generation
+        model_path = settings.tagger.model_path
+        labels_json = settings.tagger.labels_json
+
+        def load(is_cancelled, _progress) -> list[labels_util.TagMeta]:
+            if is_cancelled():
+                return []
+            return load_labels_json(resolve_labels_json(model_path, labels_json))
+
+        handle = self._file_jobs.submit_handle(
+            CallableJob(load, name="pixai-v1-labels"), priority=JobPriority.BACKGROUND
+        )
+        self._label_job = handle
+
+        def complete(labels: list[labels_util.TagMeta]) -> None:
+            if generation != self._label_generation:
+                return
+            self._label_job = None
+            merged = {label.name.lower(): label for label in labels}
+            for label in self._all_tags:
+                key = label.name.lower()
+                if key not in merged:
+                    merged[key] = label
+            self._all_tags = labels_util.sort_by_popularity(merged.values())
+            self._update_completion_candidates()
+            self._refresh_completions()
+
+        handle.signals.completed.connect(complete)
+        handle.signals.error.connect(lambda exc, _tb: logger.warning("Failed to load PixAI v1 labels: %s", exc))

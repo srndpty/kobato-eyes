@@ -45,6 +45,7 @@ _CATEGORY_NAMES: dict[int, str] = {
     3: "copyright",
     4: "character",
     5: "meta",
+    6: "style",
 }
 
 _FALLBACK_THRESHOLDS: dict[int, float] = {0: 0.35, 4: 0.25, 3: 0.25}
@@ -85,7 +86,7 @@ def merge_thresholds(rows: list[tuple[object, object]]) -> dict[int, float]:
             thresholds[int(cast(Any, category))] = float(cast(Any, value))
         except (TypeError, ValueError):
             continue
-    merged: dict[int, float] = {key: 0.0 for key in range(6)}
+    merged: dict[int, float] = {key: 0.0 for key in _CATEGORY_NAMES}
     merged.update(_FALLBACK_THRESHOLDS)
     merged.update(thresholds)
     return merged
@@ -460,7 +461,7 @@ class TagStatsDialog(QDialog):
         top_bar.addWidget(QLabel("Category:"))
         self._category_combo = QComboBox(self)
         self._category_combo.addItem("All", None)
-        for category_id in range(6):
+        for category_id in _CATEGORY_NAMES:
             name = _CATEGORY_NAMES.get(category_id, str(category_id))
             self._category_combo.addItem(name.title(), category_id)
         top_bar.addWidget(self._category_combo)

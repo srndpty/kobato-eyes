@@ -186,3 +186,7 @@ pre-commit と CI の整形差分を避けるため、Ruff は `pyproject.toml` 
 # License
 
 MIT.
+
+### PixAI Tagger v1.0
+
+既存ONNXを使うv1.0対応の導入・設定・検証手順は [PixAI v1.0ガイド](docs/pixai-v1.md) を参照してください。

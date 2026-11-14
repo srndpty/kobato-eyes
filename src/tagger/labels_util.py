@@ -30,6 +30,8 @@ _CATEGORY_LOOKUP: dict[str, int] = {
     "character": 4,
     "5": 5,
     "meta": 5,
+    "6": 6,
+    "style": 6,
 }
 
 
