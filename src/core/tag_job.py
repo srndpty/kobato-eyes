@@ -19,6 +19,7 @@ from PIL import Image
 from core.signature import ensure_signatures
 from db.repository import replace_file_tags, update_fts, upsert_file, upsert_tags
 from tagger.base import ITagger, MaxTagsMap, TagResult, ThresholdMap
+from tagger.pixai_v1_identity import verify_loaded_identity
 from utils.hash import compute_sha256
 from utils.image_io import safe_load_image
 
@@ -58,13 +59,12 @@ def run_tag_job(
         return None
 
     cfg = config or TagJobConfig()
+    # モデル差し替え後の旧 tagger 結果を新署名で保存しないよう、推論前に照合する（全 tagger 共通）.
+    verify_loaded_identity(tagger, cfg.content_identity, signed=cfg.tagger_sig is not None)
     image: Image.Image | None = None
     if getattr(tagger, "preserve_source_rgb", False):
-        from tagger.pixai_v1_identity import verify_loaded_identity
         from tagger.pixai_v1_preprocessing import load_source_rgb
 
-        # モデル差し替え後の旧 tagger 結果を新署名で保存しないよう、推論前に照合する.
-        verify_loaded_identity(tagger, cfg.content_identity, signed=cfg.tagger_sig is not None)
         # 画素上限をデコード前に効かせるため、原寸入力を最初に確定する. 署名用の縮小画像は後段で必要時のみ読む.
         try:
             rgb, (width, height) = load_source_rgb(source)

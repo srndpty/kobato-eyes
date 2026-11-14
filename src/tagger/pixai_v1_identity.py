@@ -99,15 +99,25 @@ def v1_signature(
     return "pixai-v1-onnx:" + hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
 
 
+class TaggerIdentityMismatchError(RuntimeError):
+    """
+    保持中 tagger のロード内容が署名と食い違う. 画像単位の失敗ではなく tagger の再ロードが必要な状態のため、
+    呼び出し側は握りつぶさずジョブ失敗として通知する.
+    """
+
+
 def verify_loaded_identity(tagger: object, expected: Mapping[str, str] | None, *, signed: bool) -> None:
     """
-    署名付きで DB に書く前の共通契約. tagger がロードした内容と、署名の計算に使った内容が一致しなければ中止する.
-    content_identity を持たない tagger（v1 以外・テスト用）は対象外. 署名なしの書き込みは食い違いが生じないため許可.
+    署名付きで DB に書く前の共通契約. 署名に v1 identity が含まれるなら、tagger 側の identity 欠落も含め
+    一致しない限り拒否する（fail-closed）. 両方とも無い場合は v1 以外の署名なので対象外.
+    署名なしの書き込みは食い違いが生じないため許可.
     """
-    loaded = getattr(tagger, "content_identity", None)
-    if loaded is None or not signed:
+    if not signed:
         return
-    if expected is None or dict(loaded) != dict(expected):
-        raise RuntimeError(
+    loaded = getattr(tagger, "content_identity", None)
+    if loaded is None and expected is None:
+        return
+    if loaded is None or expected is None or dict(loaded) != dict(expected):
+        raise TaggerIdentityMismatchError(
             "PixAI v1 loaded model differs from the files used for the tagger signature; reload the tagger"
         )

@@ -574,3 +574,111 @@ def test_watcher_refuses_results_from_stale_loaded_model(tmp_path: Path, labels_
     finally:
         conn.close()
         pipeline.shutdown()
+
+
+def test_watcher_job_reports_identity_mismatch_as_error(tmp_path: Path, labels_file: Path) -> None:
+    """A stale tagger must fail the watcher job (error, not completed) instead of silently skipping images."""
+    import time
+
+    from core.jobs import JobManager
+    from core.pipeline.watcher import ProcessingPipeline
+    from db.connection import get_conn
+    from tagger.pixai_v1_identity import TaggerIdentityMismatchError, settings_content_identity
+
+    class RecordingManager(JobManager):
+        def __init__(self) -> None:
+            super().__init__(max_workers=1)
+            self.events: list[str] = []
+            self.errors: list[object] = []
+
+        def submit(self, job, priority=None):  # type: ignore[no-untyped-def, override]
+            signals = super().submit(job) if priority is None else super().submit(job, priority)
+            signals.completed.connect(lambda _result: self.events.append("completed"))
+            signals.error.connect(lambda exc, _tb: (self.events.append("error"), self.errors.append(exc)))
+            signals.finished.connect(lambda: self.events.append("finished"))
+            return signals
+
+        def wait(self, count: int) -> None:
+            deadline = time.time() + 10
+            while self.events.count("finished") < count:
+                assert time.time() < deadline, "watcher job did not finish"
+                time.sleep(0.01)
+
+    model = labels_file.with_name("model.onnx")
+    model.write_bytes(b"graph-a")
+    settings = PipelineSettings(tagger=TaggerSettings(name="pixai-v1-onnx", model_path=str(model)))
+    db_path = tmp_path / "db.sqlite"
+    get_conn(db_path).close()
+    manager = RecordingManager()
+    reasons: list[str] = []
+    pipeline = ProcessingPipeline(
+        db_path=db_path,
+        tagger=_IdentityTagger(settings_content_identity(settings.tagger)),
+        job_manager=manager,
+        settings=settings,
+        on_reload_required=reasons.append,
+    )
+    images = [tmp_path / "a.png", tmp_path / "b.png"]
+    for image in images:
+        Image.new("RGB", (32, 32)).save(image)
+    try:
+        model.write_bytes(b"graph-b-longer")
+        pipeline.update_settings(settings)
+        pipeline.enqueue_index(images)
+        manager.wait(1)
+        assert manager.events == ["error", "finished"]
+        assert isinstance(manager.errors[0], TaggerIdentityMismatchError)
+        assert reasons and pipeline.reload_required_reason == reasons[0]
+        conn = get_conn(db_path)
+        try:
+            assert conn.execute("SELECT COUNT(*) FROM files").fetchone()[0] == 0
+        finally:
+            conn.close()
+
+        # 再ロード後は同じ画像を再投入でき、新しい署名でタグ付けされる
+        pipeline.set_tagger(_IdentityTagger(settings_content_identity(settings.tagger)))
+        assert pipeline.reload_required_reason is None
+        pipeline.enqueue_index(images)
+        manager.wait(2)
+        assert manager.events[2:] == ["completed", "finished"]
+        conn = get_conn(db_path)
+        try:
+            sigs = {row[0] for row in conn.execute("SELECT tagger_sig FROM files")}
+        finally:
+            conn.close()
+        assert sigs == {pipeline._tag_config.tagger_sig}
+    finally:
+        pipeline.shutdown()
+
+
+def test_signed_v1_write_requires_loaded_identity(tmp_path: Path) -> None:
+    """When the signature carries a v1 identity, a tagger without one is refused (fail-closed)."""
+    from tagger.pixai_v1_identity import TaggerIdentityMismatchError, verify_loaded_identity
+
+    expected = dict(model="m", weights="embedded", labels="l")
+    with pytest.raises(TaggerIdentityMismatchError):
+        verify_loaded_identity(_CaptureTagger(), expected, signed=True)
+    with pytest.raises(TaggerIdentityMismatchError):
+        verify_loaded_identity(_IdentityTagger(expected), None, signed=True)
+    verify_loaded_identity(_IdentityTagger(expected), expected, signed=True)
+    verify_loaded_identity(_CaptureTagger(), None, signed=True)  # v1 以外の署名
+    verify_loaded_identity(_CaptureTagger(), expected, signed=False)  # 署名なし
+
+
+def test_tag_stage_requires_identity_unless_explicit_override(monkeypatch, labels_file: Path) -> None:
+    """Only explicit test overrides may lack an identity; resolver-created taggers are always verified."""
+    from core.pipeline.stages import tag_stage
+    from core.pipeline.types import PipelineContext
+    from tagger.pixai_v1_identity import TaggerIdentityMismatchError
+
+    model = labels_file.with_name("model.onnx")
+    model.write_bytes(b"graph")
+    settings = PipelineSettings(tagger=TaggerSettings(name="pixai-v1-onnx", model_path=str(model)))
+    ctx = PipelineContext(
+        db_path="unused", settings=settings, thresholds={}, max_tags_map={}, tagger_sig=current_tagger_sig(settings)
+    )
+    no_identity = SimpleNamespace(close=lambda: None)
+    with pytest.raises(TaggerIdentityMismatchError):
+        tag_stage._verify_loaded_model(no_identity, ctx)
+    ctx.tagger_override = no_identity  # type: ignore[assignment]
+    tag_stage._verify_loaded_model(no_identity, ctx)

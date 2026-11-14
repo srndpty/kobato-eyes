@@ -104,7 +104,11 @@ $env:PYTHONPATH = "src"
 - モデル・外部重み・ラベルの内容をセッション生成前後で比較し、ロード中の差し替えを検出したら中止します。
   さらにDBへ署名付きで書く前に、ロード内容と署名に使ったモデル内容が一致することを確認します。
   インデックス処理（`TagStage`）とwatcher経路（`run_tag_job`）の両方が同じ照合（`verify_loaded_identity`）を使います。
-  watcherで設定更新後にモデルが変わっていれば、保持中の旧taggerの結果は保存せず、taggerの再生成を求めるエラーにします。
+  署名にv1のidentityが含まれる場合、identityを持たないtaggerも拒否します（免除はテスト用の明示的overrideのみ）。
+  不一致は `TaggerIdentityMismatchError` として扱い、画像単位の失敗とは区別します。
+  watcher（`ProcessingPipeline`、現行GUIの主経路ではない互換API）では、ジョブを `completed` ではなく `error` で終了し、
+  `reload_required_reason` と `on_reload_required` コールバックで自動タグ付けの停止を通知します。
+  `set_tagger()` で再ロードしたtaggerへ差し替えると、未処理の画像を再投入できます。
 - noaione版のONNX入出力は `[1,3,1008,1008]` → `[1,30877]` の固定バッチです。
   アプリの要求バッチが2以上でも内部では1枚ずつ実行します。
   汎用の固定バッチ端数処理と、動的バッチのOOM時半減も実装しています。
