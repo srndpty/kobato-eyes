@@ -64,6 +64,38 @@ pytest -q                            # 高速な単体テスト
 .\scripts\check.ps1                  # 標準チェック（コード品質 + テスト）
 ```
 
+## 開発用コマンド
+
+リポジトリ直下の `dev.ps1` を開発操作の入口として使えます。仮想環境のactivateは不要で、
+`.venv\Scripts\python.exe` を優先します。未作成の場合はPATH上の`python`を使います。
+依存関係の導入は上記セットアップ手順で行ってください。
+
+```powershell
+.\dev.ps1 help
+.\dev.ps1 run                       # アプリ起動（guiも同じ動作）
+.\dev.ps1 test -q                   # 高速なheadlessテスト
+.\dev.ps1 test gui -k settings      # 実QtによるGUI/smokeテスト
+.\dev.ps1 test integration          # integration（GPUを除外）
+.\dev.ps1 test package              # package tree / compileall
+.\dev.ps1 lint                      # Ruff lint + format検証
+.\dev.ps1 check                     # 既存check.ps1（coverage用GUI確認も含む）
+.\dev.ps1 check -NoIncremental      # キャッシュなし型解析
+```
+
+`test gpu`、`test db-stress`も既存テストに対応しています。pytestのパス・`-k`・`-q`などは
+そのまま転送します。相対パスはリポジトリ直下を基準に解釈します。`lint --fix`はRuff lintの自動修正を行い、formatは引き続き検証します。
+`build`は既存のPyInstaller specから`dist/kobato-eyes`を作成します。
+初回は `.\.venv\Scripts\python.exe -m pip install -c requirements-dev.lock -e ".[dev,tagging-gpu,packaging]"`
+で必要な依存を入れてください。バージョン付き配布アーカイブの作成には従来の`package-release.ps1`を使います。
+削除範囲が未定義の`clean`は今回は実装していません。
+
+`C:\Users\lambe\bin\dev.ps1` のグローバルディスパッチャーがPATH上にある環境では、
+リポジトリ直下からそのまま `dev run`、`dev test`、`dev check` と呼べます。
+現在のグローバルディスパッチャーは親ディレクトリを探索しないため、`dev`はリポジトリ直下で使ってください。
+ローカルスクリプト自体は別ディレクトリから絶対パスでも呼べ、実行後は呼び出し元の場所と環境変数を戻します。
+`dev.cmd`はcmd.exe向けの薄いwrapperで、PowerShell 7を優先し、なければWindows PowerShellを使います。
+いずれもコマンドの終了コードを呼び出し元へ返します。グローバル側の変更は不要です。
+
 ## 主な機能
 
 - **タグ付けパイプライン**: 監視対象ディレクトリをスキャンし、ONNX Runtime (WD14 / PixAI) で画像に Danbooru タグを推論。閾値や最大タグ数はプロバイダーごとに調整可能です。
@@ -145,7 +177,7 @@ CI などで GUI を起動しない場合は、環境変数 `KOE_HEADLESS=1` を
 
 ## テスト / CI
 
-CI は GitHub Actions 上の Windows + Python 3.10 で実行し、ローカル開発と同じ `requirements-dev.lock` を pip constraints として参照します。通常の高速確認は GUI / integration / db_stress / gpu を除外する `.\scripts\check.ps1` を使います。
+CI は GitHub Actions 上の Windows + Python 3.10 で実行し、ローカル開発と同じ `requirements-dev.lock` を pip constraints として参照します。高速な単体確認は `.\dev.ps1 test` を使います。標準の `.\scripts\check.ps1`（`dev check`）は非GUIテストとcoverage用GUI/smoke確認を実行し、integration / db_stress / gpuは別途実行します。
 
 ```powershell
 .\scripts\check.ps1
