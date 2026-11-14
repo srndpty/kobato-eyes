@@ -194,3 +194,11 @@ def test_danbooru_query_combinations_do_not_raise(tag_a: str, tag_b: str, score:
     assert " OR " in fragment.where
     assert tag_a in fragment.params
     assert tag_b in fragment.params
+
+
+def test_style_category_is_distinct_from_artist() -> None:
+    """Style uses its own stored numeric category without changing existing artist IDs."""
+    style = translate_query("category:style")
+    artist = translate_query("category:artist")
+    assert style.params == [6]
+    assert artist.params == [1]

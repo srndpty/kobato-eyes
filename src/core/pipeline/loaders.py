@@ -26,6 +26,7 @@ _CV2_ERROR = getattr(cv2, "error", RuntimeError)
 if not isinstance(_CV2_ERROR, type) or not issubclass(_CV2_ERROR, BaseException):
     _CV2_ERROR = RuntimeError
 _DECODE_FALLBACK_ERRORS: tuple[type[BaseException], ...] = (OSError, ValueError, RuntimeError, MemoryError, _CV2_ERROR)
+_SOURCE_LOAD_ERRORS: tuple[type[BaseException], ...] = (*_DECODE_FALLBACK_ERRORS, Image.DecompressionBombError)
 
 # JPEG decode is intentionally OpenCV-only. TurboJPEG was benchmarked but
 # removed to avoid external DLL packaging; TensorRT made disk/decode the next
@@ -199,6 +200,12 @@ class PrefetchLoaderPrepared:
             current_workers = safe_int(env_workers, current_workers, min_value=1)
         self._io_workers = current_workers
         self._tagger = tagger
+        self._preserve_source = bool(getattr(tagger, "preserve_source_rgb", False))
+        self._cache_version = (
+            str(getattr(tagger, "preprocess_version", "source-rgb-v1"))
+            if self._preserve_source
+            else _INPUT_CACHE_VERSION
+        )
         self._producer_error: BaseException | None = None
         self._metrics = LoaderMetrics()
         self._metrics_lock = threading.Lock()
@@ -321,7 +328,7 @@ class PrefetchLoaderPrepared:
                 str(int(stat_result.st_size)),
                 str(int(stat_result.st_mtime_ns)),
                 str(_TARGET),
-                _INPUT_CACHE_VERSION,
+                self._cache_version,
             )
         )
         digest = hashlib.sha256(key_material.encode("utf-8", errors="surrogatepass")).hexdigest()
@@ -332,19 +339,27 @@ class PrefetchLoaderPrepared:
 
         try:
             with np.load(cache_path, allow_pickle=False) as cached:
-                rgb = cached["rgb"]
                 size_arr = cached["size"]
                 version_arr = cached["version"]
-            version = str(version_arr.item() if hasattr(version_arr, "item") else version_arr)
-            if version != _INPUT_CACHE_VERSION:
-                raise ValueError("stale cache version")
+                version = str(version_arr.item() if hasattr(version_arr, "item") else version_arr)
+                if version != self._cache_version:
+                    raise ValueError("stale cache version")
+                if size_arr.shape[0] != 2:
+                    raise ValueError("invalid cached size")
+                size = (int(size_arr[0]), int(size_arr[1]))
+                if self._preserve_source:
+                    from tagger.pixai_v1_preprocessing import MAX_SOURCE_PIXELS
+
+                    # 原寸キャッシュは load_source_rgb の画素上限を迂回できるため、RGB を読む前に同じ上限を課す.
+                    if size[0] * size[1] > MAX_SOURCE_PIXELS:
+                        raise ValueError("cached source exceeds the pixel limit")
+                rgb = cached["rgb"]
             if rgb.dtype != np.uint8 or rgb.ndim != 3 or rgb.shape[2] != 3:
                 raise ValueError("invalid cached RGB array")
-            if max(rgb.shape[:2]) > _TARGET:
+            if not self._preserve_source and max(rgb.shape[:2]) > _TARGET:
                 raise ValueError("cached RGB array exceeds target side")
-            if size_arr.shape[0] != 2:
-                raise ValueError("invalid cached size")
-            size = (int(size_arr[0]), int(size_arr[1]))
+            if self._preserve_source and rgb.shape[:2] != (size[1], size[0]):
+                raise ValueError("cached source RGB does not match its recorded size")
             return rgb, size
         except Exception as exc:
             logger.debug("Discarding invalid tagger input cache %s: %s", cache_path, exc)
@@ -367,7 +382,7 @@ class PrefetchLoaderPrepared:
                     handle,
                     rgb=np.asarray(rgb, dtype=np.uint8),
                     size=np.asarray(size, dtype=np.int32),
-                    version=np.asarray(_INPUT_CACHE_VERSION),
+                    version=np.asarray(self._cache_version),
                 )
             os.replace(tmp_path, cache_path)
             self._record_input_cache("write")
@@ -379,6 +394,23 @@ class PrefetchLoaderPrepared:
                     tmp_path.unlink(missing_ok=True)
                 except OSError:
                     pass
+
+    def _load_source_one(
+        self, p: str, cache_path: Path | None, started: float, byte_count: int
+    ) -> tuple[str, np.ndarray | None, tuple[int, int] | None, LoadRoute]:
+        """原寸入力 tagger 用. 単一画像経路と同じローダーを使い、縮小フォールバックには落とさない."""
+        from tagger.pixai_v1_preprocessing import load_source_rgb
+
+        try:
+            rgb, size = load_source_rgb(p)
+        except _SOURCE_LOAD_ERRORS as exc:
+            logger.warning("PrefetchLoaderPrepared: failed to load source %s: %s", p, exc)
+            self._record_route("failed", time.perf_counter() - started, ok=False, path=p, byte_count=byte_count)
+            return (p, None, None, "failed")
+        if cache_path is not None:
+            self._write_input_cache(cache_path, rgb, size)
+        self._record_route("pil_fallback", time.perf_counter() - started, ok=True, path=p, byte_count=byte_count)
+        return p, rgb, size, "pil_fallback"
 
     def _load_one(self, p: str) -> tuple[str, np.ndarray | None, tuple[int, int] | None, LoadRoute]:
         route: LoadRoute = "opencv"
@@ -409,6 +441,8 @@ class PrefetchLoaderPrepared:
             elif cache_path is not None:
                 self._record_input_cache("miss")
 
+            if self._preserve_source:
+                return self._load_source_one(p, cache_path, started, byte_count)
             data = np.fromfile(p, dtype=np.uint8)  # Windows で速い
             byte_count = int(data.nbytes)
             im = cv2.imdecode(data, cv2.IMREAD_UNCHANGED)

@@ -44,6 +44,10 @@ def current_tagger_sig(
     max_tags: Mapping[TagCategory, int] | None = None,
 ) -> str:
     """アクティブなタガー構成の署名（しきい値/最大数/モデル/CSV）を安定化した文字列で返す。"""
+    if settings.tagger.name.lower() == "pixai-v1-onnx":
+        from tagger.pixai_v1_identity import v1_signature
+
+        return v1_signature(settings.tagger, thresholds=thresholds, max_tags=max_tags)
     threshold_map = thresholds or _build_threshold_map(settings.tagger.thresholds)
     max_tags_map = max_tags or _build_max_tags_map(getattr(settings.tagger, "max_tags", None))
 
@@ -62,8 +66,25 @@ def current_tagger_sig(
     return f"{tagger_name}:{provider}:{model_digest}:csv={csv_digest}:thr={thresholds_part}:max={max_tags_part}"
 
 
+def current_tagger_sig_with_identity(
+    settings: PipelineSettings,
+    *,
+    thresholds: Mapping[TagCategory, float] | None = None,
+    max_tags: Mapping[TagCategory, int] | None = None,
+) -> tuple[str, dict[str, str] | None]:
+    """署名と、その署名に含めたモデル内容 identity（v1 のみ）を同一スナップショットから返す。"""
+    if settings.tagger.name.lower() == "pixai-v1-onnx":
+        from tagger.pixai_v1_identity import settings_content_identity, v1_signature
+
+        identity = settings_content_identity(settings.tagger)
+        signature = v1_signature(settings.tagger, thresholds=thresholds, max_tags=max_tags, identity=identity)
+        return signature, identity
+    return current_tagger_sig(settings, thresholds=thresholds, max_tags=max_tags), None
+
+
 __all__ = [
     "current_tagger_sig",
+    "current_tagger_sig_with_identity",
     "_build_threshold_map",
     "_build_max_tags_map",
 ]

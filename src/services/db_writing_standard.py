@@ -4,38 +4,16 @@ from __future__ import annotations
 
 import sqlite3
 import time
-from collections.abc import Callable, Mapping, Sequence
-from typing import Any
+from collections.abc import Callable, Sequence
 
 from core.pipeline.contracts import DBItem
+from db.tags import upsert_tags_uncommitted
 
 
 def chunked(seq: Sequence[int], size: int) -> list[list[int]]:
     """Split ``seq`` into fixed-size chunks."""
 
     return [list(seq[i : i + size]) for i in range(0, len(seq), size)]
-
-
-def upsert_tags_uncommitted(
-    conn: sqlite3.Connection,
-    tags: Sequence[Mapping[str, Any]],
-) -> dict[str, int]:
-    """Upsert tag definitions without committing the caller's transaction."""
-
-    results: dict[str, int] = {}
-    query = (
-        "INSERT INTO tags (name, category) "
-        "VALUES (?, ?) "
-        "ON CONFLICT(name) DO UPDATE SET category = excluded.category "
-        "RETURNING id"
-    )
-    for tag in tags:
-        name = str(tag["name"]).strip()
-        category = int(tag.get("category", 0))
-        cursor = conn.execute(query, (name, category))
-        tag_id = cursor.fetchone()[0]
-        results[name] = int(tag_id)
-    return results
 
 
 def bulk_update_files_meta_by_id_uncommitted(

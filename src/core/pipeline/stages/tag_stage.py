@@ -96,6 +96,31 @@ class TagStageResult:
     tagged_count: int
 
 
+def _verify_loaded_model(tagger: object, ctx: PipelineContext) -> None:
+    """
+    署名計算からモデルロードまでの間にファイルが差し替わると、旧署名で新モデルの結果を書き込む.
+    tagger はロード前後の内容一致を保証済みなので、ここでは「ロード内容 == 現在の設定ファイル」と
+    「現在の署名 == ctx の署名」を確認し、署名と実ロード内容を連結する.
+    """
+    if ctx.settings.tagger.name.lower() != "pixai-v1-onnx":
+        return
+    # identity を持たない tagger の免除は、テスト等の明示的 override に限る. resolver 生成の tagger は必ず照合する.
+    if ctx.tagger_override is not None and getattr(tagger, "content_identity", None) is None:
+        return
+    from tagger.pixai_v1_identity import TaggerIdentityMismatchError, verify_loaded_identity
+
+    from ..signature import current_tagger_sig_with_identity
+
+    current_sig, identity = current_tagger_sig_with_identity(
+        ctx.settings, thresholds=ctx.thresholds, max_tags=ctx.max_tags_map
+    )
+    if current_sig != ctx.tagger_sig:
+        raise TaggerIdentityMismatchError(
+            "PixAI v1 model files changed after the tagger signature was computed; aborting tagging"
+        )
+    verify_loaded_identity(tagger, identity, signed=True)
+
+
 class TagStage:
     """Stage that performs model inference for files requiring tagging."""
 
@@ -150,6 +175,14 @@ class TagStage:
             thresholds=thresholds or None,
             max_tags=max_tags_map or None,
         )
+        try:
+            _verify_loaded_model(tagger, ctx)
+        except Exception:
+            if ctx.tagger_override is None:
+                close_tagger = getattr(tagger, "close", None)
+                if callable(close_tagger):
+                    close_tagger()
+            raise
         if not thresholds and th_fallback:
             thresholds = th_fallback
         if (not max_tags_map) and k_fallback:
@@ -321,6 +354,10 @@ class TagStage:
                 loader.close()
             except Exception:
                 pass
+            if ctx.tagger_override is None:
+                close_tagger = getattr(tagger, "close", None)
+                if callable(close_tagger):
+                    close_tagger()
 
         logger.info("Tagging complete: %d image(s) processed", processed_tags)
         emitter.emit(

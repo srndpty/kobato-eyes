@@ -12,6 +12,7 @@ from PyQt6.QtWidgets import (
     QComboBox,
     QDialog,
     QDialogButtonBox,
+    QDoubleSpinBox,
     QFileDialog,
     QFormLayout,
     QHBoxLayout,
@@ -28,6 +29,7 @@ from PyQt6.QtWidgets import (
 from core.config import PipelineSettings, TaggerSettings
 from core.jobs import CallableJob, JobHandle, JobManager, JobPriority
 from tagger.model_inspection import format_inspection, inspect_model
+from tagger.pixai_v1_labels import DEFAULT_THRESHOLDS
 from ui.viewmodels import SettingsViewModel
 
 if TYPE_CHECKING:
@@ -229,12 +231,12 @@ class SettingsTab(QWidget):
         self._device_combo.currentIndexChanged.connect(self._mark_dirty)
 
         self._tagger_combo = QComboBox(self)
-        self._tagger_combo.addItems(["dummy", "wd14-onnx"])
+        self._tagger_combo.addItems(["dummy", "wd14-onnx", "pixai-v1-onnx"])
         self._tagger_combo.currentTextChanged.connect(self._update_tagger_inputs)
         self._tagger_combo.currentTextChanged.connect(self._mark_dirty)
 
         self._tagger_model_edit = QLineEdit(self)
-        self._tagger_model_edit.setPlaceholderText("Path to WD14 ONNX model")
+        self._tagger_model_edit.setPlaceholderText("Path to ONNX model")
         self._tagger_model_edit.textChanged.connect(self._schedule_model_inspection)
         self._tagger_model_edit.textChanged.connect(self._mark_dirty)
         self._tagger_model_button = QPushButton("Browse...", self)
@@ -244,6 +246,24 @@ class SettingsTab(QWidget):
         tagger_layout.setContentsMargins(0, 0, 0, 0)
         tagger_layout.addWidget(self._tagger_model_edit)
         tagger_layout.addWidget(self._tagger_model_button)
+
+        self._labels_json_edit = QLineEdit(self)
+        self._labels_json_edit.setPlaceholderText("Optional tags.json / config.json (default: next to model)")
+        self._labels_json_edit.textChanged.connect(self._schedule_model_inspection)
+        self._labels_json_edit.textChanged.connect(self._mark_dirty)
+        self._v1_thresholds_widget = QWidget(self)
+        threshold_layout = QFormLayout(self._v1_thresholds_widget)
+        threshold_layout.setContentsMargins(0, 0, 0, 0)
+        self._v1_threshold_spins: dict[str, QDoubleSpinBox] = {}
+        for category, value in DEFAULT_THRESHOLDS.items():
+            spin = QDoubleSpinBox(self)
+            spin.setRange(0.0, 1.0)
+            spin.setDecimals(3)
+            spin.setSingleStep(0.01)
+            spin.setValue(value)
+            spin.valueChanged.connect(self._mark_dirty)
+            self._v1_threshold_spins[category] = spin
+            threshold_layout.addRow(category, spin)
 
         self._model_info_edit = QPlainTextEdit(self)
         self._model_info_edit.setReadOnly(True)
@@ -267,6 +287,8 @@ class SettingsTab(QWidget):
         form.addRow("Device", self._device_combo)
         form.addRow("Tagger", self._tagger_combo)
         form.addRow("Model path", tagger_model_row)
+        form.addRow("Labels JSON", self._labels_json_edit)
+        form.addRow("PixAI v1 thresholds", self._v1_thresholds_widget)
 
         layout = QVBoxLayout(self)
         layout.addLayout(form)
@@ -304,6 +326,9 @@ class SettingsTab(QWidget):
             else:
                 self._tagger_combo.setCurrentText(settings.tagger.name)
             self._tagger_model_edit.setText(settings.tagger.model_path or "")
+            self._labels_json_edit.setText(settings.tagger.labels_json or "")
+            for category, spin in self._v1_threshold_spins.items():
+                spin.setValue(settings.tagger.thresholds.get(category, DEFAULT_THRESHOLDS[category]))
             self._update_tagger_inputs(self._tagger_combo.currentText())
         finally:
             self._loading_settings = False
@@ -319,9 +344,9 @@ class SettingsTab(QWidget):
         current = self._current_settings or PipelineSettings()
         previous_tagger = current.tagger if current else TaggerSettings()
         tagger_name = self._tagger_combo.currentText()
-        is_wd14 = tagger_name.lower() == "wd14-onnx"
+        uses_model = tagger_name.lower() in {"wd14-onnx", "pixai-v1-onnx"}
         model_path_text = self._tagger_model_edit.text().strip()
-        model_path = model_path_text if is_wd14 and model_path_text else None
+        model_path = model_path_text if uses_model and model_path_text else None
         settings = self._view_model.build_settings(
             roots=[Path(line) for line in self._lines(self._roots_edit) if line],
             excluded=[Path(line) for line in self._lines(self._excluded_edit) if line],
@@ -334,6 +359,10 @@ class SettingsTab(QWidget):
             previous_tagger=previous_tagger,
             previous_settings=current,
         )
+        if tagger_name.lower() == "pixai-v1-onnx":
+            settings.tagger.labels_json = self._labels_json_edit.text().strip() or None
+            settings.tagger.thresholds = {category: spin.value() for category, spin in self._v1_threshold_spins.items()}
+        settings.tagger = TaggerSettings.model_validate(settings.tagger.model_dump())
         return settings
 
     @staticmethod
@@ -360,9 +389,17 @@ class SettingsTab(QWidget):
         super().hideEvent(event)
 
     def _update_tagger_inputs(self, name: str) -> None:
-        is_wd14 = name.lower() == "wd14-onnx"
-        self._tagger_model_edit.setEnabled(is_wd14)
-        self._tagger_model_button.setEnabled(is_wd14)
+        uses_model = name.lower() in {"wd14-onnx", "pixai-v1-onnx"}
+        if name.lower() == "pixai-v1-onnx" and not self._loading_settings:
+            if self._current_settings.tagger.name.lower() != "pixai-v1-onnx":
+                self._batch_size_spin.setValue(1)
+                self._prefetch_depth_spin.setValue(1)
+                for category, spin in self._v1_threshold_spins.items():
+                    spin.setValue(DEFAULT_THRESHOLDS[category])
+        self._labels_json_edit.setEnabled(name.lower() == "pixai-v1-onnx")
+        self._v1_thresholds_widget.setVisible(name.lower() == "pixai-v1-onnx")
+        self._tagger_model_edit.setEnabled(uses_model)
+        self._tagger_model_button.setEnabled(uses_model)
         self._schedule_model_inspection()
 
     def set_pipeline(self, pipeline: ProcessingPipeline | None) -> None:
@@ -430,7 +467,7 @@ class SettingsTab(QWidget):
         start_dir = str(Path(text_value).expanduser().parent) if text_value else ""
         file_path, _ = QFileDialog.getOpenFileName(
             self,
-            "Select WD14 ONNX model",
+            "Select ONNX model",
             start_dir,
             "ONNX model (*.onnx);;All files (*)",
         )
@@ -452,6 +489,7 @@ class SettingsTab(QWidget):
         tagger_name = self._tagger_combo.currentText()
         current = self._current_settings or PipelineSettings()
         tags_csv = current.tagger.tags_csv if tagger_name.lower() == "wd14-onnx" else None
+        labels_json = self._labels_json_edit.text().strip() or None
         model_path = self._tagger_model_edit.text().strip() or None
 
         def _inspect(is_cancelled, _emit_progress) -> tuple[int, str, bool]:
@@ -462,6 +500,7 @@ class SettingsTab(QWidget):
                     tagger_name=tagger_name,
                     model_path=model_path,
                     tags_csv=tags_csv,
+                    labels_json=labels_json,
                     provider_loader=self._view_model.provider_loader,
                 )
                 return generation, format_inspection(inspection), inspection.ok

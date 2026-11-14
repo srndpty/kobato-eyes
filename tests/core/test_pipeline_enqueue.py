@@ -133,10 +133,12 @@ def processing_pipeline(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> tupl
             thresholds: dict[Any, Any] | None = None,
             max_tags: dict[Any, Any] | None = None,
             tagger_sig: str | None = None,
+            content_identity: dict[str, str] | None = None,
         ) -> None:
             self.thresholds = thresholds
             self.max_tags = max_tags
             self.tagger_sig = tagger_sig
+            self.content_identity = content_identity
 
     def _run_tag_job(*_args: Any, **_kwargs: Any) -> None:
         raise RuntimeError("Tag job should not execute in this test")
@@ -167,9 +169,13 @@ def processing_pipeline(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> tupl
     def current_tagger_sig(*_args: Any, **_kwargs: Any) -> str:
         return "dummy-sig"
 
+    def current_tagger_sig_with_identity(*_args: Any, **_kwargs: Any) -> tuple[str, None]:
+        return "dummy-sig", None
+
     dummy_signature._build_threshold_map = _build_threshold_map
     dummy_signature._build_max_tags_map = _build_max_tags_map
     dummy_signature.current_tagger_sig = current_tagger_sig
+    dummy_signature.current_tagger_sig_with_identity = current_tagger_sig_with_identity
     monkeypatch.setitem(sys.modules, "core.pipeline.signature", dummy_signature)
 
     dummy_utils = ModuleType("utils.env")
@@ -224,7 +230,8 @@ def processing_pipeline(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> tupl
         raise RuntimeError("Failed to load watcher module")
     module = importlib.util.module_from_spec(spec)
     module.__package__ = "core.pipeline"
-    sys.modules[spec.name] = module
+    # スタブ依存で組んだ watcher を後続テストへ漏らさない
+    monkeypatch.setitem(sys.modules, spec.name, module)
     spec.loader.exec_module(module)
     monkeypatch.setattr(module, "bootstrap_if_needed", lambda _path: None)
     monkeypatch.setattr(module, "ensure_dirs", lambda: None)

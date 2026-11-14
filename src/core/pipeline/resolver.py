@@ -43,6 +43,15 @@ def _resolve_tagger(
     provider = detect_tagger_provider(settings)
 
     # プロバイダ依存のデフォルト（未指定のときのみ）を適用
+    if provider == "pixai-v1":
+        from tagger.pixai_v1_labels import DEFAULT_THRESHOLDS
+
+        from .signature import _build_threshold_map
+
+        effective = _build_threshold_map(dict(DEFAULT_THRESHOLDS) | settings.tagger.thresholds)
+        effective.update(thresholds or {})
+        thresholds = effective
+
     if provider == "pixai":
         if not thresholds:
             thresholds = provider_default_thresholds(provider)
@@ -80,6 +89,17 @@ def _resolve_tagger(
         from tagger.dummy import DummyTagger
 
         tagger_instance: ITagger = DummyTagger()
+    elif lowered == "pixai-v1-onnx":
+        from tagger.pixai_v1_onnx import PixaiV1OnnxTagger
+
+        if not model_path_value:
+            raise ValueError("PixAI v1: model_path is required")
+        tagger_instance = PixaiV1OnnxTagger(
+            model_path_value,
+            labels_json=settings.tagger.labels_json,
+            providers=execution_providers,
+            max_batch=int(getattr(settings, "batch_size", 1) or 1),
+        )
     elif lowered == "wd14-onnx":
         if not settings.tagger.model_path:
             raise ValueError("WD14: model_path is required")

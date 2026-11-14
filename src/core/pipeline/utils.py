@@ -119,6 +119,8 @@ logger = logging.getLogger(__name__)
 def detect_tagger_provider(settings: PipelineSettings) -> str:
     """Return the effective tagger provider after considering auto-detection."""
 
+    if settings.tagger.name.lower() == "pixai-v1-onnx":
+        return "pixai-v1"
     configured = str(getattr(settings.tagger, "provider", "auto") or "auto").lower()
     if configured in {"wd14", "pixai"}:
         return configured

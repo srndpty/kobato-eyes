@@ -27,6 +27,7 @@ class _PaletteLike(Protocol):
 
 _CATEGORY_KEY_LOOKUP = build_category_lookup()
 _TAG_COLOR_MAP = {
+    TagCategory.STYLE: "#E5A84B",
     TagCategory.GENERAL: "#45C5F7",
     TagCategory.CHARACTER: "#63CC69",
     TagCategory.COPYRIGHT: "#C976D8",

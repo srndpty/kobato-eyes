@@ -2,6 +2,7 @@ param(
     [switch]$NoCoverage,
     [switch]$Fix,
     [switch]$SkipTypeCheck,
+    [switch]$NoIncremental,
     [string]$CoverageFile = "tmp/coverage/.coverage",
     [string[]]$CoverageFocus = @(
         "src/core/jobs.py",
@@ -88,8 +89,12 @@ Invoke-Step "ruff format check" {
 }
 
 if (-not $SkipTypeCheck) {
-    Invoke-Step "mypy --no-incremental" {
-        & $Python -m mypy --no-incremental
+    $MypyArgs = @("--cache-dir=tmp/mypy_cache/check")
+    if ($NoIncremental) {
+        $MypyArgs += "--no-incremental"
+    }
+    Invoke-Step "mypy" {
+        & $Python -m mypy @MypyArgs
     }
 }
 

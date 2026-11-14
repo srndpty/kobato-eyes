@@ -21,6 +21,7 @@ _CATEGORY_LABELS: dict[int, str] = {
     3: "copyright",
     4: "character",
     5: "meta",
+    6: "style",
 }
 
 
@@ -221,10 +222,13 @@ def inspect_model(
     tags_csv: str | Path | None,
     provider_loader: Callable[[], Iterable[str]],
     session_factory: SessionFactory = _default_session_factory,
+    labels_json: str | Path | None = None,
 ) -> ModelInspection:
     """Inspect a configured tagger model and labels CSV without running inference."""
 
     lowered = tagger_name.lower()
+    if lowered == "pixai-v1-onnx":
+        return _inspect_pixai_v1(model_path, labels_json, provider_loader, session_factory)
     if lowered != "wd14-onnx":
         return ModelInspection(ok=True, tagger_name=tagger_name, model_name=tagger_name)
     if not model_path:
@@ -304,7 +308,7 @@ def inspect_model(
 def format_inspection(inspection: ModelInspection) -> str:
     """Format inspection details for the Settings tab diagnostics panel."""
 
-    if inspection.tagger_name.lower() != "wd14-onnx":
+    if inspection.tagger_name.lower() not in {"wd14-onnx", "pixai-v1-onnx"}:
         return f"Tagger: {inspection.tagger_name}\nModel validation is not required for this tagger."
 
     status = "OK" if inspection.ok else "Error"
@@ -314,7 +318,7 @@ def format_inspection(inspection: ModelInspection) -> str:
     if inspection.model_path is not None:
         lines.append(f"Model path: {inspection.model_path}")
     if inspection.labels_csv is not None:
-        lines.append(f"Tags CSV: {inspection.labels_csv}")
+        lines.append(f"{'Labels JSON' if inspection.provider == 'pixai-v1' else 'Tags CSV'}: {inspection.labels_csv}")
     if inspection.label_total:
         category_text = ", ".join(f"{name}={count}" for name, count in inspection.category_counts.items())
         lines.append(f"Tags: {inspection.label_total} total ({category_text})")
@@ -334,3 +338,45 @@ def format_inspection(inspection: ModelInspection) -> str:
 
 
 __all__ = ["ModelInspection", "detect_provider_from_model_outputs", "format_inspection", "inspect_model"]
+
+
+def _inspect_pixai_v1(
+    model_path: str | Path | None,
+    labels_json: str | Path | None,
+    provider_loader: Callable[[], Iterable[str]],
+    session_factory: SessionFactory,
+) -> ModelInspection:
+    """Inspect v1 JSON labels and tensor contract on the background diagnostics worker."""
+    from tagger.pixai_v1_labels import load_labels_json, resolve_labels_json
+    from tagger.pixai_v1_onnx import validate_session
+
+    path = Path(model_path).expanduser() if model_path else None
+    labels_path = None
+    labels = []
+    errors = []
+    available = ()
+    output_name = None
+    try:
+        if path is None or not path.is_file():
+            raise ValueError("PixAI v1 model path is missing or does not exist")
+        labels_path = resolve_labels_json(path, labels_json)
+        labels = load_labels_json(labels_path)
+        available = _normalise_providers(provider_loader())
+        session = session_factory(path, _inspection_providers(available))
+        _, output_name, _ = validate_session(session)
+    except Exception as exc:
+        errors.append(str(exc))
+    return ModelInspection(
+        ok=not errors,
+        tagger_name="pixai-v1-onnx",
+        model_path=path,
+        labels_csv=labels_path,
+        model_name="PixAI Tagger v1.0",
+        label_total=len(labels),
+        category_counts=_category_counts(labels),
+        output_dim=30877 if output_name else None,
+        output_name=output_name,
+        provider="pixai-v1",
+        providers=available,
+        errors=tuple(errors),
+    )

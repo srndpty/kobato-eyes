@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Literal, Mapping
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator, model_validator
 
 DEFAULT_EXCLUDED = [
     str(Path.home() / "AppData"),
@@ -61,11 +61,21 @@ class TaggerSettings(BaseModel):
     name: str = "dummy"
     model_path: str | None = None
     tags_csv: str | None = None
+    labels_json: str | None = None
     provider: Literal["auto", "wd14", "pixai"] = "auto"
     device: Literal["auto", "tensorrt", "cuda", "cpu"] = "auto"
     thresholds: dict[str, float] = Field(default_factory=_default_thresholds)
 
-    @field_validator("model_path", "tags_csv", mode="before")
+    @model_validator(mode="before")
+    @classmethod
+    def _v1_defaults(cls, data: Any) -> Any:
+        """Apply v1 defaults only for its explicit backend selection."""
+        if isinstance(data, Mapping) and str(data.get("name", "")).lower() == "pixai-v1-onnx":
+            data = dict(data)
+            data.setdefault("thresholds", {})
+        return data
+
+    @field_validator("model_path", "tags_csv", "labels_json", mode="before")
     @classmethod
     def _validate_optional_path(cls, value: Any) -> str | None:
         if value in (None, ""):
@@ -90,13 +100,21 @@ class TaggerSettings(BaseModel):
 
     @field_validator("thresholds", mode="before")
     @classmethod
-    def _validate_thresholds(cls, value: Any) -> dict[str, float]:
+    def _validate_thresholds(cls, value: Any, info: ValidationInfo) -> dict[str, float]:
+        is_v1 = str(info.data.get("name", "")).lower() == "pixai-v1-onnx"
+        if is_v1:
+            from tagger.pixai_v1_labels import DEFAULT_THRESHOLDS
+
+            thresholds = dict(DEFAULT_THRESHOLDS)
+        else:
+            thresholds = _default_thresholds()
         if not isinstance(value, Mapping):
-            return _default_thresholds()
-        thresholds: dict[str, float] = _default_thresholds()
+            return thresholds
         for key, candidate in value.items():
             try:
-                thresholds[str(key)] = float(candidate)
+                number = float(candidate)
+                if not is_v1 or 0.0 <= number <= 1.0:
+                    thresholds[str(key)] = number
             except (TypeError, ValueError):
                 continue
         return thresholds
@@ -123,6 +141,11 @@ class PipelineSettings(BaseModel):
     def _prepare_data(cls, data: Any) -> Any:
         if isinstance(data, Mapping):
             prepared = dict(data)
+            tagger = prepared.get("tagger")
+            tagger_name = tagger.get("name") if isinstance(tagger, Mapping) else getattr(tagger, "name", None)
+            if str(tagger_name).lower() == "pixai-v1-onnx":
+                prepared.setdefault("batch_size", 1)
+                prepared.setdefault("prefetch_depth", 1)
             if "excluded" not in prepared and "excludes" in prepared:
                 prepared["excluded"] = prepared["excludes"]
             return prepared

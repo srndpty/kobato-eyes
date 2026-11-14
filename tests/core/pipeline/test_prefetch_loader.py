@@ -509,3 +509,30 @@ def test_prefetch_loader_propagates_io_worker_failure(
         assert str(loader._producer_error) == "io worker exploded"
     finally:
         loader.close()
+
+
+def test_v1_loader_preserves_source_and_separates_cache(tmp_path, monkeypatch) -> None:
+    """V1 never reuses 448px cache entries or resizes away original detail."""
+    path = tmp_path / "large.png"
+    Image.new("RGBA", (1200, 600), (20, 40, 60, 128)).save(path)
+    cache_dir = tmp_path / "cache"
+    v1 = _DummyTagger()
+    v1.preserve_source_rgb = True
+    v1.preprocess_version = "v1-test"
+    for tagger, expected_shape in [(v1, (600, 1200, 3)), (_DummyTagger(), (224, 448, 3)), (v1, (600, 1200, 3))]:
+        loader = loaders.PrefetchLoaderPrepared(
+            [str(path)],
+            tagger=tagger,
+            batch_size=1,
+            prefetch_batches=1,
+            io_workers=1,
+            input_cache_dir=cache_dir,
+        )
+        try:
+            batches = list(loader)
+            assert batches[0][2] == [(1200, 600)]
+            assert tagger.calls[0][0].shape == expected_shape
+            np.testing.assert_allclose(tagger.calls[0][0][0, 0], [137, 147, 157], atol=1)
+        finally:
+            loader.close()
+    assert len(list(cache_dir.rglob("*.npz"))) == 2

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Iterable, Optional, Protocol, Sequence, Set
+from typing import Callable, Iterable, Optional, Protocol, Sequence, Set
 
 from core.config import PipelineSettings
 from core.jobs import BatchJob, JobManager
@@ -12,10 +12,11 @@ from core.scanner import DEFAULT_EXTENSIONS
 from core.tag_job import TagJobConfig, run_tag_job
 from db.connection import bootstrap_if_needed, get_conn
 from tagger.base import ITagger
+from tagger.pixai_v1_identity import TaggerIdentityMismatchError
 from utils.env import is_headless
 from utils.paths import ensure_dirs
 
-from .signature import _build_max_tags_map, _build_threshold_map, current_tagger_sig
+from .signature import _build_max_tags_map, _build_threshold_map, current_tagger_sig_with_identity
 
 if is_headless():
 
@@ -47,12 +48,14 @@ class _FileProcessJob(BatchJob):
         tagger: ITagger,
         tag_config: TagJobConfig,
         indexer: _Indexer | None,
+        on_identity_mismatch: Callable[[str], None] | None = None,
     ) -> None:
         super().__init__(list(paths))
         self._db_path = db_path
         self._tagger = tagger
         self._tag_config = tag_config
         self._indexer = indexer
+        self._on_identity_mismatch = on_identity_mismatch
         self._conn = None
 
     def prepare(self) -> None:
@@ -71,6 +74,12 @@ class _FileProcessJob(BatchJob):
             return None
         try:
             output = run_tag_job(self._tagger, loaded, self._conn, config=self._tag_config)
+        except TaggerIdentityMismatchError as exc:
+            # 以降の画像も同じ理由で必ず失敗するため、画像単位でスキップせずジョブ失敗として error へ伝播する.
+            # 通知はシグナル接続のタイミングに依存しないようジョブから直接行う.
+            if self._on_identity_mismatch is not None:
+                self._on_identity_mismatch(str(exc))
+            raise
         except Exception:
             logger.exception("Tagging failed for %s", loaded)
             return None
@@ -141,6 +150,7 @@ class ProcessingPipeline(QObject):
         job_manager: JobManager,
         indexer: _Indexer | None = None,
         settings: PipelineSettings | None = None,
+        on_reload_required: Callable[[str], None] | None = None,
     ) -> None:
         super().__init__()
         resolved_db = Path(db_path).expanduser()
@@ -156,12 +166,16 @@ class ProcessingPipeline(QObject):
         self._scheduled: Set[Path] = set()
         self._tag_config = TagJobConfig()
         self._tagger_sig: str | None = None
+        # tagger 再ロードが必要になった理由. UI はコールバックかこの値で自動タグ付け停止を表示する.
+        self.reload_required_reason: str | None = None
+        self._on_reload_required = on_reload_required
         self._refresh_tag_config()
 
     def _refresh_tag_config(self) -> None:
         thresholds = _build_threshold_map(self._settings.tagger.thresholds)
         max_tags_map = _build_max_tags_map(getattr(self._settings.tagger, "max_tags", None))
-        self._tagger_sig = current_tagger_sig(
+        # 署名と同じスナップショットの identity を渡し、run_tag_job で保持中 tagger との一致を検証させる.
+        self._tagger_sig, content_identity = current_tagger_sig_with_identity(
             self._settings,
             thresholds=thresholds,
             max_tags=max_tags_map,
@@ -170,7 +184,20 @@ class ProcessingPipeline(QObject):
             thresholds=thresholds or None,
             max_tags=max_tags_map or None,
             tagger_sig=self._tagger_sig,
+            content_identity=content_identity,
         )
+
+    def _mark_reload_required(self, reason: str) -> None:
+        logger.error("Watcher tagging stopped; tagger reload required: %s", reason)
+        self.reload_required_reason = reason
+        if self._on_reload_required is not None:
+            self._on_reload_required(reason)
+
+    def set_tagger(self, tagger: ITagger) -> None:
+        """再ロードした tagger へ差し替え、署名を取り直す. 停止中に取りこぼした画像は再 enqueue できる."""
+        self._tagger = tagger
+        self.reload_required_reason = None
+        self._refresh_tag_config()
 
     def update_settings(self, settings: PipelineSettings) -> None:
         logger.info("Updating pipeline settings: %s", settings)
@@ -211,6 +238,7 @@ class ProcessingPipeline(QObject):
             tagger=self._tagger,
             tag_config=self._tag_config,
             indexer=active_indexer,
+            on_identity_mismatch=self._mark_reload_required,
         )
         signals = self._job_manager.submit(job)
 

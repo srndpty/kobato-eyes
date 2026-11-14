@@ -84,6 +84,7 @@ _CATEGORY_ALIASES = {
     "copyright": TagCategory.COPYRIGHT,
     "artist": TagCategory.ARTIST,
     "meta": TagCategory.META,
+    "style": TagCategory.STYLE,
 }
 
 _SCORE_RE = re.compile(r"score\s*(>=|<=|=|>|<)\s*([0-9]*\.?[0-9]+)", re.IGNORECASE)

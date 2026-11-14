@@ -197,7 +197,7 @@ def test_repository_roundtrip(memory_conn: sqlite3.Connection) -> None:
     )
     assert sorted(tags) == ["character:kobato", "rating:safe"]
 
-    # Updating the category for an existing tag should persist the change.
+    # Updating the category for an existing tag should persist the change (latest wins).
     refreshed = upsert_tags(memory_conn, [{"name": "rating:safe", "category": 2}])
     assert tags["rating:safe"] == refreshed["rating:safe"]
     tag_row = memory_conn.execute(
@@ -408,3 +408,28 @@ def test_write_tagging_batch_updates_related_tables(
     ).fetchone()
     assert first_match is not None
     assert first_match["rowid"] == files["first"]
+
+
+def test_latest_category_wins_and_conflicts_are_reported_beforehand(memory_conn) -> None:
+    """Danbooru のカテゴリ変更に追従するため後勝ち. 影響は事前に find_category_conflicts で把握できる."""
+    from core.query import translate_query
+    from db.tags import find_category_conflicts
+    from services.db_writing_standard import upsert_tags_uncommitted
+
+    def file_id(name: str) -> int:
+        return upsert_file(memory_conn, path=name, size=1, mtime=1.0, sha256=name)
+
+    image_a, image_b = file_id("a.png"), file_id("b.png")
+    artist = upsert_tags(memory_conn, [{"name": "watercolor", "category": 1}])["watercolor"]
+    replace_file_tags(memory_conn, image_a, [(artist, 0.9)])
+    assert find_category_conflicts(memory_conn, [("watercolor", 6), ("new_tag", 6)]) == [("watercolor", 1, 6, 1)]
+
+    with memory_conn:
+        style = upsert_tags_uncommitted(memory_conn, [{"name": "watercolor", "category": 6}])["watercolor"]
+    assert style == artist
+    replace_file_tags(memory_conn, image_b, [(style, 0.9)])
+    assert find_category_conflicts(memory_conn, [("watercolor", 6)]) == []
+
+    fragment = translate_query("category:style watercolor")
+    rows = memory_conn.execute(f"SELECT f.id FROM files f WHERE {fragment.where}", fragment.params).fetchall()
+    assert {int(row[0]) for row in rows} == {image_a, image_b}

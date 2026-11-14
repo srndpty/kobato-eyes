@@ -1,0 +1,140 @@
+"""Content identities for PixAI v1 retagging decisions."""
+
+from __future__ import annotations
+
+import hashlib
+import json
+from collections.abc import Mapping
+from functools import lru_cache
+from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from core.config.schema import TaggerSettings
+
+from tagger.base import MaxTagsMap, ThresholdMap
+from tagger.onnx_external_data import external_data_locations
+from tagger.pixai_v1_labels import DEFAULT_THRESHOLDS, PREPROCESS_VERSION, load_labels_json, resolve_labels_json
+
+
+@lru_cache(maxsize=32)
+def _hash_file(path: str, size: int, mtime_ns: int, ctime_ns: int) -> str:
+    """Hash large files once per filesystem identity, without loading them whole."""
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as handle:
+        for chunk in iter(lambda: handle.read(8 * 1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def content_digest(path: Path) -> str:
+    """Return a stable content hash; represent absent files without breaking settings."""
+    if not path.is_file():
+        return "missing:" + str(path)
+    stat = path.stat()
+    return _hash_file(str(path.resolve()), stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
+
+
+@lru_cache(maxsize=8)
+def _validate_labels(path: str, digest: str) -> None:
+    """Parse once per content digest; 破損 JSON を署名段階で検出し、再タグ不要時の素通りを防ぐ."""
+    load_labels_json(Path(path))
+
+
+def signature_labels_path(settings: TaggerSettings) -> Path:
+    """
+    明示 labels_json の欠落・破損は必ず ValueError. 隣接ファイルの自動探索は未指定時のみ.
+    未指定かつ隣接ファイルも無い場合は "missing:" 署名とし、バックエンド生成時にエラーとなる.
+    """
+    model = Path(settings.model_path or "__missing_model__").expanduser()
+    if settings.labels_json:
+        labels = resolve_labels_json(model, settings.labels_json)
+    else:
+        try:
+            labels = resolve_labels_json(model)
+        except ValueError:
+            return model.parent / "tags.json"
+    _validate_labels(str(labels.resolve()), content_digest(labels))
+    return labels
+
+
+def v1_content_identity(model_path: str | Path, labels_path: str | Path) -> dict[str, str]:
+    """Digest every file the ONNX session and label map read."""
+    model = Path(model_path).expanduser()
+    return dict(
+        model=content_digest(model),
+        weights=external_weights_digest(model),
+        labels=content_digest(Path(labels_path)),
+    )
+
+
+def external_weights_digest(model: Path) -> str:
+    """
+    ONNX に記録された外部重みの参照先をハッシュする. ファイル名から推測すると、model.onnx を改名した
+    だけで実際の重み（model.onnx.data のまま）を見失い、重み更新が署名に反映されない.
+    参照先が 1 つなら従来どおりそのファイルのハッシュ（標準構成の署名を変えないため）.
+    解析できないモデルは ValueError（ORT でもロードできないため fail-closed）.
+    """
+    if not model.is_file():
+        return "missing-model"
+    locations = external_data_locations(model)
+    if not locations:
+        return "embedded"
+    digests = {location: content_digest(model.parent / location) for location in locations}
+    if len(digests) == 1:
+        return next(iter(digests.values()))
+    return json.dumps(digests, sort_keys=True)
+
+
+def settings_content_identity(settings: TaggerSettings) -> dict[str, str]:
+    """Content identity of the files the current settings point to."""
+    model = Path(settings.model_path or "__missing_model__").expanduser()
+    return v1_content_identity(model, signature_labels_path(settings))
+
+
+def v1_signature(
+    settings: TaggerSettings,
+    *,
+    thresholds: ThresholdMap | None,
+    max_tags: MaxTagsMap | None,
+    identity: Mapping[str, str] | None = None,
+) -> str:
+    """
+    Include ONNX, external weights, label order, preprocessing and effective options.
+    identity を渡すと同じ内容スナップショットから署名を作る（署名と照合用 identity の食い違いを防ぐ）.
+    """
+    from tagger.base import TagCategory
+
+    threshold_values = settings.thresholds if thresholds is None else {c.name.lower(): v for c, v in thresholds.items()}
+    threshold_values = dict(DEFAULT_THRESHOLDS) | dict(threshold_values)
+    payload = dict(
+        dict(identity) if identity is not None else settings_content_identity(settings),
+        preprocess=PREPROCESS_VERSION,
+        thresholds={str(k): float(v) for k, v in threshold_values.items()},
+        max_tags={TagCategory(k).name.lower(): int(v) for k, v in (max_tags or {}).items()},
+    )
+    return "pixai-v1-onnx:" + hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
+
+
+class TaggerIdentityMismatchError(RuntimeError):
+    """
+    保持中 tagger のロード内容が署名と食い違う. 画像単位の失敗ではなく tagger の再ロードが必要な状態のため、
+    呼び出し側は握りつぶさずジョブ失敗として通知する.
+    """
+
+
+def verify_loaded_identity(tagger: object, expected: Mapping[str, str] | None, *, signed: bool) -> None:
+    """
+    署名付きで DB に書く前の共通契約. 署名に v1 identity が含まれるなら、tagger 側の identity 欠落も含め
+    一致しない限り拒否する（fail-closed）. 両方とも無い場合は v1 以外の署名なので対象外.
+    署名なしの書き込みは食い違いが生じないため許可.
+    """
+    if not signed:
+        return
+    loaded = getattr(tagger, "content_identity", None)
+    if loaded is None and expected is None:
+        return
+    if loaded is None or expected is None or dict(loaded) != dict(expected):
+        raise TaggerIdentityMismatchError(
+            "PixAI v1 loaded model differs from the files used for the tagger signature; reload the tagger"
+        )
