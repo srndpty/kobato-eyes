@@ -12,7 +12,7 @@ if TYPE_CHECKING:
     from core.config.schema import TaggerSettings
 
 from tagger.base import MaxTagsMap, ThresholdMap
-from tagger.pixai_v1_labels import DEFAULT_THRESHOLDS, PREPROCESS_VERSION, resolve_labels_json
+from tagger.pixai_v1_labels import DEFAULT_THRESHOLDS, PREPROCESS_VERSION, load_labels_json, resolve_labels_json
 
 
 @lru_cache(maxsize=32)
@@ -33,23 +33,55 @@ def content_digest(path: Path) -> str:
     return _hash_file(str(path.resolve()), stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
 
 
+@lru_cache(maxsize=8)
+def _validate_labels(path: str, digest: str) -> None:
+    """Parse once per content digest; 破損 JSON を署名段階で検出し、再タグ不要時の素通りを防ぐ."""
+    load_labels_json(Path(path))
+
+
+def signature_labels_path(settings: TaggerSettings) -> Path:
+    """
+    明示 labels_json の欠落・破損は必ず ValueError. 隣接ファイルの自動探索は未指定時のみ.
+    未指定かつ隣接ファイルも無い場合は "missing:" 署名とし、バックエンド生成時にエラーとなる.
+    """
+    model = Path(settings.model_path or "__missing_model__").expanduser()
+    if settings.labels_json:
+        labels = resolve_labels_json(model, settings.labels_json)
+    else:
+        try:
+            labels = resolve_labels_json(model)
+        except ValueError:
+            return model.parent / "tags.json"
+    _validate_labels(str(labels.resolve()), content_digest(labels))
+    return labels
+
+
+def v1_content_identity(model_path: str | Path, labels_path: str | Path) -> dict[str, str]:
+    """Digest every file the ONNX session and label map read."""
+    model = Path(model_path).expanduser()
+    # Both supported distributions either use model.onnx.data or embed weights.
+    weights = model.with_name(model.name + ".data")
+    return dict(
+        model=content_digest(model),
+        weights=content_digest(weights) if weights.is_file() else "embedded",
+        labels=content_digest(Path(labels_path)),
+    )
+
+
+def settings_content_identity(settings: TaggerSettings) -> dict[str, str]:
+    """Content identity of the files the current settings point to."""
+    model = Path(settings.model_path or "__missing_model__").expanduser()
+    return v1_content_identity(model, signature_labels_path(settings))
+
+
 def v1_signature(settings: TaggerSettings, *, thresholds: ThresholdMap | None, max_tags: MaxTagsMap | None) -> str:
     """Include ONNX, external weights, label order, preprocessing and effective options."""
     from tagger.base import TagCategory
 
-    model = Path(settings.model_path or "__missing_model__").expanduser()
-    try:
-        labels = resolve_labels_json(model, settings.labels_json)
-    except ValueError:
-        labels = model.parent / "tags.json"
-    # Both supported distributions either use model.onnx.data or embed weights.
-    weights = model.with_name(model.name + ".data")
     threshold_values = settings.thresholds if thresholds is None else {c.name.lower(): v for c, v in thresholds.items()}
     threshold_values = dict(DEFAULT_THRESHOLDS) | dict(threshold_values)
     payload = dict(
-        model=content_digest(model),
-        weights=content_digest(weights) if weights.is_file() else "embedded",
-        labels=content_digest(labels),
+        settings_content_identity(settings),
         preprocess=PREPROCESS_VERSION,
         thresholds={str(k): float(v) for k, v in threshold_values.items()},
         max_tags={TagCategory(k).name.lower(): int(v) for k, v in (max_tags or {}).items()},

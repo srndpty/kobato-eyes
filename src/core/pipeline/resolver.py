@@ -98,6 +98,7 @@ def _resolve_tagger(
             model_path_value,
             labels_json=settings.tagger.labels_json,
             providers=execution_providers,
+            max_batch=int(getattr(settings, "batch_size", 1) or 1),
         )
     elif lowered == "wd14-onnx":
         if not settings.tagger.model_path:

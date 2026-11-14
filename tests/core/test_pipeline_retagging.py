@@ -201,3 +201,22 @@ def test_v1_categories_saved_and_searchable(tmp_path: Path) -> None:
         assert conn.execute("SELECT tagger_sig FROM files").fetchone()[0] != before
     finally:
         conn.close()
+
+
+def test_v1_invalid_explicit_labels_fail_even_when_nothing_needs_retagging(tmp_path: Path) -> None:
+    """A tagged DB must not let a bad explicit labels_json finish as a successful no-op index."""
+    image = tmp_path / "images" / "sample.png"
+    _create_test_image(image)
+    model = tmp_path / "model.onnx"
+    model.write_bytes(b"v1-fixture")
+    settings = PipelineSettings(
+        roots=[str(image.parent)], excluded=[], tagger=TaggerSettings(name="pixai-v1-onnx", model_path=str(model))
+    )
+    db = tmp_path / "library.db"
+    tagger = _StubTagger("tag")
+    assert int(run_index_once(db, settings=settings, tagger_override=tagger).get("tagged", 0)) == 1
+    assert int(run_index_once(db, settings=settings, tagger_override=tagger).get("tagged", 0)) == 0
+
+    settings.tagger.labels_json = str(tmp_path / "custom.json")
+    with pytest.raises(ValueError, match="labels not found"):
+        run_index_once(db, settings=settings, tagger_override=tagger)

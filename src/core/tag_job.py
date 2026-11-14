@@ -7,16 +7,21 @@ compatibility API for tests and callers that still execute one image at a time.
 
 from __future__ import annotations
 
+import logging
 import sqlite3
 import time
 from dataclasses import dataclass
 from pathlib import Path
+
+from PIL import Image
 
 from core.signature import ensure_signatures
 from db.repository import replace_file_tags, update_fts, upsert_file, upsert_tags
 from tagger.base import ITagger, MaxTagsMap, TagResult, ThresholdMap
 from utils.hash import compute_sha256
 from utils.image_io import safe_load_image
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -54,11 +59,26 @@ def run_tag_job(
         return None
 
     cfg = config or TagJobConfig()
-    results = tagger.infer_batch(
-        [image],
-        thresholds=cfg.thresholds,
-        max_tags=cfg.max_tags,
-    )
+    if getattr(tagger, "preserve_source_rgb", False):
+        # safe_load_image は 4096px 縮小と EXIF 回転を行うため、バッチ経路と同じ原画像ローダーを使う.
+        from tagger.pixai_v1_preprocessing import load_source_rgb
+
+        try:
+            rgb, _ = load_source_rgb(source)
+        except (OSError, ValueError, Image.DecompressionBombError) as exc:
+            logger.warning("Failed to load source image for tagging %s: %s", source, exc)
+            return None
+        results = tagger.infer_batch_prepared(
+            tagger.prepare_batch_from_rgb_np([rgb]),
+            thresholds=cfg.thresholds,
+            max_tags=cfg.max_tags,
+        )
+    else:
+        results = tagger.infer_batch(
+            [image],
+            thresholds=cfg.thresholds,
+            max_tags=cfg.max_tags,
+        )
     if not results:
         return None
     tag_result = results[0]

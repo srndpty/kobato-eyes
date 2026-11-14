@@ -74,7 +74,24 @@ def _compare_reference(tagger: PixaiV1OnnxTagger, paths: list[Path], directory: 
             print(f"reference: {path.name} max={diff.max():.6g}", flush=True)
     del model
     torch.cuda.empty_cache()
-    return dict(passed=all(item["allclose"] for item in results), atol=1e-3, rtol=1e-3, images=results)
+    return summarize_reference(results)
+
+
+def summarize_reference(results: list[dict[str, object]]) -> dict[str, object]:
+    """
+    公式 FP32 互換の合否. allclose でも閾値をまたげば保存タグ集合が変わるため、
+    数値一致(numerical_pass)と採用判定一致(decision_pass)の両方を要求する.
+    """
+    numerical = all(bool(item["allclose"]) for item in results)
+    decision = all(item["threshold_disagreements"] == 0 for item in results)
+    return dict(
+        passed=numerical and decision,
+        numerical_pass=numerical,
+        decision_pass=decision,
+        atol=1e-3,
+        rtol=1e-3,
+        images=results,
+    )
 
 
 def main() -> int:

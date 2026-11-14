@@ -26,6 +26,7 @@ _CV2_ERROR = getattr(cv2, "error", RuntimeError)
 if not isinstance(_CV2_ERROR, type) or not issubclass(_CV2_ERROR, BaseException):
     _CV2_ERROR = RuntimeError
 _DECODE_FALLBACK_ERRORS: tuple[type[BaseException], ...] = (OSError, ValueError, RuntimeError, MemoryError, _CV2_ERROR)
+_SOURCE_LOAD_ERRORS: tuple[type[BaseException], ...] = (*_DECODE_FALLBACK_ERRORS, Image.DecompressionBombError)
 
 # JPEG decode is intentionally OpenCV-only. TurboJPEG was benchmarked but
 # removed to avoid external DLL packaging; TensorRT made disk/decode the next
@@ -386,6 +387,23 @@ class PrefetchLoaderPrepared:
                 except OSError:
                     pass
 
+    def _load_source_one(
+        self, p: str, cache_path: Path | None, started: float, byte_count: int
+    ) -> tuple[str, np.ndarray | None, tuple[int, int] | None, LoadRoute]:
+        """原寸入力 tagger 用. 単一画像経路と同じローダーを使い、縮小フォールバックには落とさない."""
+        from tagger.pixai_v1_preprocessing import load_source_rgb
+
+        try:
+            rgb, size = load_source_rgb(p)
+        except _SOURCE_LOAD_ERRORS as exc:
+            logger.warning("PrefetchLoaderPrepared: failed to load source %s: %s", p, exc)
+            self._record_route("failed", time.perf_counter() - started, ok=False, path=p, byte_count=byte_count)
+            return (p, None, None, "failed")
+        if cache_path is not None:
+            self._write_input_cache(cache_path, rgb, size)
+        self._record_route("pil_fallback", time.perf_counter() - started, ok=True, path=p, byte_count=byte_count)
+        return p, rgb, size, "pil_fallback"
+
     def _load_one(self, p: str) -> tuple[str, np.ndarray | None, tuple[int, int] | None, LoadRoute]:
         route: LoadRoute = "opencv"
         started = time.perf_counter()
@@ -416,17 +434,7 @@ class PrefetchLoaderPrepared:
                 self._record_input_cache("miss")
 
             if self._preserve_source:
-                from tagger.pixai_v1_preprocessing import composite_rgb
-
-                with Image.open(p) as image:
-                    size = image.size
-                    rgb = composite_rgb(image)
-                if cache_path is not None:
-                    self._write_input_cache(cache_path, rgb, size)
-                self._record_route(
-                    "pil_fallback", time.perf_counter() - started, ok=True, path=p, byte_count=byte_count
-                )
-                return p, rgb, size, "pil_fallback"
+                return self._load_source_one(p, cache_path, started, byte_count)
             data = np.fromfile(p, dtype=np.uint8)  # Windows で速い
             byte_count = int(data.nbytes)
             im = cv2.imdecode(data, cv2.IMREAD_UNCHANGED)
@@ -457,8 +465,7 @@ class PrefetchLoaderPrepared:
                     bg = Image.new("RGBA", rgba.size, "WHITE")
                     bg.paste(rgba, mask=rgba.split()[-1])
                     rgb_image = bg.convert("RGB")
-                    if not self._preserve_source:
-                        rgb_image.thumbnail((_TARGET, _TARGET), Image.Resampling.LANCZOS)
+                    rgb_image.thumbnail((_TARGET, _TARGET), Image.Resampling.LANCZOS)
                     # bgr = np.asarray(rgb)[:, :, ::-1]  # RGB->BGR
                     rgb_arr = np.asarray(rgb_image)  # ここはそのままRGB
                     if cache_path is not None:

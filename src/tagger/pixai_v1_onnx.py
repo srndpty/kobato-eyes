@@ -23,6 +23,10 @@ from tagger.pixai_v1_preprocessing import INPUT_SIZE, composite_rgb, prepare_rgb
 
 logger = logging.getLogger(__name__)
 
+# 検証済みプロファイル(noaione 版)の出力名. sigmoid 済み "probs" 等を受理すると二重 sigmoid になるため、
+# 出力の意味を名前で固定する. 別配布物は検証済みプロファイルを追加するまで拒否する.
+SUPPORTED_OUTPUT_NAMES = frozenset({"logits"})
+
 
 def validate_session(session: Any) -> tuple[str, str, int | None]:
     """Validate the v1 tensor contract and return input/output names and batch."""
@@ -35,6 +39,11 @@ def validate_session(session: Any) -> tuple[str, str, int | None]:
         raise ValueError(f"PixAI v1 requires float32 NCHW input at {INPUT_SIZE}px: {image.shape}")
     if len(logits.shape) != 2 or logits.shape[1] != LABEL_COUNT or logits.type != "tensor(float)":
         raise ValueError(f"PixAI v1 requires float32 logits [batch, {LABEL_COUNT}]: {logits.shape}")
+    if logits.name not in SUPPORTED_OUTPUT_NAMES:
+        raise ValueError(
+            f"PixAI v1 output {logits.name!r} is not a verified logits output "
+            f"(expected one of {sorted(SUPPORTED_OUTPUT_NAMES)})"
+        )
     fixed = image.shape[0] if isinstance(image.shape[0], int) else None
     if fixed is not None and fixed < 1:
         raise ValueError("PixAI v1 input batch must be positive")
@@ -57,9 +66,11 @@ class PixaiV1OnnxTagger:
         labels_json: str | Path | None = None,
         *,
         providers: Iterable[str] | None = None,
+        max_batch: int | None = None,
     ) -> None:
         # Reuse the existing runtime import/DLL setup without adding Torch as a runtime dependency.
         from tagger import wd14_onnx
+        from tagger.pixai_v1_identity import v1_content_identity
 
         wd14_onnx.ensure_onnxruntime()
         ort = wd14_onnx.ort
@@ -67,6 +78,8 @@ class PixaiV1OnnxTagger:
         if not self._model_path.is_file():
             raise FileNotFoundError(f"PixAI v1 model not found: {self._model_path}")
         self._labels_path = resolve_labels_json(self._model_path, labels_json)
+        # セッション生成前後で内容が一致することを確認し、署名と実ロード内容の TOCTOU を塞ぐ.
+        identity_before = v1_content_identity(self._model_path, self._labels_path)
         self._labels = load_labels_json(self._labels_path)
         self._session: Any = None
         requested = list(providers) if providers is not None else None
@@ -101,8 +114,15 @@ class PixaiV1OnnxTagger:
                 if index == len(plan.attempts) - 1:
                     raise
                 logger.warning("PixAI v1: provider %s failed; trying next provider", attempt, exc_info=True)
+        if v1_content_identity(self._model_path, self._labels_path) != identity_before:
+            self._session = None
+            raise RuntimeError(
+                "PixAI v1 model, weights or labels changed while loading; retry after the copy completes"
+            )
+        self.content_identity: dict[str, str] = identity_before
         self._input_name, self._output_name, self._fixed_batch = validate_session(self._session)
-        self._batch_limit = self._fixed_batch or 1
+        # 動的バッチは要求バッチ上限から開始し、OOM 時のみ半減する.
+        self._batch_limit = self._fixed_batch or max(1, int(max_batch or 1))
         self._last_infer_metrics: dict[str, float] = {}
         logger.info(
             "PixAI v1: model=%s labels=%s providers=%s",

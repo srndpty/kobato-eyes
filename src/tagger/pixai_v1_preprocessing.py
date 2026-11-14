@@ -2,12 +2,33 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Sequence
 
 import numpy as np
 from PIL import Image
 
 INPUT_SIZE = 1008
+# 原寸 RGB(uint8) を保持するため CPU メモリ上限を設ける. 100MP ≒ 300MB/枚.
+MAX_SOURCE_PIXELS = 100_000_000
+
+
+class SourceImageTooLargeError(ValueError):
+    """Raised before decoding when the source would exceed the v1 memory budget."""
+
+
+def load_source_rgb(path: str | Path, *, max_pixels: int = MAX_SOURCE_PIXELS) -> tuple[np.ndarray, tuple[int, int]]:
+    """
+    v1 推論入力の唯一の読み込み経路. バッチ/単一画像の両経路で同一テンソルを保証するため、
+    EXIF 回転や事前縮小は行わない（公式 processor も Image.open の生画素を使う）.
+    """
+    with Image.open(path) as image:
+        width, height = image.size
+        if width * height > max_pixels:
+            raise SourceImageTooLargeError(
+                f"PixAI v1 source image too large: {width}x{height} exceeds {max_pixels} pixels"
+            )
+        return composite_rgb(image), (int(width), int(height))
 
 
 def composite_rgb(image: Image.Image) -> np.ndarray:
@@ -21,7 +42,10 @@ def composite_rgb(image: Image.Image) -> np.ndarray:
 
 
 def _resize_axis(values: np.ndarray, length: int, axis: int) -> np.ndarray:
-    """Apply half-pixel bilinear sampling with antialiasing when downsampling."""
+    """
+    Half-pixel bilinear + antialias. uint8 入力をそのまま受け、gather した行だけを float32 化する
+    ことで原寸 float32 配列（12B/px）を作らない.
+    """
     source = values.shape[axis]
     if source == length:
         return values
@@ -50,11 +74,12 @@ def prepare_rgb_batch(images: Sequence[np.ndarray]) -> np.ndarray:
         height, width = image.shape[:2]
         ratio = INPUT_SIZE / max(height, width)
         new_h, new_w = max(1, int(height * ratio)), max(1, int(width * ratio))
-        values = image.astype(np.float32) / 255.0
+        # リサイズは線形なので /255 を後段に移しても結果は float32 丸め誤差の範囲で一致する.
         if new_h < height:
-            values = _resize_axis(_resize_axis(values, new_h, 0), new_w, 1)
+            resized = _resize_axis(_resize_axis(image, new_h, 0), new_w, 1)
         else:
-            values = _resize_axis(_resize_axis(values, new_w, 1), new_h, 0)
+            resized = _resize_axis(_resize_axis(image, new_w, 1), new_h, 0)
+        values = resized.astype(np.float32, copy=False) / np.float32(255.0)
         top, left = (INPUT_SIZE - new_h) // 2, (INPUT_SIZE - new_w) // 2
         batch[index, :, top : top + new_h, left : left + new_w] = values.transpose(2, 0, 1) * 2.0 - 1.0
     return batch

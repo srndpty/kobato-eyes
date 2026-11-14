@@ -96,6 +96,24 @@ class TagStageResult:
     tagged_count: int
 
 
+def _verify_loaded_model(tagger: object, ctx: PipelineContext) -> None:
+    """
+    署名計算からモデルロードまでの間にファイルが差し替わると、旧署名で新モデルの結果を書き込む.
+    tagger はロード前後の内容一致を保証済みなので、ここでは「ロード内容 == 現在の設定ファイル」と
+    「現在の署名 == ctx の署名」を確認し、署名と実ロード内容を連結する.
+    """
+    identity = getattr(tagger, "content_identity", None)
+    if identity is None or ctx.settings.tagger.name.lower() != "pixai-v1-onnx":
+        return
+    from tagger.pixai_v1_identity import settings_content_identity
+
+    from ..signature import current_tagger_sig
+
+    current_sig = current_tagger_sig(ctx.settings, thresholds=ctx.thresholds, max_tags=ctx.max_tags_map)
+    if identity != settings_content_identity(ctx.settings.tagger) or current_sig != ctx.tagger_sig:
+        raise RuntimeError("PixAI v1 model files changed after the tagger signature was computed; aborting tagging")
+
+
 class TagStage:
     """Stage that performs model inference for files requiring tagging."""
 
@@ -150,6 +168,14 @@ class TagStage:
             thresholds=thresholds or None,
             max_tags=max_tags_map or None,
         )
+        try:
+            _verify_loaded_model(tagger, ctx)
+        except Exception:
+            if ctx.tagger_override is None:
+                close_tagger = getattr(tagger, "close", None)
+                if callable(close_tagger):
+                    close_tagger()
+            raise
         if not thresholds and th_fallback:
             thresholds = th_fallback
         if (not max_tags_map) and k_fallback:
