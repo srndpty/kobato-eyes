@@ -163,6 +163,17 @@ CI は GitHub Actions 上の Windows + Python 3.10 で実行し、ローカル�
 
 pre-commit と CI の整形差分を避けるため、Ruff は `pyproject.toml` と `.pre-commit-config.yaml` のバージョン・ターゲットを揃えています。
 
+pre-commitのmypyは、`src/`のPythonコード、型チェック設定、依存関係の変更時に全設定対象を検査します。
+ドキュメント・テストだけの変更ではmypyを起動せず、Ruffなどの該当チェックは通常どおり実行します。
+hook環境と開発環境のキャッシュは `tmp/mypy_cache/pre-commit` と `tmp/mypy_cache/check` に分離しています。
+`check.ps1` のmypyは標準で増分解析を使い、依存するコードの変更も追跡します。
+CIと同様にキャッシュを使わず型解析し直す場合は次を使ってください（テストの実行範囲は同じです）。
+
+```powershell
+.\scripts\check.ps1 -NoIncremental
+.\.venv\Scripts\python.exe -m pre_commit run --files README.md  # 文書のみ: mypyはskip
+```
+
 ## パッケージング
 
 1. Python 3.10.x の環境でリリース作成用依存をインストール: `python -m pip install -c requirements-dev.lock -e ".[dev,tagging-gpu,packaging]"`

@@ -18,6 +18,10 @@ repos:
       - id: mypy
         name: mypy
         entry: mypy
+        # Keep this environment's cache separate from .venv / CI checks.
+        args: ["--cache-dir=tmp/mypy_cache/pre-commit"]
+        # Tests/docs are not mypy targets; source, config and dependency changes are.
+        files: ^(src/.*\.pyi?$|pyproject\.toml$|requirements[^/]*\.(txt|lock)$|\.pre-commit-config\.yaml$)
         language: python
         additional_dependencies:
           - mypy>=1.18.0,<2.0
