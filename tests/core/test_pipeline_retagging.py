@@ -155,7 +155,7 @@ def test_retagged_count_uses_processed_existing_file_ids(tmp_path: Path) -> None
     assert stats["retagged"] == 0
 
 
-def test_v1_categories_saved_and_searchable(tmp_path: Path) -> None:
+def test_v1_categories_saved_and_searchable(fake_onnx, tmp_path: Path) -> None:
     """All six categories reach DB/FTS and category:style finds the indexed image."""
     from core.query import translate_query
 
@@ -177,7 +177,7 @@ def test_v1_categories_saved_and_searchable(tmp_path: Path) -> None:
     image = tmp_path / "images" / "sample.png"
     _create_test_image(image)
     model = tmp_path / "model.onnx"
-    model.write_bytes(b"v1-fixture")
+    model.write_bytes(fake_onnx("v1-fixture"))
     settings = PipelineSettings(
         roots=[str(image.parent)], excluded=[], tagger=TaggerSettings(name="pixai-v1-onnx", model_path=str(model))
     )
@@ -193,7 +193,7 @@ def test_v1_categories_saved_and_searchable(tmp_path: Path) -> None:
         before = conn.execute("SELECT tagger_sig FROM files").fetchone()[0]
     finally:
         conn.close()
-    model.write_bytes(b"v1-updated")
+    model.write_bytes(fake_onnx("v1-updated"))
     stats = run_index_once(db, settings=settings, tagger_override=SixCategoryTagger("unused"))
     assert int(stats.get("retagged", 0)) == 1
     conn = get_conn(db)
@@ -203,12 +203,12 @@ def test_v1_categories_saved_and_searchable(tmp_path: Path) -> None:
         conn.close()
 
 
-def test_v1_invalid_explicit_labels_fail_even_when_nothing_needs_retagging(tmp_path: Path) -> None:
+def test_v1_invalid_explicit_labels_fail_even_when_nothing_needs_retagging(fake_onnx, tmp_path: Path) -> None:
     """A tagged DB must not let a bad explicit labels_json finish as a successful no-op index."""
     image = tmp_path / "images" / "sample.png"
     _create_test_image(image)
     model = tmp_path / "model.onnx"
-    model.write_bytes(b"v1-fixture")
+    model.write_bytes(fake_onnx("v1-fixture"))
     settings = PipelineSettings(
         roots=[str(image.parent)], excluded=[], tagger=TaggerSettings(name="pixai-v1-onnx", model_path=str(model))
     )
@@ -223,7 +223,7 @@ def test_v1_invalid_explicit_labels_fail_even_when_nothing_needs_retagging(tmp_p
 
 
 def test_v1_preprocess_version_change_retags_images_signed_by_previous_version(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    fake_onnx, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Images tagged by the float-first v1 preprocessing must be retagged by the uint8-first v2."""
     from tagger import pixai_v1_identity
@@ -231,7 +231,7 @@ def test_v1_preprocess_version_change_retags_images_signed_by_previous_version(
     image = tmp_path / "images" / "sample.png"
     _create_test_image(image)
     model = tmp_path / "model.onnx"
-    model.write_bytes(b"v1-fixture")
+    model.write_bytes(fake_onnx("v1-fixture"))
     settings = PipelineSettings(
         roots=[str(image.parent)], excluded=[], tagger=TaggerSettings(name="pixai-v1-onnx", model_path=str(model))
     )

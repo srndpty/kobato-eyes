@@ -13,6 +13,7 @@ if TYPE_CHECKING:
     from core.config.schema import TaggerSettings
 
 from tagger.base import MaxTagsMap, ThresholdMap
+from tagger.onnx_external_data import external_data_locations
 from tagger.pixai_v1_labels import DEFAULT_THRESHOLDS, PREPROCESS_VERSION, load_labels_json, resolve_labels_json
 
 
@@ -60,13 +61,29 @@ def signature_labels_path(settings: TaggerSettings) -> Path:
 def v1_content_identity(model_path: str | Path, labels_path: str | Path) -> dict[str, str]:
     """Digest every file the ONNX session and label map read."""
     model = Path(model_path).expanduser()
-    # Both supported distributions either use model.onnx.data or embed weights.
-    weights = model.with_name(model.name + ".data")
     return dict(
         model=content_digest(model),
-        weights=content_digest(weights) if weights.is_file() else "embedded",
+        weights=external_weights_digest(model),
         labels=content_digest(Path(labels_path)),
     )
+
+
+def external_weights_digest(model: Path) -> str:
+    """
+    ONNX に記録された外部重みの参照先をハッシュする. ファイル名から推測すると、model.onnx を改名した
+    だけで実際の重み（model.onnx.data のまま）を見失い、重み更新が署名に反映されない.
+    参照先が 1 つなら従来どおりそのファイルのハッシュ（標準構成の署名を変えないため）.
+    解析できないモデルは ValueError（ORT でもロードできないため fail-closed）.
+    """
+    if not model.is_file():
+        return "missing-model"
+    locations = external_data_locations(model)
+    if not locations:
+        return "embedded"
+    digests = {location: content_digest(model.parent / location) for location in locations}
+    if len(digests) == 1:
+        return next(iter(digests.values()))
+    return json.dumps(digests, sort_keys=True)
 
 
 def settings_content_identity(settings: TaggerSettings) -> dict[str, str]:

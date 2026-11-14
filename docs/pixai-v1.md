@@ -20,6 +20,10 @@ foreach ($name in @("model.onnx", "model.onnx.data", "tags.json")) {
 ```
 
 `model.onnx` と `model.onnx.data` は同じフォルダに置いてください。
+外部重みのファイル名は `model.onnx` 内に記録された参照先（noaione版は `model.onnx.data`）で決まります。
+`model.onnx` を改名しても重みファイルは `model.onnx.data` のまま置いてください。
+再タグ判定の署名も、ファイル名からの推測ではなくONNXに記録された参照先の内容で計算します。
+参照先がモデルフォルダ外を指す、またはONNXを解析できないモデルは署名計算の段階でエラーになります。
 アプリのSettingsでTaggerを `pixai-v1-onnx`、Model pathを `model.onnx` に設定します。
 Labels JSONは空欄なら隣の `tags.json`、次に `config.json` を探します。
 別の場所のJSONを使う場合はLabels JSONへ指定してください。

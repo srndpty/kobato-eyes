@@ -130,31 +130,32 @@ def test_dynamic_batch_oom_retry(labels_file: Path) -> None:
     assert tagger._session.calls == [3, 1, 1, 1]
 
 
-def test_v1_settings_signature_changes_with_content(labels_file: Path) -> None:
+def test_v1_settings_signature_changes_with_content(fake_onnx, labels_file: Path) -> None:
     """Defaults survive serialization and replacing model/weights invalidates identity."""
     model = labels_file.with_name("model.onnx")
-    model.write_bytes(b"original")
+    model.write_bytes(fake_onnx("original", "model.onnx.data"))
+    model.with_name("model.onnx.data").write_bytes(b"weights-a")
     settings = PipelineSettings(tagger=TaggerSettings(name="pixai-v1-onnx", model_path=str(model)))
     assert settings.batch_size == 1 and settings.prefetch_depth == 1
     assert settings.tagger.thresholds["general"] == 0.17
     restored = PipelineSettings.model_validate(settings.model_dump())
     before = current_tagger_sig(restored)
-    model.write_bytes(b"replaced")
+    model.write_bytes(fake_onnx("replaced", "model.onnx.data"))
     assert current_tagger_sig(restored) != before
     before = current_tagger_sig(restored)
-    model.with_name("model.onnx.data").write_bytes(b"weights")
+    model.with_name("model.onnx.data").write_bytes(b"weights-b")
     assert current_tagger_sig(restored) != before
     before = current_tagger_sig(restored)
     restored.tagger.thresholds["style"] = 0.7
     assert current_tagger_sig(restored) != before
 
 
-def test_inspection_reports_v1_contract(labels_file: Path) -> None:
+def test_inspection_reports_v1_contract(fake_onnx, labels_file: Path) -> None:
     """Diagnostics validates v1 labels and rejects old-size tensors."""
     from tagger.model_inspection import format_inspection, inspect_model
 
     model = labels_file.with_name("model.onnx")
-    model.write_bytes(b"test")
+    model.write_bytes(fake_onnx("test"))
     inspection = inspect_model(
         tagger_name="pixai-v1-onnx",
         model_path=model,
@@ -217,10 +218,10 @@ def test_wrong_input_contract_is_rejected(shape, dtype) -> None:
         validate_session(session)
 
 
-def test_signature_uses_effective_defaults(labels_file: Path) -> None:
+def test_signature_uses_effective_defaults(fake_onnx, labels_file: Path) -> None:
     """Partial overrides must have the same identity as their expanded effective settings."""
     model = labels_file.with_name("model.onnx")
-    model.write_bytes(b"graph")
+    model.write_bytes(fake_onnx("graph"))
     settings = PipelineSettings(tagger=TaggerSettings(name="pixai-v1-onnx", model_path=str(model)))
     assert current_tagger_sig(settings, thresholds={TagCategory.GENERAL: 0.17}) == current_tagger_sig(settings)
     settings.tagger.labels_json = str(labels_file)
@@ -274,10 +275,10 @@ def test_wrong_output_contract_is_rejected(shape, dtype) -> None:
         validate_session(session)
 
 
-def test_constructor_starts_dynamic_batches_at_requested_size(monkeypatch, labels_file: Path) -> None:
+def test_constructor_starts_dynamic_batches_at_requested_size(fake_onnx, monkeypatch, labels_file: Path) -> None:
     """The real constructor must not pin dynamic models to batch 1 before any OOM."""
     model = labels_file.with_name("model.onnx")
-    model.write_bytes(b"graph")
+    model.write_bytes(fake_onnx("graph"))
     sessions: list[ProviderSession] = []
 
     def factory(*_args, **_kwargs) -> ProviderSession:
@@ -293,13 +294,13 @@ def test_constructor_starts_dynamic_batches_at_requested_size(monkeypatch, label
     assert sessions[0].calls[1:] == [3, 1, 1, 1]
 
 
-def test_constructor_rejects_files_replaced_while_loading(monkeypatch, labels_file: Path) -> None:
+def test_constructor_rejects_files_replaced_while_loading(fake_onnx, monkeypatch, labels_file: Path) -> None:
     """A model swapped during session creation must not be paired with the pre-load identity."""
     model = labels_file.with_name("model.onnx")
-    model.write_bytes(b"graph-a")
+    model.write_bytes(fake_onnx("graph-a"))
 
     def factory(*_args, **_kwargs) -> ProviderSession:
-        model.write_bytes(b"graph-b-longer")
+        model.write_bytes(fake_onnx("graph-b-longer"))
         return ProviderSession(1)
 
     _install_fake_ort(monkeypatch, factory)
@@ -307,10 +308,10 @@ def test_constructor_rejects_files_replaced_while_loading(monkeypatch, labels_fi
         PixaiV1OnnxTagger(model, providers=["CPUExecutionProvider"])
 
 
-def test_explicit_labels_missing_or_corrupt_fail_signature(labels_file: Path) -> None:
+def test_explicit_labels_missing_or_corrupt_fail_signature(fake_onnx, labels_file: Path) -> None:
     """An explicit bad path must not silently fall back to the adjacent tags.json identity."""
     model = labels_file.with_name("model.onnx")
-    model.write_bytes(b"graph")
+    model.write_bytes(fake_onnx("graph"))
     settings = PipelineSettings(tagger=TaggerSettings(name="pixai-v1-onnx", model_path=str(model)))
     current_tagger_sig(settings)
     settings.tagger.labels_json = str(labels_file.with_name("custom.json"))
@@ -420,17 +421,17 @@ def test_single_image_and_batch_paths_produce_identical_tensors(tmp_path: Path) 
     assert np.all(single_tagger.prepared[0][0, :, 0] == -1)
 
 
-def test_tag_stage_aborts_when_model_changed_after_signature(monkeypatch, labels_file: Path) -> None:
+def test_tag_stage_aborts_when_model_changed_after_signature(fake_onnx, monkeypatch, labels_file: Path) -> None:
     """Results must not be written under a signature computed for different model content."""
     from core.pipeline.stages import tag_stage
     from core.pipeline.types import PipelineContext
     from tagger.pixai_v1_identity import settings_content_identity
 
     model = labels_file.with_name("model.onnx")
-    model.write_bytes(b"graph-a")
+    model.write_bytes(fake_onnx("graph-a"))
     settings = PipelineSettings(tagger=TaggerSettings(name="pixai-v1-onnx", model_path=str(model)))
     signature = current_tagger_sig(settings)
-    model.write_bytes(b"graph-b-longer")
+    model.write_bytes(fake_onnx("graph-b-longer"))
     closed: list[int] = []
     loaded = SimpleNamespace(
         content_identity=settings_content_identity(settings.tagger), close=lambda: closed.append(1)
@@ -543,7 +544,7 @@ class _IdentityTagger(_CaptureTagger):
         self.content_identity = identity
 
 
-def test_watcher_refuses_results_from_stale_loaded_model(tmp_path: Path, labels_file: Path) -> None:
+def test_watcher_refuses_results_from_stale_loaded_model(fake_onnx, tmp_path: Path, labels_file: Path) -> None:
     """After update_settings re-signs a replaced model, the held old tagger must not write under the new sig."""
     from core.jobs import JobManager
     from core.pipeline.watcher import ProcessingPipeline
@@ -552,7 +553,7 @@ def test_watcher_refuses_results_from_stale_loaded_model(tmp_path: Path, labels_
     from tagger.pixai_v1_identity import settings_content_identity
 
     model = labels_file.with_name("model.onnx")
-    model.write_bytes(b"graph-a")
+    model.write_bytes(fake_onnx("graph-a"))
     settings = PipelineSettings(tagger=TaggerSettings(name="pixai-v1-onnx", model_path=str(model)))
     tagger = _IdentityTagger(settings_content_identity(settings.tagger))
     manager = JobManager(max_workers=1)
@@ -564,7 +565,7 @@ def test_watcher_refuses_results_from_stale_loaded_model(tmp_path: Path, labels_
         assert pipeline._tag_config.content_identity == tagger.content_identity
         assert run_tag_job(tagger, image, conn, config=pipeline._tag_config) is not None  # type: ignore[arg-type]
 
-        model.write_bytes(b"graph-b-longer")
+        model.write_bytes(fake_onnx("graph-b-longer"))
         pipeline.update_settings(settings)
         assert pipeline._tag_config.tagger_sig != conn.execute("SELECT tagger_sig FROM files").fetchone()[0]
         with pytest.raises(RuntimeError, match="reload the tagger"):
@@ -576,7 +577,7 @@ def test_watcher_refuses_results_from_stale_loaded_model(tmp_path: Path, labels_
         pipeline.shutdown()
 
 
-def test_watcher_job_reports_identity_mismatch_as_error(tmp_path: Path, labels_file: Path) -> None:
+def test_watcher_job_reports_identity_mismatch_as_error(fake_onnx, tmp_path: Path, labels_file: Path) -> None:
     """A stale tagger must fail the watcher job (error, not completed) instead of silently skipping images."""
     import time
 
@@ -605,7 +606,7 @@ def test_watcher_job_reports_identity_mismatch_as_error(tmp_path: Path, labels_f
                 time.sleep(0.01)
 
     model = labels_file.with_name("model.onnx")
-    model.write_bytes(b"graph-a")
+    model.write_bytes(fake_onnx("graph-a"))
     settings = PipelineSettings(tagger=TaggerSettings(name="pixai-v1-onnx", model_path=str(model)))
     db_path = tmp_path / "db.sqlite"
     get_conn(db_path).close()
@@ -622,7 +623,7 @@ def test_watcher_job_reports_identity_mismatch_as_error(tmp_path: Path, labels_f
     for image in images:
         Image.new("RGB", (32, 32)).save(image)
     try:
-        model.write_bytes(b"graph-b-longer")
+        model.write_bytes(fake_onnx("graph-b-longer"))
         pipeline.update_settings(settings)
         pipeline.enqueue_index(images)
         manager.wait(1)
@@ -665,14 +666,14 @@ def test_signed_v1_write_requires_loaded_identity(tmp_path: Path) -> None:
     verify_loaded_identity(_CaptureTagger(), expected, signed=False)  # 署名なし
 
 
-def test_tag_stage_requires_identity_unless_explicit_override(monkeypatch, labels_file: Path) -> None:
+def test_tag_stage_requires_identity_unless_explicit_override(fake_onnx, monkeypatch, labels_file: Path) -> None:
     """Only explicit test overrides may lack an identity; resolver-created taggers are always verified."""
     from core.pipeline.stages import tag_stage
     from core.pipeline.types import PipelineContext
     from tagger.pixai_v1_identity import TaggerIdentityMismatchError
 
     model = labels_file.with_name("model.onnx")
-    model.write_bytes(b"graph")
+    model.write_bytes(fake_onnx("graph"))
     settings = PipelineSettings(tagger=TaggerSettings(name="pixai-v1-onnx", model_path=str(model)))
     ctx = PipelineContext(
         db_path="unused", settings=settings, thresholds={}, max_tags_map={}, tagger_sig=current_tagger_sig(settings)
@@ -682,3 +683,47 @@ def test_tag_stage_requires_identity_unless_explicit_override(monkeypatch, label
         tag_stage._verify_loaded_model(no_identity, ctx)
     ctx.tagger_override = no_identity  # type: ignore[assignment]
     tag_stage._verify_loaded_model(no_identity, ctx)
+
+
+def test_weights_identity_follows_recorded_location_after_rename(fake_onnx, labels_file: Path) -> None:
+    """A renamed graph still loads model.onnx.data, so that file (not <name>.data) must drive the signature."""
+    from tagger.pixai_v1_identity import content_digest, settings_content_identity
+
+    model = labels_file.with_name("pixai-v1.onnx")
+    model.write_bytes(fake_onnx("graph", "model.onnx.data"))
+    weights = labels_file.with_name("model.onnx.data")
+    weights.write_bytes(b"weights-a")
+    settings = PipelineSettings(tagger=TaggerSettings(name="pixai-v1-onnx", model_path=str(model)))
+    assert settings_content_identity(settings.tagger)["weights"] == content_digest(weights)
+    before = current_tagger_sig(settings)
+    weights.write_bytes(b"weights-b")
+    assert current_tagger_sig(settings) != before
+    before = current_tagger_sig(settings)
+    labels_file.with_name("pixai-v1.onnx.data").write_bytes(b"unrelated")
+    assert current_tagger_sig(settings) == before
+
+
+def test_external_data_locations_parsing(fake_onnx, tmp_path: Path) -> None:
+    """Embedded, multiple, escaping and corrupt models are distinguished explicitly."""
+    from tagger.onnx_external_data import external_data_locations
+    from tagger.pixai_v1_identity import external_weights_digest
+
+    model = tmp_path / "model.onnx"
+    model.write_bytes(fake_onnx("embedded"))
+    assert external_data_locations(model) == ()
+    assert external_weights_digest(model) == "embedded"
+
+    model.write_bytes(fake_onnx("one", "a.data") + fake_onnx("two", "b.data"))
+    (tmp_path / "a.data").write_bytes(b"a")
+    assert external_data_locations(model) == ("a.data", "b.data")
+    digests = json.loads(external_weights_digest(model))
+    assert set(digests) == {"a.data", "b.data"} and digests["b.data"].startswith("missing:")
+
+    for location in ["../outside.data", "C:/weights.data", "/abs.data"]:
+        model.write_bytes(fake_onnx("escape", location))
+        with pytest.raises(ValueError, match="inside the model directory"):
+            external_data_locations(model)
+
+    model.write_bytes(b"not an onnx model")
+    with pytest.raises(ValueError):
+        external_weights_digest(model)

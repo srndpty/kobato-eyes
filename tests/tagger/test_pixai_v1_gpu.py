@@ -19,6 +19,9 @@ def test_pixai_v1_cuda_real_model() -> None:
     if not model:
         pytest.skip("Set KE_PIXAI_V1_MODEL to a downloaded model.onnx")
     assert Path(model).is_file()
+    from tagger.onnx_external_data import external_data_locations
+
+    assert external_data_locations(model) == ("model.onnx.data",)
     tagger = PixaiV1OnnxTagger(model, providers=["CUDAExecutionProvider"])
     try:
         assert "CUDAExecutionProvider" in tagger._session.get_providers()

@@ -18,7 +18,8 @@ import numpy as np
 from PIL import Image
 
 from tagger.base import TagCategory
-from tagger.pixai_v1_identity import content_digest
+from tagger.onnx_external_data import external_data_locations
+from tagger.pixai_v1_identity import content_digest, external_weights_digest
 from tagger.pixai_v1_labels import DEFAULT_THRESHOLDS, PREPROCESS_VERSION
 from tagger.pixai_v1_onnx import PixaiV1OnnxTagger
 from tagger.pixai_v1_preprocessing import composite_rgb
@@ -124,11 +125,11 @@ def main() -> int:
     monitor.start()
     import onnxruntime
 
-    weights = args.model.with_name(args.model.name + ".data")
     report = dict(
         model=str(args.model),
         model_sha256=content_digest(args.model),
-        external_weights_sha256=content_digest(weights) if weights.is_file() else None,
+        external_weights_sha256=external_weights_digest(args.model),
+        external_data_locations=list(external_data_locations(args.model)),
         labels_sha256=content_digest(tagger._labels_path),
         preprocess=PREPROCESS_VERSION,
         ort_version=onnxruntime.__version__,
